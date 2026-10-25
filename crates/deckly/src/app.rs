@@ -24,6 +24,10 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 const SAVE_DELAY: Duration = Duration::from_millis(400);
+/// The official window gives the canvas about 58% of the left column.
+const DEFAULT_SPLIT: f32 = 0.58;
+const MIN_CANVAS: f32 = 260.0;
+const MIN_INSPECTOR: f32 = 150.0;
 const TITLE_SIZES: [u8; 12] = [7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,34 +36,57 @@ enum ListTab {
     Plugins,
 }
 
-/// Where the key grid sits in the canvas. Sizes follow the official layout
-/// at 100% and shrink when the canvas is too small.
+/// Where the header and key grid sit in the canvas, following the official
+/// window's resize behavior (docs/clean-room/2026-10-25-main-window.md):
+/// the header stays at the top and widens with the canvas up to a limit, the
+/// grid and page strip are centred below it, and keys grow from 70 to 76 px
+/// as the canvas gets taller.
 struct CanvasGeometry {
     top: f32,
+    /// Key size relative to the 70 px base size.
     scale: f32,
+    key: f32,
+    pitch: f32,
     grid: Rect,
+    header_left: f32,
+    header_right: f32,
 }
 
 impl CanvasGeometry {
+    const HEADER_BOTTOM: f32 = 84.0;
+    const PAGER_GAP: f32 = 44.0;
+    const PAGER_HEIGHT: f32 = 20.0;
+
     fn new(canvas: Rect, columns: u8, rows: u8) -> Self {
-        let span = |n: u8| f32::from(n.saturating_sub(1)) * KEY_PITCH + KEY_SIZE;
-        let (w, h) = (span(columns), span(rows));
-        // 104 px above the grid, 72 px below it for the page strip.
-        let fit_w = (canvas.width() - 40.0) / (w + 48.0);
-        let fit_h = canvas.height() / (h + 104.0 + 72.0);
-        let scale = fit_w.min(fit_h).clamp(0.4, 1.0);
-        let size = vec2(w, h) * scale;
-        let grid = Rect::from_min_size(
-            pos2(
-                canvas.center().x - size.x / 2.0,
-                canvas.top() + 104.0 * scale,
-            ),
-            size,
-        );
+        let t = ((canvas.height() - 428.0) / 102.0).clamp(0.0, 1.0);
+        let (mut key, mut pitch) = (KEY_SIZE + 6.0 * t, KEY_PITCH + 10.0 * t);
+        let span = |n: u8, key: f32, pitch: f32| f32::from(n.saturating_sub(1)) * pitch + key;
+        // Shrink only when the grid does not fit (a dragged splitter).
+        let block = |key: f32, pitch: f32| {
+            span(rows, key, pitch) + Self::PAGER_GAP + Self::PAGER_HEIGHT / 2.0
+        };
+        let room_h = canvas.height() - Self::HEADER_BOTTOM - 8.0;
+        let room_w = canvas.width() - 48.0;
+        let fit = (room_h / block(key, pitch))
+            .min(room_w / span(columns, key, pitch))
+            .clamp(0.3, 1.0);
+        key *= fit;
+        pitch *= fit;
+        let size = vec2(span(columns, key, pitch), span(rows, key, pitch));
+        let region_top = canvas.top() + Self::HEADER_BOTTOM;
+        let free = (canvas.bottom() - region_top - block(key, pitch)).max(0.0);
+        let top = region_top + (free / 2.0 - 7.0).max(4.0);
+        let grid = Rect::from_min_size(pos2(canvas.center().x - size.x / 2.0, top), size);
+        let margin = (canvas.width() * 0.055).max(47.0);
+        let half = ((canvas.width() - 2.0 * margin).min(1192.0) / 2.0).max(size.x / 2.0);
         Self {
             top: canvas.top(),
-            scale,
+            scale: key / KEY_SIZE,
+            key,
+            pitch,
             grid,
+            header_left: canvas.center().x - half,
+            header_right: canvas.center().x + half,
         }
     }
 }
@@ -87,6 +114,8 @@ pub struct App {
     last_edit: Instant,
     settings_open: bool,
     rename: Option<(String, String)>,
+    /// Share of the left column given to the canvas.
+    split: f32,
 }
 
 impl App {
@@ -123,6 +152,7 @@ impl App {
             last_edit: Instant::now(),
             settings_open: false,
             rename: None,
+            split: DEFAULT_SPLIT,
         }
     }
 
@@ -208,9 +238,9 @@ impl App {
         profile: &Profile,
     ) {
         let painter = ui.painter().clone();
-        let left = geo.grid.left() - 24.0 * geo.scale;
-        let title_y = geo.top + 48.0 * geo.scale;
-        let profile_y = geo.top + 72.0 * geo.scale;
+        let left = geo.header_left;
+        let title_y = geo.top + 47.0;
+        let profile_y = geo.top + 72.0;
 
         // Device name.
         let name = device.map_or(profile.model().name, |d| d.model.name);
@@ -263,10 +293,8 @@ impl App {
         self.profile_menu(&resp, device, profile);
 
         // Preferences.
-        let gear = Rect::from_center_size(
-            pos2(geo.grid.right() + 24.0 * geo.scale - 11.0, title_y),
-            Vec2::splat(26.0),
-        );
+        let gear =
+            Rect::from_center_size(pos2(geo.header_right - 13.0, title_y), Vec2::splat(26.0));
         let resp = ui
             .interact(gear, ui.id().with("preferences"), Sense::click())
             .on_hover_text("Preferences");
@@ -529,7 +557,7 @@ impl App {
         self.device_header(ui, &geo, device, profile);
         let painter = ui.painter().clone();
         let s = geo.scale;
-        let key_size = KEY_SIZE * s;
+        let key_size = geo.key;
         let border = (KEY_BORDER_WIDTH * s).max(2.0);
         let outer_radius = CornerRadius::same((11.0 * s) as u8);
         let inner_radius = CornerRadius::same((8.0 * s) as u8);
@@ -553,7 +581,7 @@ impl App {
                 f32::from(index % model.columns),
                 f32::from(index / model.columns),
             );
-            let min = geo.grid.min + vec2(c, r) * KEY_PITCH * s;
+            let min = geo.grid.min + vec2(c, r) * geo.pitch;
             let mut rect = Rect::from_min_size(min, Vec2::splat(key_size));
             let response = ui.interact(rect, ui.id().with(("key", index)), Sense::click_and_drag());
             let config = keys.get(&index).cloned();
@@ -710,7 +738,7 @@ impl App {
         let strip = Rect::from_center_size(
             pos2(
                 geo.grid.center().x,
-                geo.grid.bottom() + 32.0 * geo.scale + HEIGHT / 2.0,
+                geo.grid.bottom() + CanvasGeometry::PAGER_GAP * geo.scale.min(1.0),
             ),
             vec2(width, HEIGHT),
         );
@@ -1221,10 +1249,16 @@ impl eframe::App for App {
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(LIST))
             .show(ui, |ui| self.action_list(ui));
+        // Canvas and inspector share the left column like a splitter: the
+        // inspector keeps its share of the height when the window resizes,
+        // and dragging the divider changes that share.
+        let column = ui.available_rect_before_wrap();
+        let max_inspector = (column.height() - MIN_CANVAS).max(MIN_INSPECTOR);
+        let inspector_h =
+            (column.height() * (1.0 - self.split)).clamp(MIN_INSPECTOR, max_inspector);
         egui::Panel::bottom("inspector")
-            .resizable(true)
-            .default_size(308.0)
-            .min_size(170.0)
+            .resizable(false)
+            .exact_size(inspector_h)
             .frame(egui::Frame::new().fill(CANVAS))
             .show(ui, |ui| self.inspector(ui, &mut profile, page));
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -1232,6 +1266,19 @@ impl eframe::App for App {
                 .rect_filled(ui.max_rect(), CornerRadius::ZERO, CANVAS);
             self.canvas(ui, device.as_ref(), &mut profile, &mut page);
         });
+        let divider_y = column.bottom() - inspector_h;
+        let handle = Rect::from_x_y_ranges(column.x_range(), divider_y - 4.0..=divider_y + 4.0);
+        let resp = ui.interact(handle, ui.id().with("splitter"), Sense::drag());
+        if resp.hovered() || resp.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && column.height() > 0.0
+        {
+            let h = (column.bottom() - pos.y).clamp(MIN_INSPECTOR, max_inspector);
+            self.split = 1.0 - h / column.height();
+        }
 
         // Write the edited copy back. Profile switches made this frame
         // already changed which profile is current; only write if it still

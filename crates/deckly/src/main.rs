@@ -19,7 +19,7 @@ fn main() -> eframe::Result {
             .with_app_id("deckly")
             .with_icon(logo::icon(256))
             .with_inner_size([852.0, 742.0])
-            .with_min_inner_size([700.0, 560.0]),
+            .with_min_inner_size([852.0, 742.0]),
         ..Default::default()
     };
     eframe::run_native(

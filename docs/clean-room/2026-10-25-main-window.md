@@ -101,10 +101,54 @@ compared side by side with the reference screenshot: column widths, header,
 key grid position and pitch, page strip, category and action rows match the
 measurements above.
 
+## Observed: resizing (second session, same day)
+
+Method: the owner's running app window was resized programmatically
+(`MoveWindow`) to 1400 × 950 and 1800 × 1000, captured with `PrintWindow`,
+and restored. A request for 700 × 560 was refused by the window, which stayed
+at 866 × 779.
+
+- The window cannot be made smaller than 866 × 779 including borders, which
+  is a client area of about 852 × 742: the reference screenshot shows the
+  minimum size.
+- The action list keeps its width; only the left column grows.
+- The canvas/inspector divider keeps the same proportion: the canvas takes
+  about 58% of the left column at all three sizes (428 / 736, 530 / 910,
+  559 / 960).
+- The device header stays 47 px below the top. It widens with the canvas
+  (451 px at a 546 px canvas, 969 px at 1088 px, 1191 px at 1488 px) and stays
+  centred: the side margin is about 5.5% of the canvas width with a minimum
+  near 47 px, and the width stops at about 1190 px.
+- The key grid stays horizontally centred. Keys grow from 70 to 76 px and the
+  pitch from 84 to 94 px between the 428 px and 530 px canvas heights, and stay
+  at 76 / 94 px at 559 px.
+- The grid plus page strip block is vertically centred in the space under the
+  header (about 7 px above centre); the page strip sits 42–44 px under the
+  grid.
+
+## Observed: static (REA and import table)
+
+- REA `inspect-artifact` (rea-agents 6.8.0, Evidence
+  `ev_2da2e63dfc3172d5d36c2a29893f61cc92c834ed928694eab4469190b759eeb5`)
+  confirmed the PE identity above. A deep native analysis was not run.
+- The PE import table (read with `pefile`) shows `QSplitter` and
+  `QSplitterHandle` being subclassed (overrides of `resizeEvent`,
+  `sizeHint`, `minimumSizeHint`, handle mouse events) together with
+  `QSplitter::setChildrenCollapsible`, `QSizePolicy::setVerticalStretch` and
+  `setHorizontalStretch`. `QSplitter::setSizes` is not imported.
+
+## Inferred
+
+- The divider is a non-collapsible Qt splitter whose panes share space by
+  stretch factors, which is why the proportion survives window resizes.
+- Key growth looks capped at 76 px; how it behaves on taller canvases than
+  559 px was not captured.
+
 ## Unknowns and next steps
 
 1. Capture screenshots of a selected key with its property inspector for
    Hotkey, Website, Open, Text, Multimedia and Go to Page, and of the device
    and profile drop-down menus, to match their layout.
 2. Capture hover, selected and drag-over states of keys and action rows.
-3. Check how the key grid scales when the window is resized.
+3. Capture a canvas taller than 560 px and a dragged divider to confirm the
+   key-size cap and how a dragged divider behaves on later resizes.
