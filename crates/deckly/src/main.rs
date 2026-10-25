@@ -5,6 +5,7 @@
 
 mod actions;
 mod app;
+mod logo;
 mod os;
 mod render;
 mod runtime;
@@ -16,6 +17,7 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deckly")
             .with_app_id("deckly")
+            .with_icon(logo::icon(256))
             .with_inner_size([852.0, 742.0])
             .with_min_inner_size([700.0, 560.0]),
         ..Default::default()

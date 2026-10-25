@@ -1,3 +1,5 @@
+<img src="assets/logo/deckly.svg" width="96" alt="Deckly logo">
+
 # Deckly
 
 An independent, open-source app for Stream Deck hardware, written in pure Rust.
