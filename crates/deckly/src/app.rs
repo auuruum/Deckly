@@ -28,6 +28,9 @@ const SAVE_DELAY: Duration = Duration::from_millis(400);
 const DEFAULT_SPLIT: f32 = 0.58;
 const MIN_CANVAS: f32 = 260.0;
 const MIN_INSPECTOR: f32 = 150.0;
+const MAX_LIST_WIDTH: f32 = 560.0;
+/// The canvas keeps at least this width when the action list is widened.
+const MIN_CANVAS_WIDTH: f32 = 554.0;
 const TITLE_SIZES: [u8; 12] = [7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +119,8 @@ pub struct App {
     rename: Option<(String, String)>,
     /// Share of the left column given to the canvas.
     split: f32,
+    /// Width of the action list; dragging its left edge changes it.
+    list_width: f32,
 }
 
 impl App {
@@ -153,6 +158,7 @@ impl App {
             settings_open: false,
             rename: None,
             split: DEFAULT_SPLIT,
+            list_width: LIST_WIDTH,
         }
     }
 
@@ -1243,8 +1249,11 @@ impl eframe::App for App {
         let original = profile.clone();
         let original_page = page;
 
+        let window = ui.available_rect_before_wrap();
+        let max_list = (window.width() - MIN_CANVAS_WIDTH).clamp(LIST_WIDTH, MAX_LIST_WIDTH);
+        let list_width = self.list_width.clamp(LIST_WIDTH, max_list);
         egui::Panel::right("actions")
-            .exact_size(LIST_WIDTH)
+            .exact_size(list_width)
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(LIST))
@@ -1278,6 +1287,18 @@ impl eframe::App for App {
         {
             let h = (column.bottom() - pos.y).clamp(MIN_INSPECTOR, max_inspector);
             self.split = 1.0 - h / column.height();
+        }
+        // The action list's left edge works the same way.
+        let edge_x = window.right() - list_width;
+        let handle = Rect::from_x_y_ranges(edge_x - 4.0..=edge_x + 4.0, window.y_range());
+        let resp = ui.interact(handle, ui.id().with("list-edge"), Sense::drag());
+        if resp.hovered() || resp.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            self.list_width = (window.right() - pos.x).clamp(LIST_WIDTH, max_list);
         }
 
         // Write the edited copy back. Profile switches made this frame
