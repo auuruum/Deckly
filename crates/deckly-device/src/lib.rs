@@ -71,6 +71,14 @@ impl DeviceManager {
         manager
     }
 
+    /// A manager that never finds a device, for running the editor without
+    /// touching hardware.
+    pub fn disabled() -> Self {
+        Self {
+            writers: Arc::default(),
+        }
+    }
+
     /// Queues a JPEG image for a key. Images still queued for the same key
     /// are replaced, so a burst of updates sends only the latest one.
     pub fn set_image(&self, handle: Handle, key: u8, jpeg: Vec<u8>) {

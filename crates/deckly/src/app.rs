@@ -1,8 +1,8 @@
 //! The editor window.
 //!
-//! Layout follows the official app: device and profile bar on top, the key
-//! canvas in the middle, the action list on the right and the property
-//! inspector for the selected key at the bottom. The editor works on a copy
+//! Layout follows the official app (docs/clean-room/2026-10-25-main-window.md):
+//! the canvas with the device header, key grid and page strip on the left,
+//! the property inspector under it, and the action list on the right. The editor works on a copy
 //! of the current profile each frame and writes it back when it changed.
 
 use crate::actions::{self, ACTIONS, Category};
@@ -13,8 +13,8 @@ use crate::store;
 use crate::theme::*;
 use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleAlign};
 use eframe::egui::{
-    self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Layout, Rect, RichText, Sense,
-    Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
+    TextureOptions, Ui, Vec2, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use serde_json::json;
@@ -25,6 +25,44 @@ use std::time::{Duration, Instant};
 
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 const TITLE_SIZES: [u8; 12] = [7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListTab {
+    Keys,
+    Plugins,
+}
+
+/// Where the key grid sits in the canvas. Sizes follow the official layout
+/// at 100% and shrink when the canvas is too small.
+struct CanvasGeometry {
+    top: f32,
+    scale: f32,
+    grid: Rect,
+}
+
+impl CanvasGeometry {
+    fn new(canvas: Rect, columns: u8, rows: u8) -> Self {
+        let span = |n: u8| f32::from(n.saturating_sub(1)) * KEY_PITCH + KEY_SIZE;
+        let (w, h) = (span(columns), span(rows));
+        // 104 px above the grid, 72 px below it for the page strip.
+        let fit_w = (canvas.width() - 40.0) / (w + 48.0);
+        let fit_h = canvas.height() / (h + 104.0 + 72.0);
+        let scale = fit_w.min(fit_h).clamp(0.4, 1.0);
+        let size = vec2(w, h) * scale;
+        let grid = Rect::from_min_size(
+            pos2(
+                canvas.center().x - size.x / 2.0,
+                canvas.top() + 104.0 * scale,
+            ),
+            size,
+        );
+        Self {
+            top: canvas.top(),
+            scale,
+            grid,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum DragPayload {
@@ -41,7 +79,8 @@ pub struct App {
     offline_profile: Option<String>,
     selected_key: Option<u8>,
     search: String,
-    collapsed: HashSet<&'static str>,
+    tab: ListTab,
+    expanded: HashSet<&'static str>,
     recording_hotkey: bool,
     clipboard: Option<KeyConfig>,
     dirty: HashSet<String>,
@@ -76,7 +115,8 @@ impl App {
             offline_profile: None,
             selected_key: None,
             search: String::new(),
-            collapsed: HashSet::new(),
+            tab: ListTab::Keys,
+            expanded: HashSet::from([Category::System.label()]),
             recording_hotkey: false,
             clipboard: None,
             dirty: HashSet::new(),
@@ -156,67 +196,98 @@ impl App {
         id
     }
 
-    // ----- top bar -------------------------------------------------------
+    // ----- device header -------------------------------------------------
 
-    fn toolbar(
+    /// Device name and profile name above the key grid, each opening a menu,
+    /// and the preferences button at the right end.
+    fn device_header(
         &mut self,
         ui: &mut Ui,
+        geo: &CanvasGeometry,
         device: Option<&deckly_device::ConnectedDevice>,
-        profile: &mut Profile,
+        profile: &Profile,
     ) {
-        ui.horizontal_centered(|ui| {
-            ui.add_space(12.0);
-            let devices = runtime::lock(&self.state).devices.clone();
-            match device {
-                Some(d) => {
-                    let label = format!("{}  {}", icon::SQUARES_FOUR, d.model.name);
-                    egui::ComboBox::from_id_salt("device")
-                        .selected_text(label)
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            for other in &devices {
-                                let text = format!("{} ({})", other.model.name, other.serial);
-                                if ui
-                                    .selectable_label(other.serial == d.serial, text)
-                                    .clicked()
-                                {
-                                    self.selected_device = Some(other.serial.clone());
-                                    self.selected_key = None;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(format!(
-                            "Serial {}\nFirmware {}",
-                            d.serial,
-                            d.firmware.as_deref().unwrap_or("unknown")
-                        ));
-                }
-                None => {
-                    ui.label(
-                        RichText::new(format!("{}  No device connected", icon::PLUGS))
-                            .color(TEXT_DIM),
-                    );
+        let painter = ui.painter().clone();
+        let left = geo.grid.left() - 24.0 * geo.scale;
+        let title_y = geo.top + 48.0 * geo.scale;
+        let profile_y = geo.top + 72.0 * geo.scale;
+
+        // Device name.
+        let name = device.map_or(profile.model().name, |d| d.model.name);
+        let title = format!("{name} {}", icon::CARET_DOWN);
+        let galley = painter.layout_no_wrap(title, bold(17.0), TEXT);
+        let rect = Rect::from_min_size(pos2(left, title_y - galley.size().y / 2.0), galley.size());
+        painter.galley(rect.min, galley, TEXT);
+        let resp = ui.interact(rect, ui.id().with("device-menu"), Sense::click());
+        if device.is_none() {
+            painter.text(
+                pos2(rect.right() + 10.0, title_y),
+                Align2::LEFT_CENTER,
+                format!("{}  not connected", icon::PLUGS),
+                font(12.0),
+                TEXT_FAINT,
+            );
+        }
+        let devices = runtime::lock(&self.state).devices.clone();
+        egui::Popup::menu(&resp).show(|ui| {
+            if devices.is_empty() {
+                ui.label(RichText::new("No device connected").color(TEXT_DIM));
+            }
+            for other in &devices {
+                let current = device.is_some_and(|d| d.serial == other.serial);
+                let text = format!("{}  ({})", other.model.name, other.serial);
+                if ui.selectable_label(current, text).clicked() {
+                    self.selected_device = Some(other.serial.clone());
+                    self.selected_key = None;
                 }
             }
-            ui.add_space(8.0);
-            self.profile_menu(ui, device, profile);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(12.0);
-                if ui
-                    .add(egui::Button::new(RichText::new(icon::GEAR).size(18.0)).frame(false))
-                    .on_hover_text("Preferences")
-                    .clicked()
-                {
-                    self.settings_open = true;
-                }
-            });
+            if let Some(d) = device {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!(
+                        "Firmware {}",
+                        d.firmware.as_deref().unwrap_or("unknown")
+                    ))
+                    .color(TEXT_DIM),
+                );
+            }
         });
+
+        // Profile name.
+        let text = format!("{} {}", profile.name, icon::CARET_DOWN);
+        let galley = painter.layout_no_wrap(text, font(13.0), TEXT);
+        let rect =
+            Rect::from_min_size(pos2(left, profile_y - galley.size().y / 2.0), galley.size());
+        painter.galley(rect.min, galley, TEXT);
+        let resp = ui.interact(rect, ui.id().with("profile-menu"), Sense::click());
+        self.profile_menu(&resp, device, profile);
+
+        // Preferences.
+        let gear = Rect::from_center_size(
+            pos2(geo.grid.right() + 24.0 * geo.scale - 11.0, title_y),
+            Vec2::splat(26.0),
+        );
+        let resp = ui
+            .interact(gear, ui.id().with("preferences"), Sense::click())
+            .on_hover_text("Preferences");
+        if resp.hovered() {
+            painter.circle_filled(gear.center(), 13.0, PAGER);
+        }
+        painter.text(
+            gear.center(),
+            Align2::CENTER_CENTER,
+            icon::GEAR,
+            font(19.0),
+            TEXT,
+        );
+        if resp.clicked() {
+            self.settings_open = true;
+        }
     }
 
     fn profile_menu(
         &mut self,
-        ui: &mut Ui,
+        button: &egui::Response,
         device: Option<&deckly_device::ConnectedDevice>,
         profile: &Profile,
     ) {
@@ -227,17 +298,13 @@ impl App {
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
         let mut pick: Option<String> = None;
-        egui::ComboBox::from_id_salt("profile")
-            .selected_text(format!("{}  {}", icon::STACK, profile.name))
-            .width(220.0)
-            .show_ui(ui, |ui| {
-                for (id, name) in &choices {
-                    if ui.selectable_label(*id == profile.id, name).clicked() {
-                        pick = Some(id.clone());
-                    }
+        egui::Popup::menu(button).width(220.0).show(|ui| {
+            for (id, name) in &choices {
+                if ui.selectable_label(*id == profile.id, name).clicked() {
+                    pick = Some(id.clone());
                 }
-            });
-        ui.menu_button(RichText::new(icon::DOTS_THREE).size(18.0), |ui| {
+            }
+            ui.separator();
             if ui.button(format!("{}  New Profile", icon::PLUS)).clicked() {
                 let p = Profile::new("New Profile", profile.device);
                 pick = Some(p.id.clone());
@@ -247,19 +314,16 @@ impl App {
                     s.notify(format!("Cannot save profile: {e}"));
                 }
                 s.profiles.push(p);
-                ui.close();
             }
             if ui
                 .button(format!("{}  Rename", icon::PENCIL_SIMPLE))
                 .clicked()
             {
                 self.rename = Some((profile.id.clone(), profile.name.clone()));
-                ui.close();
             }
-            let can_delete = choices.len() > 1;
             if ui
                 .add_enabled(
-                    can_delete,
+                    choices.len() > 1,
                     egui::Button::new(format!("{}  Delete", icon::TRASH)),
                 )
                 .clicked()
@@ -273,7 +337,6 @@ impl App {
                     .iter()
                     .find(|(id, _)| *id != profile.id)
                     .map(|(id, _)| id.clone());
-                ui.close();
             }
         });
         if let Some(id) = pick {
@@ -300,22 +363,98 @@ impl App {
     // ----- action list ---------------------------------------------------
 
     fn action_list(&mut self, ui: &mut Ui) {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text(format!("{}  Search", icon::MAGNIFYING_GLASS))
-                    .desired_width(ui.available_width() - 10.0),
+        let full = ui.max_rect();
+        ui.painter().rect_filled(full, CornerRadius::ZERO, LIST);
+        let header = Rect::from_min_size(full.min, vec2(full.width(), 80.0));
+        ui.painter()
+            .rect_filled(header, CornerRadius::ZERO, LIST_HEADER);
+
+        // Search field.
+        let search = Rect::from_min_size(
+            pos2(header.left() + 17.0, header.top() + 12.0),
+            vec2(header.width() - 34.0, 25.0),
+        );
+        ui.painter()
+            .rect_filled(search, CornerRadius::same(4), SEARCH);
+        ui.painter().text(
+            pos2(search.left() + 14.0, search.center().y),
+            Align2::CENTER_CENTER,
+            icon::MAGNIFYING_GLASS,
+            font(13.0),
+            TEXT_FAINT,
+        );
+        let edit = Rect::from_min_max(
+            pos2(search.left() + 26.0, search.top() + 4.0),
+            pos2(search.right() - 6.0, search.bottom() - 2.0),
+        );
+        ui.put(
+            edit,
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text(RichText::new("Search").color(TEXT_FAINT))
+                .frame(egui::Frame::NONE)
+                .font(font(13.0)),
+        );
+
+        // Keys / Plugins tabs.
+        let tabs = Rect::from_min_size(
+            pos2(header.left() + 17.0, header.top() + 49.0),
+            vec2(header.width() - 34.0, 24.0),
+        );
+        let half = tabs.width() / 2.0;
+        for (i, (tab, label)) in [
+            (ListTab::Keys, format!("{}  Keys", icon::SQUARE)),
+            (ListTab::Plugins, "Plugins".to_owned()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = Rect::from_min_size(
+                pos2(tabs.left() + half * i as f32, tabs.top()),
+                vec2(half, tabs.height()),
             );
+            let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
+            let selected = self.tab == tab;
+            if selected {
+                ui.painter()
+                    .rect_filled(r, CornerRadius::same(12), TAB_SELECTED);
+            }
+            let color = if selected || resp.hovered() {
+                TEXT
+            } else {
+                TEXT_DIM
+            };
+            ui.painter()
+                .text(r.center(), Align2::CENTER_CENTER, label, font(13.0), color);
+            if resp.clicked() {
+                self.tab = tab;
+            }
+        }
+
+        let body = Rect::from_min_max(pos2(full.left(), header.bottom() + 2.0), full.max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| match self.tab {
+            ListTab::Keys => self.key_actions(ui),
+            ListTab::Plugins => {
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(icon::PUZZLE_PIECE)
+                            .size(28.0)
+                            .color(TEXT_FAINT),
+                    );
+                    ui.label(RichText::new("Plugins are not supported yet.").color(TEXT_DIM));
+                });
+            }
         });
-        ui.add_space(6.0);
+    }
+
+    fn key_actions(&mut self, ui: &mut Ui) {
         let query = self.search.trim().to_lowercase();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 for category in Category::ALL {
-                    let items: Vec<&actions::ActionDef> = ACTIONS
+                    let items: Vec<&'static actions::ActionDef> = ACTIONS
                         .iter()
                         .filter(|a| a.category == category)
                         .filter(|a| query.is_empty() || a.name.to_lowercase().contains(&query))
@@ -323,35 +462,55 @@ impl App {
                     if items.is_empty() {
                         continue;
                     }
-                    let collapsed = query.is_empty() && self.collapsed.contains(category.label());
-                    let caret = if collapsed {
-                        icon::CARET_RIGHT
-                    } else {
-                        icon::CARET_DOWN
-                    };
-                    let header = ui.add(
-                        egui::Button::new(
-                            RichText::new(format!(
-                                "{caret}  {}  {}",
-                                category.icon(),
-                                category.label()
-                            ))
-                            .color(TEXT_DIM)
-                            .size(13.0),
-                        )
-                        .frame(false)
-                        .min_size(vec2(ui.available_width(), 28.0)),
+                    // Collapsed categories open while searching.
+                    let open = !query.is_empty() || self.expanded.contains(category.label());
+                    let (rect, resp) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), CATEGORY_ROW),
+                        Sense::click(),
                     );
-                    if header.clicked() && !self.collapsed.remove(category.label()) {
-                        self.collapsed.insert(category.label());
+                    let fill = if resp.hovered() {
+                        LIST_HOVER
+                    } else {
+                        LIST_HEADER
+                    };
+                    let p = ui.painter();
+                    p.rect_filled(rect, CornerRadius::ZERO, fill);
+                    let y = rect.center().y;
+                    let chevron = if open {
+                        icon::CARET_DOWN
+                    } else {
+                        icon::CARET_RIGHT
+                    };
+                    p.text(
+                        pos2(rect.left() + 23.0, y),
+                        Align2::CENTER_CENTER,
+                        chevron,
+                        font(13.0),
+                        CHEVRON,
+                    );
+                    p.text(
+                        pos2(rect.left() + 55.0, y),
+                        Align2::CENTER_CENTER,
+                        category.icon(),
+                        font(22.0),
+                        TEXT,
+                    );
+                    p.text(
+                        pos2(rect.left() + 76.0, y),
+                        Align2::LEFT_CENTER,
+                        category.label(),
+                        bold(13.0),
+                        TEXT,
+                    );
+                    if resp.clicked() && !self.expanded.remove(category.label()) {
+                        self.expanded.insert(category.label());
                     }
-                    if collapsed {
-                        continue;
+                    if open {
+                        for action in items {
+                            action_row(ui, action);
+                        }
                     }
-                    for action in items {
-                        action_row(ui, action);
-                    }
-                    ui.add_space(4.0);
+                    ui.add_space(2.0);
                 }
             });
     }
@@ -366,34 +525,16 @@ impl App {
         page: &mut usize,
     ) {
         let model = profile.model();
-        let (cols, rows) = (f32::from(model.columns), f32::from(model.rows));
-        let avail = ui.available_rect_before_wrap();
-        let pager_h = 44.0;
-        let pad = 22.0;
-        let gap_ratio = 0.22;
-        let fit_w = (avail.width() - 80.0 - 2.0 * pad) / (cols + (cols - 1.0) * gap_ratio);
-        let fit_h =
-            (avail.height() - pager_h - 60.0 - 2.0 * pad) / (rows + (rows - 1.0) * gap_ratio);
-        let key = fit_w.min(fit_h).clamp(36.0, 110.0);
-        let gap = key * gap_ratio;
-        let grid = vec2(
-            cols * key + (cols - 1.0) * gap,
-            rows * key + (rows - 1.0) * gap,
-        );
-        let frame_size = grid + Vec2::splat(2.0 * pad);
-        let center = avail.center() - vec2(0.0, pager_h / 2.0);
-        let frame = Rect::from_center_size(center, frame_size);
+        let geo = CanvasGeometry::new(ui.max_rect(), model.columns, model.rows);
+        self.device_header(ui, &geo, device, profile);
         let painter = ui.painter().clone();
-        painter.rect_filled(frame, CornerRadius::same(18), DEVICE);
-        painter.rect_stroke(
-            frame,
-            CornerRadius::same(18),
-            Stroke::new(1.0, DEVICE_EDGE),
-            StrokeKind::Inside,
-        );
-
+        let s = geo.scale;
+        let key_size = KEY_SIZE * s;
+        let border = (KEY_BORDER_WIDTH * s).max(2.0);
+        let outer_radius = CornerRadius::same((11.0 * s) as u8);
+        let inner_radius = CornerRadius::same((8.0 * s) as u8);
         let ppp = ui.ctx().pixels_per_point();
-        let tex_px = (key * ppp).round() as u32;
+        let tex_px = ((key_size - 2.0 * border) * ppp).round() as u32;
         let pressed: HashSet<u8> = match device {
             Some(d) => runtime::lock(&self.state)
                 .pressed
@@ -412,33 +553,40 @@ impl App {
                 f32::from(index % model.columns),
                 f32::from(index / model.columns),
             );
-            let min = frame.min + Vec2::splat(pad) + vec2(c * (key + gap), r * (key + gap));
-            let mut rect = Rect::from_min_size(min, Vec2::splat(key));
+            let min = geo.grid.min + vec2(c, r) * KEY_PITCH * s;
+            let mut rect = Rect::from_min_size(min, Vec2::splat(key_size));
             let response = ui.interact(rect, ui.id().with(("key", index)), Sense::click_and_drag());
             let config = keys.get(&index).cloned();
             if config.is_some() {
                 response.dnd_set_drag_payload(DragPayload::Key(index));
             }
             if pressed.contains(&index) {
-                rect = rect.shrink(key * 0.04);
+                rect = rect.shrink(key_size * 0.04);
             }
-            let tex = self.texture(ui.ctx(), config.as_ref(), tex_px);
-            let radius = CornerRadius::same((key * 0.14) as u8);
-            painter.add(
-                egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
-                    .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
-            );
             let hovered_drop = response.dnd_hover_payload::<DragPayload>().is_some();
-            let stroke = if self.selected_key == Some(index) {
-                Stroke::new(2.0, ACCENT)
-            } else if hovered_drop {
-                Stroke::new(2.0, ACCENT.gamma_multiply(0.6))
+            let border_color = if hovered_drop {
+                KEY_DROP
+            } else if self.selected_key == Some(index) {
+                KEY_SELECTED
             } else if response.hovered() {
-                Stroke::new(1.0, TEXT_FAINT)
+                TEXT_DIM
             } else {
-                Stroke::new(1.0, KEY_EDGE)
+                KEY_BORDER
             };
-            painter.rect_stroke(rect, radius, stroke, StrokeKind::Outside);
+            painter.rect_filled(rect, outer_radius, border_color);
+            let inner = rect.shrink(border);
+            match &config {
+                Some(key) => {
+                    let tex = self.texture(ui.ctx(), Some(key), tex_px);
+                    painter.add(
+                        egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
+                            .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
+                    );
+                }
+                None => {
+                    painter.rect_filled(inner, inner_radius, KEY_EMPTY);
+                }
+            }
 
             if let Some(payload) = response.dnd_release_payload::<DragPayload>() {
                 match *payload {
@@ -518,87 +666,7 @@ impl App {
             self.mark_dirty(&profile.id);
         }
 
-        // Pager under the device.
-        let pager = Rect::from_center_size(
-            pos2(frame.center().x, frame.bottom() + pager_h / 2.0 + 10.0),
-            vec2(frame.width().max(260.0), pager_h),
-        );
-        let pages = profile.pages.len();
-        let mut new_page = *page;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(pager), |ui| {
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let inner = 9.0 * 22.0 + 90.0;
-                ui.add_space(((ui.available_width() - inner) / 2.0).max(0.0));
-                if ui
-                    .add_enabled(pages > 1, egui::Button::new(icon::CARET_LEFT).frame(false))
-                    .clicked()
-                {
-                    new_page = page.checked_sub(1).unwrap_or(pages - 1);
-                }
-                for i in 0..pages.min(9) {
-                    let (dot, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
-                    let color = if i == *page { TEXT } else { TEXT_FAINT };
-                    ui.painter().circle_filled(
-                        dot.center(),
-                        if i == *page { 4.5 } else { 3.5 },
-                        color,
-                    );
-                    if resp.on_hover_text(format!("Page {}", i + 1)).clicked() {
-                        new_page = i;
-                    }
-                }
-                if pages > 9 {
-                    ui.label(RichText::new(format!("{}/{}", *page + 1, pages)).color(TEXT_DIM));
-                }
-                if ui
-                    .add_enabled(pages > 1, egui::Button::new(icon::CARET_RIGHT).frame(false))
-                    .clicked()
-                {
-                    new_page = (*page + 1) % pages;
-                }
-                ui.add_space(10.0);
-                if ui
-                    .add_enabled(
-                        pages < deckly_core::profile::MAX_PAGES,
-                        egui::Button::new(icon::PLUS).frame(false),
-                    )
-                    .on_hover_text("Add page")
-                    .clicked()
-                {
-                    profile.pages.insert(*page + 1, Page::new());
-                    new_page = *page + 1;
-                    self.mark_dirty(&profile.id);
-                }
-                if ui
-                    .add_enabled(pages > 1, egui::Button::new(icon::TRASH).frame(false))
-                    .on_hover_text("Delete this page")
-                    .clicked()
-                {
-                    profile.pages.remove(*page);
-                    new_page = page.saturating_sub(1);
-                    self.mark_dirty(&profile.id);
-                }
-            });
-        });
-        if new_page != *page {
-            *page = new_page;
-            self.selected_key = None;
-            self.recording_hotkey = false;
-        }
-
-        if device.is_none() {
-            painter.text(
-                pos2(frame.center().x, frame.top() - 22.0),
-                Align2::CENTER_CENTER,
-                format!(
-                    "{}  Editing offline: connect a {} to use this profile",
-                    icon::PLUGS,
-                    model.name
-                ),
-                FontId::proportional(13.0),
-                TEXT_DIM,
-            );
-        }
+        self.pager(ui, &geo, profile, page);
 
         // Preview of what is being dragged.
         if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(ui.ctx())
@@ -612,15 +680,121 @@ impl App {
             };
             let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-preview"));
             let p = ui.ctx().layer_painter(layer);
-            let r = Rect::from_center_size(pos + vec2(18.0, 18.0), Vec2::splat(36.0));
-            p.rect_filled(r, CornerRadius::same(7), ICON_TILE);
-            p.text(
+            let r = Rect::from_center_size(pos + vec2(20.0, 20.0), Vec2::splat(40.0));
+            p.rect_filled(r, CornerRadius::same(8), KEY_BORDER);
+            p.rect_filled(r.shrink(2.0), CornerRadius::same(6), Color32::BLACK);
+            p.text(r.center(), Align2::CENTER_CENTER, glyph, font(20.0), TEXT);
+        }
+    }
+
+    /// Page chips under the grid: one rounded strip with the page numbers
+    /// and a "+" button. Right-click a page to delete it.
+    fn pager(
+        &mut self,
+        ui: &mut Ui,
+        geo: &CanvasGeometry,
+        profile: &mut Profile,
+        page: &mut usize,
+    ) {
+        const CHIP: f32 = 30.0;
+        const HEIGHT: f32 = 20.0;
+        const WINDOW: usize = 10;
+        let pages = profile.pages.len();
+        // Show at most WINDOW numbers, keeping the current page visible.
+        let first = page
+            .saturating_sub(WINDOW / 2)
+            .min(pages.saturating_sub(WINDOW));
+        let shown = first..pages.min(first + WINDOW);
+        let can_add = pages < deckly_core::profile::MAX_PAGES;
+        let width = shown.len() as f32 * CHIP + if can_add { 26.0 } else { 0.0 } + 4.0;
+        let strip = Rect::from_center_size(
+            pos2(
+                geo.grid.center().x,
+                geo.grid.bottom() + 32.0 * geo.scale + HEIGHT / 2.0,
+            ),
+            vec2(width, HEIGHT),
+        );
+        let painter = ui.painter().clone();
+        painter.rect_filled(strip, CornerRadius::same(10), PAGER);
+        let mut new_page = *page;
+        let mut delete = None;
+        for (slot, i) in shown.enumerate() {
+            let r = Rect::from_min_size(
+                pos2(strip.left() + 2.0 + slot as f32 * CHIP, strip.top()),
+                vec2(CHIP, HEIGHT),
+            );
+            let resp = ui.interact(r, ui.id().with(("page", i)), Sense::click());
+            let current = i == *page;
+            if current {
+                painter.rect_filled(r.shrink2(vec2(1.0, 1.0)), CornerRadius::same(9), PAGER_CHIP);
+            }
+            let color = if current {
+                PAGER_CHIP_TEXT
+            } else if resp.hovered() {
+                TEXT
+            } else {
+                TEXT_DIM
+            };
+            painter.text(
                 r.center(),
                 Align2::CENTER_CENTER,
-                glyph,
-                FontId::proportional(20.0),
-                TEXT,
+                (i + 1).to_string(),
+                font(12.0),
+                color,
             );
+            if resp.clicked() {
+                new_page = i;
+            }
+            resp.context_menu(|ui| {
+                if ui
+                    .add_enabled(
+                        pages > 1,
+                        egui::Button::new(format!("{}  Delete Page", icon::TRASH)),
+                    )
+                    .clicked()
+                {
+                    delete = Some(i);
+                    ui.close();
+                }
+            });
+        }
+        if can_add {
+            let r = Rect::from_min_max(
+                pos2(strip.right() - 28.0, strip.top()),
+                strip.right_bottom(),
+            );
+            let resp = ui
+                .interact(r, ui.id().with("add-page"), Sense::click())
+                .on_hover_text("Add page");
+            let color = if resp.hovered() { TEXT } else { TEXT_DIM };
+            painter.text(
+                r.center(),
+                Align2::CENTER_CENTER,
+                icon::PLUS,
+                font(13.0),
+                color,
+            );
+            if resp.clicked() {
+                profile.pages.insert(*page + 1, Page::new());
+                new_page = *page + 1;
+                self.mark_dirty(&profile.id);
+            }
+        }
+        if let Some(i) = delete
+            && profile.pages.len() > 1
+        {
+            profile.pages.remove(i);
+            new_page = if new_page > i || new_page >= profile.pages.len() {
+                new_page.saturating_sub(1)
+            } else {
+                new_page
+            };
+            self.mark_dirty(&profile.id);
+        }
+        if new_page != *page || delete.is_some() {
+            *page = new_page.min(profile.pages.len().saturating_sub(1));
+            self.selected_key = None;
+            self.recording_hotkey = false;
         }
     }
 
@@ -635,10 +809,7 @@ impl App {
             .collect();
         let page_count = profile.pages.len();
         let Some(index) = self.selected_key else {
-            hint(
-                ui,
-                "Select a key to edit it, or drag an action from the list onto a key.",
-            );
+            hint(ui, "Select a key to edit its action.");
             return;
         };
         let Some(key) = profile
@@ -646,10 +817,7 @@ impl App {
             .get_mut(page)
             .and_then(|p| p.keys.get_mut(&index))
         else {
-            hint(
-                ui,
-                "This key is empty. Drag an action from the list onto it.",
-            );
+            hint(ui, "Drag an action from the list onto this key.");
             return;
         };
         let before = key.clone();
@@ -658,12 +826,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             let glyph = def.map_or(icon::PUZZLE_PIECE, |d| d.icon);
-            ui.label(RichText::new(glyph).size(18.0).color(ACCENT));
-            ui.label(
-                RichText::new(def.map_or(key.action.as_str(), |d| d.name))
-                    .size(15.0)
-                    .strong(),
-            );
+            ui.label(RichText::new(glyph).size(18.0).color(ITEM_ICON));
+            ui.label(RichText::new(def.map_or(key.action.as_str(), |d| d.name)).font(bold(14.0)));
             if let Some(d) = def {
                 ui.label(RichText::new(d.tooltip).color(TEXT_DIM));
             }
@@ -1023,7 +1187,7 @@ impl App {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(TOOLBAR)
+                    .fill(POPUP)
                     .stroke(Stroke::new(1.0, WARNING.gamma_multiply(0.6)))
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(14, 8))
@@ -1051,20 +1215,17 @@ impl eframe::App for App {
         let original = profile.clone();
         let original_page = page;
 
-        egui::Panel::top("toolbar")
-            .exact_size(52.0)
-            .frame(egui::Frame::new().fill(TOOLBAR))
-            .show(ui, |ui| self.toolbar(ui, device.as_ref(), &mut profile));
         egui::Panel::right("actions")
-            .exact_size(290.0)
+            .exact_size(LIST_WIDTH)
             .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL))
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(LIST))
             .show(ui, |ui| self.action_list(ui));
         egui::Panel::bottom("inspector")
             .resizable(true)
-            .default_size(250.0)
+            .default_size(308.0)
             .min_size(170.0)
-            .frame(egui::Frame::new().fill(INSPECTOR))
+            .frame(egui::Frame::new().fill(CANVAS))
             .show(ui, |ui| self.inspector(ui, &mut profile, page));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             ui.painter()
@@ -1105,33 +1266,26 @@ impl eframe::App for App {
 fn action_row(ui: &mut Ui, action: &'static actions::ActionDef) {
     let id = egui::Id::new(("action", action.uuid));
     ui.dnd_drag_source(id, DragPayload::Action(action.uuid), |ui| {
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), ACTION_ROW), Sense::hover());
+        let p = ui.painter();
         if resp.hovered() {
-            ui.painter().rect_filled(
-                rect.shrink2(vec2(6.0, 1.0)),
-                CornerRadius::same(5),
-                ROW_HOVER,
-            );
+            p.rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
         }
-        let tile = Rect::from_min_size(
-            pos2(rect.left() + 18.0, rect.center().y - 13.0),
-            Vec2::splat(26.0),
-        );
-        ui.painter()
-            .rect_filled(tile, CornerRadius::same(5), ICON_TILE);
-        ui.painter().text(
-            tile.center(),
+        p.text(
+            pos2(rect.left() + 55.0, rect.center().y),
             Align2::CENTER_CENTER,
             action.icon,
-            FontId::proportional(16.0),
-            TEXT,
+            font(19.0),
+            ITEM_ICON,
         );
-        ui.painter().text(
-            pos2(tile.right() + 12.0, rect.center().y),
+        let color = if resp.hovered() { TEXT } else { TEXT_DIM };
+        p.text(
+            pos2(rect.left() + 76.0, rect.center().y),
             Align2::LEFT_CENTER,
             action.name,
-            FontId::proportional(14.0),
-            TEXT,
+            font(13.0),
+            color,
         );
     })
     .response
@@ -1140,7 +1294,7 @@ fn action_row(ui: &mut Ui, action: &'static actions::ActionDef) {
 
 fn hint(ui: &mut Ui, text: &str) {
     ui.centered_and_justified(|ui| {
-        ui.label(RichText::new(text).color(TEXT_FAINT));
+        ui.label(RichText::new(text).font(bold(12.0)).color(TEXT_DIM));
     });
 }
 

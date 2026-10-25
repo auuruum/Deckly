@@ -16,8 +16,8 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deckly")
             .with_app_id("deckly")
-            .with_inner_size([1100.0, 740.0])
-            .with_min_inner_size([860.0, 600.0]),
+            .with_inner_size([852.0, 742.0])
+            .with_min_inner_size([700.0, 560.0]),
         ..Default::default()
     };
     eframe::run_native(

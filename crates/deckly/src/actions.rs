@@ -28,7 +28,7 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 3] = [Category::System, Category::Navigation, Category::Device];
+    pub const ALL: [Category; 3] = [Category::Navigation, Category::Device, Category::System];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -40,9 +40,9 @@ impl Category {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Category::System => icon::APP_WINDOW,
-            Category::Navigation => icon::SQUARES_FOUR,
-            Category::Device => icon::SUN,
+            Category::System => icon::DESKTOP_TOWER,
+            Category::Navigation => icon::ARROWS_OUT_CARDINAL,
+            Category::Device => icon::SQUARES_FOUR,
         }
     }
 }
@@ -58,6 +58,14 @@ pub struct ActionDef {
 
 pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
+        uuid: WEBSITE,
+        name: "Website",
+        category: Category::System,
+        icon: icon::GLOBE,
+        tooltip: "Open a URL in the default browser",
+        defaults: || json!({ "url": "https://" }),
+    },
+    ActionDef {
         uuid: HOTKEY,
         name: "Hotkey",
         category: Category::System,
@@ -72,14 +80,6 @@ pub const ACTIONS: &[ActionDef] = &[
         icon: icon::ROCKET_LAUNCH,
         tooltip: "Open an application or file",
         defaults: || json!({ "path": "" }),
-    },
-    ActionDef {
-        uuid: WEBSITE,
-        name: "Website",
-        category: Category::System,
-        icon: icon::GLOBE,
-        tooltip: "Open a URL in the default browser",
-        defaults: || json!({ "url": "https://" }),
     },
     ActionDef {
         uuid: TEXT,

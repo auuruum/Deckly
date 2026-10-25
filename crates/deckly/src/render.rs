@@ -13,7 +13,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 const EMPTY: Rgba<u8> = Rgba([0, 0, 0, 255]);
-const ICON_BACKGROUND: Rgba<u8> = Rgba([0x22, 0x23, 0x27, 255]);
+const ICON_BACKGROUND: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_COLOR: [u8; 3] = [0xE6, 0xE7, 0xEA];
 const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;

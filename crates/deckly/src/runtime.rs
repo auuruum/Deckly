@@ -124,9 +124,15 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
     let device_tx = tx.clone();
     let action_tx = tx.clone();
     let run = move || {
-        let devices = DeviceManager::start(Arc::new(move |e| {
-            let _ = device_tx.send(Msg::Device(e));
-        }));
+        // DECKLY_NO_DEVICES=1 runs the editor without opening any device,
+        // e.g. while the official app owns it.
+        let devices = if std::env::var_os("DECKLY_NO_DEVICES").is_some() {
+            DeviceManager::disabled()
+        } else {
+            DeviceManager::start(Arc::new(move |e| {
+                let _ = device_tx.send(Msg::Device(e));
+            }))
+        };
         let actions = start_action_worker(action_tx);
         let mut renderer = Renderer::new();
         let mut sent: HashMap<Handle, Vec<Option<u64>>> = HashMap::new();
