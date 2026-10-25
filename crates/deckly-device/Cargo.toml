@@ -1,0 +1,16 @@
+[package]
+name = "deckly-device"
+description = "Stream Deck HID protocol and device transport for Deckly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+deckly-core.workspace = true
+# Pure-Rust HID access on Windows (Win32), Linux (hidraw) and macOS (IOKit).
+async-hid = "0.5.3"
+futures-lite = "2.6.1"
+
+[lints]
+workspace = true

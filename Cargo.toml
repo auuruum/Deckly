@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/deckly", "crates/deckly-core", "crates/deckly-device"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.dependencies]
+deckly-core = { path = "crates/deckly-core" }
+deckly-device = { path = "crates/deckly-device" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"

@@ -1,0 +1,31 @@
+[package]
+name = "deckly"
+description = "Unofficial, independent app for Stream Deck hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+deckly-core.workspace = true
+deckly-device.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"] }
+egui-phosphor = "0.14.0"
+# Key image rendering: decode custom PNG/JPEG images, encode device JPEGs.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+ab_glyph = "0.2.32"
+# Native file dialogs (Win32, xdg-portal, AppKit); no GTK.
+rfd = "0.17.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true
