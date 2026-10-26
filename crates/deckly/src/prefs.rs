@@ -549,12 +549,25 @@ impl Preferences {
         let details = at(o, 262.0, 55.0, 458.0, 414.0);
         frame(ui, details);
 
-        let profiles: Vec<(String, String, usize)> = runtime::lock(env.state)
-            .profiles
-            .iter()
-            .filter(|p| p.device == env.kind)
-            .map(|p| (p.id.clone(), p.name.clone(), p.pages.len()))
-            .collect();
+        let (profiles, default) = {
+            let s = runtime::lock(env.state);
+            let profiles: Vec<(String, String, usize)> = s
+                .profiles
+                .iter()
+                .filter(|p| p.device == env.kind)
+                .map(|p| (p.id.clone(), p.name.clone(), p.pages.len()))
+                .collect();
+            // The connected device's default profile, marked in the list.
+            let default = env
+                .device
+                .and_then(|serial| {
+                    s.devices
+                        .iter()
+                        .find(|d| d.serial == serial && d.model.kind == env.kind)
+                })
+                .and_then(|d| s.settings.device(&d.serial).default_profile);
+            (profiles, default)
+        };
         if !profiles
             .iter()
             .any(|(id, ..)| Some(id) == self.profile.as_ref())
@@ -562,11 +575,13 @@ impl Preferences {
             self.profile = profiles.first().map(|(id, ..)| id.clone());
         }
 
-        // The list; double-click a name or press F2 to rename it. Enter or a
-        // click elsewhere keeps the new name, Escape drops it.
+        // The list; double-click a name, press F2 or right-click and pick
+        // Rename to rename it. Enter or a click elsewhere keeps the new name,
+        // Escape drops it.
         let mut commit = false;
         let mut cancel = false;
         let mut start: Option<(String, String)> = None;
+        let can_delete = profiles.len() > 1;
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
@@ -614,7 +629,20 @@ impl Preferences {
                                 }
                             }
                             _ => {
-                                ui.painter().text(
+                                let mut name_right = rect.right() - 12.0;
+                                if default.as_ref() == Some(id) {
+                                    let tag = ui.painter().text(
+                                        pos2(rect.right() - 12.0, rect.center().y),
+                                        Align2::RIGHT_CENTER,
+                                        "Default",
+                                        font(12.0),
+                                        if selected { TEXT } else { TEXT_DIM },
+                                    );
+                                    name_right = tag.left() - 8.0;
+                                }
+                                let clip =
+                                    Rect::from_x_y_ranges(rect.left()..=name_right, rect.y_range());
+                                ui.painter().with_clip_rect(clip).text(
                                     pos2(rect.left() + 16.0, rect.center().y),
                                     Align2::LEFT_CENTER,
                                     name,
@@ -623,13 +651,32 @@ impl Preferences {
                                 );
                             }
                         }
-                        if resp.clicked() {
+                        if resp.clicked() || resp.secondary_clicked() {
                             self.profile = Some(id.clone());
                             self.confirm_delete = None;
                         }
                         if resp.double_clicked() {
                             start = Some((id.clone(), name.clone()));
                         }
+                        resp.context_menu(|ui| {
+                            if ui
+                                .button(format!("{}  Rename", icon::PENCIL_SIMPLE))
+                                .clicked()
+                            {
+                                start = Some((id.clone(), name.clone()));
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    can_delete,
+                                    egui::Button::new(format!("{}  Delete", icon::TRASH)),
+                                )
+                                .clicked()
+                            {
+                                self.confirm_delete = Some(id.clone());
+                                ui.close();
+                            }
+                        });
                     }
                 });
         });
@@ -668,7 +715,7 @@ impl Preferences {
             self.confirm_delete = None;
         }
         let minus = at(o, 45.0, 444.0, 24.0, 24.0);
-        if icon_button(ui, minus, icon::MINUS, profiles.len() > 1)
+        if icon_button(ui, minus, icon::MINUS, can_delete)
             .on_hover_text("Delete profile")
             .clicked()
         {
