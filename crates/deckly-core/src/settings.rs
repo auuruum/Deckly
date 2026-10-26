@@ -175,12 +175,13 @@ impl Settings {
         }
     }
 
-    /// Forgets every reference to a deleted profile.
-    pub fn forget_profile(&mut self, id: &str) {
+    /// Forgets every reference to a deleted profile. Devices that had it as
+    /// their default take `replacement` as their new default.
+    pub fn forget_profile(&mut self, id: &str, replacement: Option<&str>) {
         self.assignments.retain(|_, p| p != id);
         for d in self.devices.values_mut() {
             if d.default_profile.as_deref() == Some(id) {
-                d.default_profile = None;
+                d.default_profile = replacement.map(str::to_owned);
             }
         }
     }
@@ -330,10 +331,20 @@ mod tests {
         s.assignments.insert("A".into(), "p1".into());
         s.assignments.insert("B".into(), "p2".into());
         s.device_mut("A").default_profile = Some("p1".into());
-        s.forget_profile("p1");
+        s.forget_profile("p1", None);
         assert!(!s.assignments.contains_key("A"));
         assert!(s.assignments.contains_key("B"));
         assert_eq!(s.device("A").default_profile, None);
+    }
+
+    #[test]
+    fn a_deleted_default_profile_passes_default_to_the_replacement() {
+        let mut s = Settings::default();
+        s.device_mut("A").default_profile = Some("p1".into());
+        s.device_mut("B").default_profile = Some("p3".into());
+        s.forget_profile("p1", Some("p2"));
+        assert_eq!(s.device("A").default_profile.as_deref(), Some("p2"));
+        assert_eq!(s.device("B").default_profile.as_deref(), Some("p3"));
     }
 
     #[test]

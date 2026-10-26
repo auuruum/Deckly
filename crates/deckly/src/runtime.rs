@@ -94,12 +94,18 @@ impl State {
     /// Deletes a profile and its file. Connected devices that showed it
     /// switch to another profile for their model.
     pub fn delete_profile(&mut self, id: &str) {
+        let kind = self.profile(id).map(|p| p.device);
         self.profiles.retain(|p| p.id != id);
         self.pages.remove(id);
         if let Err(e) = store::delete_profile(id) {
             self.notify(format!("Cannot delete profile: {e}"));
         }
-        self.settings.forget_profile(id);
+        // A device whose default was deleted takes the next profile for its
+        // model as the new default.
+        let replacement = kind
+            .and_then(|k| self.profiles.iter().find(|p| p.device == k))
+            .map(|p| p.id.clone());
+        self.settings.forget_profile(id, replacement.as_deref());
         let orphans: Vec<(String, DeviceKind)> = self
             .devices
             .iter()
