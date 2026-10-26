@@ -228,18 +228,42 @@ pub fn standby_jpeg(img: &RgbaImage, model: &DeviceModel) -> Result<Vec<u8>, Str
     Err("the image does not fit on the device even at low quality".into())
 }
 
-/// Deckly's own standby picture: its logo in the middle of a black screen.
+/// Base colour of the standby picture where neither light reaches.
+const STANDBY_BASE: [f32; 3] = [8.0, 8.0, 12.0];
+/// Where the two standby lights sit, as fractions of the panel.
+const STANDBY_LIGHTS: [(f32, f32); 2] = [(0.075, 0.05), (0.925, 0.95)];
+/// Radius of each light, in half panel heights.
+const STANDBY_LIGHT_RADIUS: f32 = 1.05;
+
+/// Deckly's own standby picture, an aurora: blue light from the top left
+/// and violet from the bottom right, the logo's colours, meeting in indigo
+/// over a near-black screen. The screen shows only through the key windows,
+/// so it is one smooth picture with no centre that any grid can frame.
 pub fn default_standby(model: &DeviceModel) -> RgbaImage {
     let (w, h) = model.panel_size();
-    let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
-    let size = (h / 2).max(8);
-    let icon = crate::logo::icon(size);
-    if let Some(logo) = RgbaImage::from_raw(icon.width, icon.height, icon.rgba) {
-        let x = (w.saturating_sub(logo.width()) / 2).into();
-        let y = (h.saturating_sub(logo.height()) / 2).into();
-        imageops::overlay(&mut img, &logo, x, y);
-    }
-    img
+    let unit = (h as f32 / 2.0).max(1.0);
+    let lights = STANDBY_LIGHTS.map(|(fx, fy)| (fx * w as f32, fy * h as f32));
+    let colors = [crate::logo::FROM, crate::logo::TO].map(|c| c.map(f32::from));
+    RgbaImage::from_fn(w, h, |x, y| {
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        let mut light = [0.0f32; 3];
+        for ((lx, ly), color) in lights.iter().zip(&colors) {
+            // Distances in half panel heights keep each light round.
+            let d2 = ((px - lx) / unit).powi(2) + ((py - ly) / unit).powi(2);
+            let strength = (-d2 / (STANDBY_LIGHT_RADIUS * STANDBY_LIGHT_RADIUS)).exp();
+            for (l, c) in light.iter_mut().zip(color) {
+                *l += c * strength;
+            }
+        }
+        // Soft tone curve so the overlap mixes instead of clipping.
+        let mut out = [0u8; 4];
+        for ((o, base), l) in out.iter_mut().zip(STANDBY_BASE).zip(light) {
+            let v = base + 255.0 * (1.0 - (-l / 255.0 * 1.1).exp());
+            *o = v.round().clamp(0.0, 255.0) as u8;
+        }
+        out[3] = 255;
+        Rgba(out)
+    })
 }
 
 /// Decodes any supported picture file within the size limits.
@@ -504,6 +528,25 @@ mod tests {
         assert_eq!(cut_keys(&small, model).len(), 15);
         let missing = screensaver_keys(Path::new("does/not/exist.png"), model);
         assert!(missing.is_err());
+    }
+
+    #[test]
+    fn default_standby_is_an_aurora_on_every_model() {
+        for model in DeviceModel::ALL {
+            let img = default_standby(model);
+            assert_eq!(img.dimensions(), model.panel_size(), "{}", model.name);
+            let keys = cut_keys(&img, model);
+            let mid = model.key_image_size / 2;
+            let first = keys[0].get_pixel(mid, mid).0;
+            let last = keys[keys.len() - 1].get_pixel(mid, mid).0;
+            // Blue leads at the top left, violet at the bottom right.
+            assert!(first[2] > first[0] && first[1] > first[0], "{}", model.name);
+            assert!(last[0] > last[1] && last[2] > last[0], "{}", model.name);
+            // No key window is left pitch black.
+            for key in &keys {
+                assert!(key.pixels().all(|p| p.0[2] >= 12), "{}", model.name);
+            }
+        }
     }
 
     #[test]

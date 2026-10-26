@@ -8,8 +8,8 @@ use eframe::egui::IconData;
 const CANVAS: f32 = 120.0;
 const TILE_RADIUS: f32 = 26.0;
 const TILE: [u8; 3] = [0x1A, 0x1A, 0x1D];
-const FROM: [u8; 3] = [0x3D, 0x8B, 0xFD];
-const TO: [u8; 3] = [0x8B, 0x5C, 0xF6];
+pub const FROM: [u8; 3] = [0x3D, 0x8B, 0xFD];
+pub const TO: [u8; 3] = [0x8B, 0x5C, 0xF6];
 /// Below this size the 3×3 grid blurs, so a 2×2 grid is drawn instead.
 const SMALL: u32 = 24;
 
