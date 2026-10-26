@@ -7,7 +7,7 @@
 use crate::actions;
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
-    DeviceModel, ImageFormat, KeyConfig, Orientation, Rotation, TitleAlign, TitleStyle,
+    DeviceModel, ImageFormat, KeyConfig, Orientation, Rotation, TitleAlign, TitleStyle, Turn,
 };
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
@@ -107,30 +107,8 @@ impl Renderer {
         model: &DeviceModel,
         orientation: Orientation,
     ) -> Vec<u8> {
-        let mut img = self.render(key, model.key_image_size);
-        if orientation == Orientation::UpsideDown {
-            imageops::rotate180_in_place(&mut img);
-        }
-        let img = match model.rotation {
-            Rotation::None => img,
-            Rotation::Half => imageops::rotate180(&img),
-            Rotation::Clockwise => imageops::rotate90(&img),
-            Rotation::CounterClockwise => imageops::rotate270(&img),
-        };
-        let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
-        let mut out = Vec::new();
-        let result = match model.image_format() {
-            ImageFormat::Jpeg => rgb.write_with_encoder(
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90),
-            ),
-            ImageFormat::Bmp => {
-                rgb.write_with_encoder(image::codecs::bmp::BmpEncoder::new(&mut out))
-            }
-        };
-        if let Err(e) = result {
-            eprintln!("deckly: key image encoding failed: {e}");
-        }
-        out
+        let img = self.render(key, model.key_image_size);
+        encode_key(img, model, orientation)
     }
 
     fn custom_image(&mut self, path: &Path) -> Option<&RgbaImage> {
@@ -151,7 +129,121 @@ fn has_title(key: &KeyConfig, style: &TitleStyle) -> bool {
     style.show && !key.title.trim().is_empty()
 }
 
-fn decode_image(path: &Path) -> Result<RgbaImage, String> {
+/// Turns a key-sized image for the user's orientation and the model, then
+/// encodes it in the model's format.
+pub fn encode_key(img: RgbaImage, model: &DeviceModel, orientation: Orientation) -> Vec<u8> {
+    let img = turn(turn_image(img, orientation.turn()), model.rotation);
+    let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
+    let mut out = Vec::new();
+    let result = match model.image_format() {
+        ImageFormat::Jpeg => rgb.write_with_encoder(
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90),
+        ),
+        ImageFormat::Bmp => rgb.write_with_encoder(image::codecs::bmp::BmpEncoder::new(&mut out)),
+    };
+    if let Err(e) = result {
+        eprintln!("deckly: key image encoding failed: {e}");
+    }
+    out
+}
+
+fn turn_image(img: RgbaImage, turn: Turn) -> RgbaImage {
+    match turn {
+        Turn::None => img,
+        Turn::Quarter => imageops::rotate90(&img),
+        Turn::Half => imageops::rotate180(&img),
+        Turn::ThreeQuarters => imageops::rotate270(&img),
+    }
+}
+
+/// Applies a model's upload rotation.
+fn turn(img: RgbaImage, rotation: Rotation) -> RgbaImage {
+    turn_image(
+        img,
+        match rotation {
+            Rotation::None => Turn::None,
+            Rotation::Half => Turn::Half,
+            Rotation::Clockwise => Turn::Quarter,
+            Rotation::CounterClockwise => Turn::ThreeQuarters,
+        },
+    )
+}
+
+/// Loads a screensaver picture and cuts it into one key-sized image per
+/// key, row by row as the user sees the keys.
+pub fn screensaver_keys(path: &Path, model: &DeviceModel) -> Result<Vec<RgbaImage>, String> {
+    let img = decode_file(path)?;
+    Ok(cut_keys(&img, model))
+}
+
+/// Cuts a panel-sized picture into key images. A picture of another size is
+/// stretched to the panel first.
+pub fn cut_keys(img: &RgbaImage, model: &DeviceModel) -> Vec<RgbaImage> {
+    let (w, h) = model.panel_size();
+    let resized;
+    let panel = if img.dimensions() == (w, h) {
+        img
+    } else {
+        resized = imageops::resize(img, w, h, imageops::FilterType::Triangle);
+        &resized
+    };
+    model
+        .key_rects()
+        .iter()
+        .map(|r| imageops::crop_imm(panel, r.x, r.y, r.size, r.size).to_image())
+        .collect()
+}
+
+/// Highest JPEG quality tried for a standby image, the lowest, and the step
+/// between tries (as the official app does).
+const STANDBY_QUALITY: (u8, u8, u8) = (98, 71, 4);
+
+/// Encodes a standby picture for a model's screen: stretched to the screen,
+/// turned like key images (not by the user's orientation), and JPEG with
+/// the best quality that fits the model's limit.
+pub fn standby_jpeg(img: &RgbaImage, model: &DeviceModel) -> Result<Vec<u8>, String> {
+    let screen = model
+        .screen
+        .ok_or_else(|| format!("{} has no standby image", model.name))?;
+    let sized = imageops::resize(
+        img,
+        screen.width,
+        screen.height,
+        imageops::FilterType::Triangle,
+    );
+    let rgb = image::DynamicImage::ImageRgba8(turn(sized, model.rotation)).into_rgb8();
+    let (top, bottom, step) = STANDBY_QUALITY;
+    let mut quality = top;
+    while quality >= bottom {
+        let mut out = Vec::new();
+        rgb.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut out, quality,
+        ))
+        .map_err(|e| e.to_string())?;
+        if out.len() <= screen.standby_max_bytes as usize {
+            return Ok(out);
+        }
+        quality -= step;
+    }
+    Err("the image does not fit on the device even at low quality".into())
+}
+
+/// Deckly's own standby picture: its logo in the middle of a black screen.
+pub fn default_standby(model: &DeviceModel) -> RgbaImage {
+    let (w, h) = model.panel_size();
+    let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
+    let size = (h / 2).max(8);
+    let icon = crate::logo::icon(size);
+    if let Some(logo) = RgbaImage::from_raw(icon.width, icon.height, icon.rgba) {
+        let x = (w.saturating_sub(logo.width()) / 2).into();
+        let y = (h.saturating_sub(logo.height()) / 2).into();
+        imageops::overlay(&mut img, &logo, x, y);
+    }
+    img
+}
+
+/// Decodes any supported picture file within the size limits.
+pub fn decode_file(path: &Path) -> Result<RgbaImage, String> {
     let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     if len > MAX_IMAGE_FILE_BYTES {
         return Err("file is too large".into());
@@ -165,7 +257,11 @@ fn decode_image(path: &Path) -> Result<RgbaImage, String> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(256 * 1024 * 1024);
     reader.limits(limits);
-    let img = reader.decode().map_err(|e| e.to_string())?.into_rgba8();
+    Ok(reader.decode().map_err(|e| e.to_string())?.into_rgba8())
+}
+
+fn decode_image(path: &Path) -> Result<RgbaImage, String> {
+    let img = decode_file(path)?;
     // Square crop from the center, like "fill".
     let (w, h) = img.dimensions();
     let side = w.min(h);
@@ -375,7 +471,59 @@ mod tests {
         assert_eq!(corner(K::Plus, flipped), [false, false, true, false]);
         assert_eq!(corner(K::Mk2, flipped), [true, false, false, false]);
         assert_eq!(corner(K::Mini, flipped), [false, false, false, true]);
+        // Icon turns: 90° turns content a quarter counter-clockwise, 270° a
+        // quarter clockwise, on top of the MK.2's half turn.
+        assert_eq!(
+            corner(K::Mk2, Orientation::Rotate90),
+            [false, true, false, false]
+        );
+        assert_eq!(
+            corner(K::Mk2, Orientation::Rotate180),
+            [true, false, false, false]
+        );
+        assert_eq!(
+            corner(K::Mk2, Orientation::Rotate270),
+            [false, false, false, true]
+        );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn screensaver_is_cut_at_key_positions() {
+        let model = DeviceModel::of(deckly_core::DeviceKind::Mk2);
+        let mut panel = RgbaImage::from_pixel(480, 272, Rgba([0, 0, 0, 255]));
+        // Mark the top-left pixel of the last key's window.
+        panel.put_pixel(408, 200, Rgba([255, 0, 0, 255]));
+        let keys = cut_keys(&panel, model);
+        assert_eq!(keys.len(), 15);
+        assert!(keys.iter().all(|k| k.dimensions() == (72, 72)));
+        assert_eq!(keys[14].get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
+        assert_eq!(keys[0].get_pixel(0, 0), &Rgba([0, 0, 0, 255]));
+        // Any picture size is stretched to the panel.
+        let small = RgbaImage::new(10, 10);
+        assert_eq!(cut_keys(&small, model).len(), 15);
+        let missing = screensaver_keys(Path::new("does/not/exist.png"), model);
+        assert!(missing.is_err());
+    }
+
+    #[test]
+    fn standby_image_fits_the_screen() {
+        let mk2 = DeviceModel::of(deckly_core::DeviceKind::Mk2);
+        let jpeg = standby_jpeg(&default_standby(mk2), mk2).unwrap();
+        assert!(jpeg.len() <= 194_560);
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (480, 272));
+        // Noise needs lower quality but still fits.
+        let mut noise = RgbaImage::new(480, 272);
+        let mut seed = 1u32;
+        for px in noise.pixels_mut() {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let [a, b, c, _] = seed.to_le_bytes();
+            *px = Rgba([a, b, c, 255]);
+        }
+        assert!(standby_jpeg(&noise, mk2).unwrap().len() <= 194_560);
+        let plus = DeviceModel::of(deckly_core::DeviceKind::Plus);
+        assert!(standby_jpeg(&noise, plus).is_err());
     }
 
     #[test]

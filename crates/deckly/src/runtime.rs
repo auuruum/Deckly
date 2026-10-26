@@ -7,10 +7,11 @@
 //! the runtime re-renders only keys whose image changed.
 
 use crate::actions::{self, Outcome};
-use crate::render::Renderer;
+use crate::render::{self, Renderer};
 use crate::store;
 use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Orientation, Profile, Settings};
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
+use image::RgbaImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -156,6 +157,11 @@ pub enum Msg {
     /// Device preferences or the global title style changed.
     Settings,
     Outcome(Handle, Result<Outcome, String>),
+    /// Store a standby picture (panel-sized) on the device with this serial.
+    Standby {
+        serial: String,
+        image: RgbaImage,
+    },
     /// Return devices to their own idle screen before the app exits.
     Shutdown,
 }
@@ -173,6 +179,8 @@ struct Link {
     enabled: bool,
     orientation: Orientation,
     asleep: bool,
+    /// The keys show the screensaver (only while asleep).
+    screensaver: bool,
     /// Last key press, for Sleep After.
     active_at: Instant,
 }
@@ -186,7 +194,17 @@ impl Link {
             enabled: true,
             orientation: Orientation::Standard,
             asleep: false,
+            screensaver: false,
             active_at: Instant::now(),
+        }
+    }
+
+    /// Ends sleep. Key images are sent again if the screensaver covered them.
+    fn wake(&mut self) {
+        self.asleep = false;
+        if self.screensaver {
+            self.screensaver = false;
+            self.forget_images();
         }
     }
 
@@ -243,6 +261,10 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                 Msg::Device(Event::Connected(info)) => {
                     connect(&state, &info);
                     links.insert(info.handle, Link::new(&info));
+                    // Deckly runs Sleep After itself; a timer left in the
+                    // device by another app would put it to sleep behind
+                    // Deckly's back.
+                    devices.set_sleep_timer(info.handle, 0);
                     apply_settings(&state, &devices, &mut links);
                     refresh(&state, &devices, &mut renderer, &mut links);
                     repaint();
@@ -260,11 +282,18 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                     key,
                     pressed,
                 }) => {
+                    let covered = links.get(&handle).is_some_and(|l| l.screensaver);
                     let run = key_event(&state, &devices, &mut links, handle, key, pressed);
                     if let Some(config) = run {
                         let _ = actions.send((handle, config));
                     }
+                    if covered {
+                        refresh(&state, &devices, &mut renderer, &mut links);
+                    }
                     repaint();
+                }
+                Msg::Standby { serial, image } => {
+                    store_standby(&state, &devices, &links, &serial, &image);
                 }
                 Msg::Refresh => {
                     renderer.clear_image_cache();
@@ -343,7 +372,7 @@ fn apply_settings(state: &Shared, devices: &DeviceManager, links: &mut Links) {
         }
         link.enabled = true;
         link.orientation = prefs.orientation;
-        link.asleep = false;
+        link.wake();
         link.active_at = Instant::now();
         devices.set_brightness(handle, prefs.brightness);
     }
@@ -371,7 +400,7 @@ fn key_event(
     link.active_at = Instant::now();
     // The first press only wakes a sleeping device.
     if link.asleep {
-        link.asleep = false;
+        link.wake();
         devices.set_brightness(handle, s.settings.device(&link.serial).brightness);
         return None;
     }
@@ -392,17 +421,75 @@ fn next_sleep(state: &Shared, links: &Links) -> Option<Instant> {
         .min()
 }
 
-/// Turns off the backlight of devices idle for longer than Sleep After.
+/// Puts devices idle for longer than Sleep After to sleep: their
+/// screensaver is shown if they have one, else the backlight goes off.
 fn fall_asleep(state: &Shared, devices: &DeviceManager, links: &mut Links) {
-    let s = lock(state);
-    for (&handle, link) in links.iter_mut() {
-        let Some(idle) = sleep_after(&s.settings, &link.serial) else {
+    let mut sleepers = Vec::new();
+    {
+        let s = lock(state);
+        for (&handle, link) in links.iter() {
+            let Some(idle) = sleep_after(&s.settings, &link.serial) else {
+                continue;
+            };
+            if link.enabled && !link.asleep && link.active_at.elapsed() >= idle {
+                sleepers.push((handle, s.settings.device(&link.serial).screensaver));
+            }
+        }
+    }
+    // Pictures are decoded without holding the lock.
+    for (handle, screensaver) in sleepers {
+        let Some(link) = links.get_mut(&handle) else {
             continue;
         };
-        if link.enabled && !link.asleep && link.active_at.elapsed() >= idle {
-            link.asleep = true;
-            devices.set_brightness(handle, 0);
+        link.asleep = true;
+        let keys = screensaver.map(|path| render::screensaver_keys(&path, link.model));
+        match keys {
+            Some(Ok(keys)) => {
+                let count = link.model.key_count();
+                for (index, img) in keys.into_iter().enumerate() {
+                    // index < key_count, which is a u8.
+                    let physical = link.orientation.map_key(index as u8, count);
+                    let image = render::encode_key(img, link.model, link.orientation);
+                    devices.set_image(handle, physical, image);
+                }
+                link.forget_images();
+                link.screensaver = true;
+            }
+            other => {
+                if let Some(Err(e)) = other {
+                    lock(state).notify(format!("Cannot show screensaver: {e}"));
+                }
+                devices.set_brightness(handle, 0);
+            }
         }
+    }
+}
+
+/// Encodes a standby picture for the device and stores it there.
+fn store_standby(
+    state: &Shared,
+    devices: &DeviceManager,
+    links: &Links,
+    serial: &str,
+    image: &RgbaImage,
+) {
+    let Some((&handle, link)) = links.iter().find(|(_, l)| l.serial == serial) else {
+        lock(state).notify("Standby image: the device is not connected");
+        return;
+    };
+    match render::standby_jpeg(image, link.model) {
+        Ok(jpeg) => {
+            devices.set_standby_image(handle, jpeg);
+            let mut s = lock(state);
+            let name = s
+                .devices
+                .iter()
+                .find(|d| d.handle == handle)
+                .map(|d| s.device_name(d))
+                .unwrap_or_else(|| link.model.name.to_owned());
+            s.notify(format!("Standby image sent to {name}"));
+        }
+        Err(e) => lock(state).notify(format!("Standby image: {e}")),
     }
 }
 
@@ -482,7 +569,11 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style;
         for d in &s.devices {
-            if !links.get(&d.handle).is_some_and(|l| l.enabled) {
+            // A screensaver keeps its keys until the device wakes.
+            if !links
+                .get(&d.handle)
+                .is_some_and(|l| l.enabled && !l.screensaver)
+            {
                 continue;
             }
             let page = s

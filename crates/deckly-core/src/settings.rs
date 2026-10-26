@@ -8,11 +8,14 @@
 use crate::profile::TitleStyle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 /// Devices remembered in the settings file; more are dropped on load.
 pub const MAX_DEVICES: usize = 256;
 pub const DEFAULT_BRIGHTNESS: u8 = 70;
+/// Longer screensaver paths are dropped on load.
+const MAX_PATH_BYTES: usize = 4096;
 /// Sleep After choices in minutes; 0 means never.
 pub const SLEEP_CHOICES: [u32; 10] = [0, 1, 2, 5, 10, 15, 30, 60, 120, 240];
 
@@ -54,6 +57,9 @@ pub struct DeviceSettings {
     pub brightness: u8,
     /// Profile shown when the device connects.
     pub default_profile: Option<String>,
+    /// Image shown on the keys instead of turning the backlight off when
+    /// the device sleeps; a PNG cropped to the device's screen.
+    pub screensaver: Option<PathBuf>,
 }
 
 impl Default for DeviceSettings {
@@ -65,35 +71,75 @@ impl Default for DeviceSettings {
             sleep_minutes: 0,
             brightness: DEFAULT_BRIGHTNESS,
             default_profile: None,
+            screensaver: None,
         }
     }
 }
 
+/// How key content is turned on the device. The first four turn only the
+/// icons and text of each key; `UpsideDown` turns the whole device, so key
+/// positions are mirrored too (docs/clean-room/2026-10-26-orientation-screensaver-standby.md).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Orientation {
     #[default]
     Standard,
+    /// For a device lying on its side: key content turned a quarter turn
+    /// counter-clockwise.
+    Rotate90,
+    Rotate180,
+    /// Key content turned a quarter turn clockwise.
+    Rotate270,
     /// The device is used turned by 180°.
     UpsideDown,
 }
 
+/// Extra clockwise turn applied to every key image, in quarter turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turn {
+    None,
+    Quarter,
+    Half,
+    ThreeQuarters,
+}
+
 impl Orientation {
-    pub const ALL: [Orientation; 2] = [Orientation::Standard, Orientation::UpsideDown];
+    /// Choices that turn only icons and text.
+    pub const ICONS: [Orientation; 4] = [
+        Orientation::Standard,
+        Orientation::Rotate90,
+        Orientation::Rotate180,
+        Orientation::Rotate270,
+    ];
+    /// Choices that turn the whole device.
+    pub const DEVICE: [Orientation; 1] = [Orientation::UpsideDown];
 
     pub fn label(self) -> &'static str {
         match self {
             Orientation::Standard => "Standard",
+            Orientation::Rotate90 => "90°",
+            Orientation::Rotate180 => "180°",
+            Orientation::Rotate270 => "270°",
             Orientation::UpsideDown => "Upside Down",
         }
     }
 
+    /// The clockwise turn added to each key image.
+    pub fn turn(self) -> Turn {
+        match self {
+            Orientation::Standard => Turn::None,
+            Orientation::Rotate90 => Turn::ThreeQuarters,
+            Orientation::Rotate180 | Orientation::UpsideDown => Turn::Half,
+            Orientation::Rotate270 => Turn::Quarter,
+        }
+    }
+
     /// Maps a key index as the user sees it to the physical key, and back:
-    /// turning by 180° is its own inverse.
+    /// turning by 180° is its own inverse. Only `UpsideDown` moves keys.
     pub fn map_key(self, key: u8, key_count: u8) -> u8 {
         match self {
-            Orientation::Standard => key,
             Orientation::UpsideDown => key_count.saturating_sub(1).saturating_sub(key),
+            _ => key,
         }
     }
 }
@@ -160,6 +206,12 @@ impl Settings {
             if !SLEEP_CHOICES.contains(&d.sleep_minutes) {
                 d.sleep_minutes = 0;
             }
+            if d.screensaver
+                .as_ref()
+                .is_some_and(|p| p.as_os_str().len() > MAX_PATH_BYTES)
+            {
+                d.screensaver = None;
+            }
         }
         self.title_style.sanitize();
     }
@@ -184,8 +236,9 @@ mod tests {
         let mut s = Settings::default();
         let d = s.device_mut("SER");
         d.name = "Desk".into();
-        d.orientation = Orientation::UpsideDown;
+        d.orientation = Orientation::Rotate270;
         d.sleep_minutes = 30;
+        d.screensaver = Some(PathBuf::from("screensavers/SER.png"));
         s.title_style.size = 16;
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
@@ -226,6 +279,49 @@ mod tests {
         // Out-of-range input never underflows.
         assert_eq!(o.map_key(200, 15), 0);
         assert_eq!(o.map_key(0, 0), 0);
+    }
+
+    #[test]
+    fn icon_turns_leave_keys_in_place() {
+        for o in Orientation::ICONS {
+            for k in 0..15 {
+                assert_eq!(o.map_key(k, 15), k);
+            }
+        }
+    }
+
+    // Turns observed in the official app
+    // (docs/clean-room/2026-10-26-orientation-screensaver-standby.md).
+    #[test]
+    fn orientation_turns() {
+        assert_eq!(Orientation::Standard.turn(), Turn::None);
+        assert_eq!(Orientation::Rotate90.turn(), Turn::ThreeQuarters);
+        assert_eq!(Orientation::Rotate180.turn(), Turn::Half);
+        assert_eq!(Orientation::Rotate270.turn(), Turn::Quarter);
+        assert_eq!(Orientation::UpsideDown.turn(), Turn::Half);
+    }
+
+    #[test]
+    fn orientation_names_are_stable() {
+        let all: Vec<Orientation> = Orientation::ICONS
+            .into_iter()
+            .chain(Orientation::DEVICE)
+            .collect();
+        let json = serde_json::to_string(&all).unwrap();
+        assert_eq!(
+            json,
+            r#"["standard","rotate90","rotate180","rotate270","upside_down"]"#
+        );
+    }
+
+    #[test]
+    fn overlong_screensaver_path_is_dropped() {
+        let long = "x".repeat(MAX_PATH_BYTES + 1);
+        let text = format!(r#"{{"devices":{{"S":{{"screensaver":"{long}"}}}}}}"#);
+        assert_eq!(
+            Settings::from_json(&text).unwrap().device("S").screensaver,
+            None
+        );
     }
 
     #[test]

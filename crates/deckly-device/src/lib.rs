@@ -49,6 +49,8 @@ enum Command {
     Image(u8, Vec<u8>),
     Brightness(u8),
     Reset,
+    SleepTimer(u32),
+    Standby(Vec<u8>),
 }
 
 type Writers = Arc<Mutex<HashMap<Handle, Sender<Command>>>>;
@@ -96,6 +98,19 @@ impl DeviceManager {
     /// Returns the device to its power-on state (its own logo screen).
     pub fn reset(&self, handle: Handle) {
         self.send(handle, Command::Reset);
+    }
+
+    /// Sets the device's own sleep timer in seconds; 0 turns it off. Mini
+    /// models have none and ignore this.
+    pub fn set_sleep_timer(&self, handle: Handle, seconds: u32) {
+        self.send(handle, Command::SleepTimer(seconds));
+    }
+
+    /// Stores a JPEG standby image on the device, already sized and turned
+    /// for its screen (see `DeviceModel::screen`). Only main-protocol models
+    /// with a known screen take one.
+    pub fn set_standby_image(&self, handle: Handle, jpeg: Vec<u8>) {
+        self.send(handle, Command::Standby(jpeg));
     }
 
     fn send(&self, handle: Handle, command: Command) {
@@ -337,7 +352,18 @@ fn spawn_writer(
                     (Command::Brightness(p), Protocol::Mini) => mini::brightness_report(p),
                     (Command::Reset, Protocol::Main) => protocol::reset_report(),
                     (Command::Reset, Protocol::Mini) => mini::reset_report(),
-                    (Command::Image(..), _) => continue,
+                    (Command::SleepTimer(s), Protocol::Main) => protocol::sleep_timer_report(s),
+                    (Command::Standby(jpeg), Protocol::Main) => {
+                        if !write_standby(&mut writer, &jpeg) {
+                            return;
+                        }
+                        continue;
+                    }
+                    (Command::Standby(_), Protocol::Mini) => {
+                        eprintln!("deckly: {} has no standby image", model.name);
+                        continue;
+                    }
+                    (Command::SleepTimer(_) | Command::Image(..), _) => continue,
                 };
                 if let Err(e) = block_on(feature.write_feature_report(&report)) {
                     eprintln!("deckly: feature write failed: {e}");
@@ -366,4 +392,18 @@ fn spawn_writer(
     {
         eprintln!("deckly: cannot start writer thread: {e}");
     }
+}
+
+/// Sends a standby image; false when the device went away.
+fn write_standby(writer: &mut async_hid::DeviceWriter, jpeg: &[u8]) -> bool {
+    let reports = match protocol::standby_reports(jpeg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("deckly: standby image: {e}");
+            return true;
+        }
+    };
+    reports
+        .iter()
+        .all(|report| block_on(writer.write_output_report(report)).is_ok())
 }

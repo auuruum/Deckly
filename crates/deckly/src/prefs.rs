@@ -6,23 +6,26 @@
 //! measured positions, relative to the window's client area.
 
 use crate::actions;
+use crate::cropper::{Cropper, Purpose};
 use crate::logo;
 use crate::os::autostart;
-use crate::render::Renderer;
+use crate::render::{self, Renderer};
 use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
-use deckly_core::{DeviceKind, KeyConfig, Orientation, TitleAlign, TitleStyle};
+use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Orientation, TitleAlign, TitleStyle};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Pos2, Rect, RichText, Sense, Stroke,
     TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
+use image::RgbaImage;
 use serde_json::json;
 use std::sync::mpsc::Sender;
 
 const SIZE: Vec2 = vec2(740.0, 489.0);
+const ADVANCED_SIZE: Vec2 = vec2(400.0, 200.0);
 const STRIP_HEIGHT: f32 = 35.0;
 const LABEL_X: f32 = 20.0;
 const LABEL_WIDTH: f32 = 182.0;
@@ -77,6 +80,9 @@ pub struct Preferences {
     /// Read from the system when the General tab is first shown.
     autostart: Option<Result<bool, String>>,
     preview: Option<(u64, TextureHandle)>,
+    /// The Advanced Settings window, open for this device.
+    advanced: Option<(String, &'static DeviceModel)>,
+    cropper: Cropper,
 }
 
 impl Preferences {
@@ -91,6 +97,8 @@ impl Preferences {
             style: None,
             autostart: None,
             preview: None,
+            advanced: None,
+            cropper: Cropper::default(),
         }
     }
 
@@ -122,6 +130,75 @@ impl Preferences {
             }
             egui::CentralPanel::no_frame().show(ui, |ui| self.contents(ui, env));
         });
+        if !self.open {
+            self.advanced = None;
+        }
+        self.show_advanced(ctx, env);
+        if let Some((purpose, image)) = self.cropper.show(ctx) {
+            use_picture(env, purpose, image);
+        }
+    }
+
+    // ----- Advanced Settings ---------------------------------------------
+
+    fn show_advanced(&mut self, ctx: &egui::Context, env: &mut Env<'_>) {
+        let Some((serial, model)) = self.advanced.clone() else {
+            return;
+        };
+        let builder = egui::ViewportBuilder::default()
+            .with_title("Advanced Settings - Deckly")
+            .with_icon(logo::icon(64))
+            .with_inner_size(ADVANCED_SIZE)
+            .with_min_inner_size(ADVANCED_SIZE)
+            .with_resizable(false)
+            .with_maximize_button(false)
+            .with_minimize_button(false);
+        let mut close = false;
+        ctx.show_viewport_immediate(advanced_id(), builder, |ui, _class| {
+            close |= ui.ctx().input(|i| i.viewport().close_requested());
+            egui::CentralPanel::no_frame().show(ui, |ui| {
+                let o = ui.max_rect().min;
+                ui.painter()
+                    .rect_filled(ui.max_rect(), CornerRadius::ZERO, PREF_BODY);
+                ui.painter().text(
+                    o + vec2(20.0, 38.0),
+                    Align2::LEFT_CENTER,
+                    "Standby screen",
+                    font(13.0),
+                    TEXT_DIM,
+                );
+                frame(ui, at(o, 20.0, 52.0, 360.0, 92.0));
+                if model.screen.is_some() {
+                    if button(ui, at(o, 33.0, 64.0, 162.0, 22.0), "Set Image…").clicked() {
+                        let purpose = Purpose::Standby(serial.clone());
+                        self.cropper.open(ui.ctx(), purpose, model);
+                    }
+                    if button(ui, at(o, 205.0, 64.0, 162.0, 22.0), "Reset").clicked() {
+                        let image = render::default_standby(model);
+                        let serial = serial.clone();
+                        let _ = env.runtime.send(Msg::Standby { serial, image });
+                    }
+                    value_dim(
+                        ui,
+                        o,
+                        33.0,
+                        94.0,
+                        335.0,
+                        "Set a custom image that appears when the device is powered \
+                         on but not connected to Deckly.",
+                    );
+                } else {
+                    let text = format!("{} does not support a standby image.", model.name);
+                    value_dim(ui, o, 33.0, 64.0, 335.0, &text);
+                }
+                let bottom = ADVANCED_SIZE.y - 37.0;
+                close |= button(ui, at(o, 262.0, bottom, 56.0, 22.0), "OK").clicked();
+                close |= button(ui, at(o, 324.0, bottom, 56.0, 22.0), "Cancel").clicked();
+            });
+        });
+        if close {
+            self.advanced = None;
+        }
     }
 
     fn contents(&mut self, ui: &mut Ui, env: &mut Env<'_>) {
@@ -328,8 +405,18 @@ impl Preferences {
             "pref-orientation",
             prefs.orientation.label(),
             |ui| {
-                for choice in Orientation::ALL {
-                    ui.selectable_value(&mut prefs.orientation, choice, choice.label());
+                let groups: [(&str, &[Orientation]); 2] = [
+                    ("Icons and text", &Orientation::ICONS),
+                    ("Device", &Orientation::DEVICE),
+                ];
+                for (i, (title, choices)) in groups.into_iter().enumerate() {
+                    if i > 0 {
+                        ui.separator();
+                    }
+                    ui.label(RichText::new(title).font(font(13.0)).color(TEXT_FAINT));
+                    for &choice in choices {
+                        ui.selectable_value(&mut prefs.orientation, choice, choice.label());
+                    }
                 }
             },
         );
@@ -351,6 +438,23 @@ impl Preferences {
                 }
             },
         );
+        if button(
+            ui,
+            at(o, VALUE_X + 185.0, y + 4.0, 108.0, 22.0),
+            "Set Screensaver…",
+        )
+        .on_hover_text("Shown on the keys when the device sleeps")
+        .clicked()
+        {
+            let purpose = Purpose::Screensaver(device.serial.clone());
+            self.cropper.open(ui.ctx(), purpose, device.model);
+        }
+        if prefs.screensaver.is_some()
+            && button(ui, at(o, VALUE_X + 303.0, y + 4.0, 90.0, 22.0), "Reset").clicked()
+            && let Some(path) = prefs.screensaver.take()
+        {
+            store::delete_screensaver(&path);
+        }
         y += 36.0;
 
         label(ui, o, y, 30.0, "Brightness:");
@@ -390,6 +494,14 @@ impl Preferences {
         y += 36.0;
         label(ui, o, y, 30.0, "Serial Number:");
         value(ui, o, VALUE_X + 1.0, y, 30.0, &device.serial);
+
+        if button(ui, at(o, 630.0, 437.0, 80.0, 22.0), "Advanced…").clicked() {
+            if self.advanced.is_some() {
+                ui.ctx()
+                    .send_viewport_cmd_to(advanced_id(), egui::ViewportCommand::Focus);
+            }
+            self.advanced = Some((device.serial.clone(), device.model));
+        }
 
         if prefs != before {
             prefs.name = prefs.name.trim_start().to_owned();
@@ -751,6 +863,37 @@ fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("deckly-preferences")
 }
 
+fn advanced_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("deckly-advanced-settings")
+}
+
+/// Takes the picture finished in the Customize Image window: a screensaver
+/// is saved and set for its device, a standby image goes to the device.
+fn use_picture(env: &mut Env<'_>, purpose: Purpose, image: RgbaImage) {
+    match purpose {
+        Purpose::Screensaver(serial) => match store::save_screensaver(&serial, &image) {
+            Ok(path) => {
+                let mut s = runtime::lock(env.state);
+                let old = s
+                    .settings
+                    .device_mut(&serial)
+                    .screensaver
+                    .replace(path.clone());
+                if let Some(old) = old.filter(|old| *old != path) {
+                    store::delete_screensaver(&old);
+                }
+                s.save_settings();
+                drop(s);
+                let _ = env.runtime.send(Msg::Settings);
+            }
+            Err(e) => runtime::lock(env.state).notify(format!("Cannot save screensaver: {e}")),
+        },
+        Purpose::Standby(serial) => {
+            let _ = env.runtime.send(Msg::Standby { serial, image });
+        }
+    }
+}
+
 fn rename_profile(env: &mut Env<'_>, id: &str, text: &str) {
     let name: String = text.trim().chars().take(MAX_PROFILE_NAME_CHARS).collect();
     if name.is_empty() {
@@ -824,7 +967,7 @@ fn frame(ui: &Ui, rect: Rect) {
     );
 }
 
-fn button(ui: &mut Ui, rect: Rect, text: &str) -> egui::Response {
+pub(crate) fn button(ui: &mut Ui, rect: Rect, text: &str) -> egui::Response {
     ui.put(
         rect,
         egui::Button::new(RichText::new(text).font(font(13.0)))
@@ -876,7 +1019,7 @@ fn small_icon_button(ui: &mut Ui, rect: Rect, glyph: &str, enabled: bool) -> egu
 }
 
 /// A check box drawn like the official one: blue when checked.
-fn checkbox(ui: &mut Ui, rect: Rect, value: &mut bool, text: &str) -> egui::Response {
+pub(crate) fn checkbox(ui: &mut Ui, rect: Rect, value: &mut bool, text: &str) -> egui::Response {
     let mut resp = ui.interact(rect, ui.id().with(("check", text)), Sense::click());
     if resp.clicked() {
         *value = !*value;

@@ -17,14 +17,19 @@ pub const FEATURE_REPORT_LEN: usize = 32;
 /// Key images above this size are refused; a 120 px JPEG is a few KB and an
 /// 80 px BMP for the Mini about 19 KB.
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024;
+/// Standby images above this size are refused; the largest per-model limit
+/// seen is 600 KB (docs/clean-room/2026-10-26-orientation-screensaver-standby.md).
+pub const MAX_STANDBY_BYTES: usize = 1024 * 1024;
 
 const REPORT_INPUT: u8 = 0x01;
 const INPUT_KEYS: u8 = 0x00;
 const REPORT_IMAGE: u8 = 0x02;
 const IMAGE_COMMAND_KEY: u8 = 0x07;
+const IMAGE_COMMAND_STANDBY: u8 = 0x09;
 const REPORT_COMMAND: u8 = 0x03;
 const COMMAND_RESET: u8 = 0x02;
 const COMMAND_BRIGHTNESS: u8 = 0x08;
+const COMMAND_SLEEP_TIMER: u8 = 0x0D;
 pub const REPORT_FIRMWARE: u8 = 0x05;
 pub const REPORT_SERIAL: u8 = 0x06;
 pub const REPORT_LAYOUT: u8 = 0x08;
@@ -39,7 +44,7 @@ pub enum ProtocolError {
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProtocolError::ImageTooLarge(n) => write!(f, "key image is too large ({n} bytes)"),
+            ProtocolError::ImageTooLarge(n) => write!(f, "image is too large ({n} bytes)"),
         }
     }
 }
@@ -79,6 +84,51 @@ pub fn image_reports(key: u8, jpeg: &[u8]) -> Result<Vec<[u8; IMAGE_REPORT_LEN]>
         reports.push(report);
     }
     Ok(reports)
+}
+
+/// Splits a JPEG standby image (shown while no app drives the device) into
+/// output reports. Unlike key images, the chunk index comes before the
+/// chunk size in the header.
+pub fn standby_reports(jpeg: &[u8]) -> Result<Vec<[u8; IMAGE_REPORT_LEN]>, ProtocolError> {
+    if jpeg.len() > MAX_STANDBY_BYTES {
+        return Err(ProtocolError::ImageTooLarge(jpeg.len()));
+    }
+    let chunks: Vec<&[u8]> = if jpeg.is_empty() {
+        vec![&[]]
+    } else {
+        jpeg.chunks(IMAGE_CHUNK_LEN).collect()
+    };
+    let last = chunks.len() - 1;
+    let mut reports = Vec::with_capacity(chunks.len());
+    for (page, chunk) in chunks.into_iter().enumerate() {
+        let mut report = [0u8; IMAGE_REPORT_LEN];
+        // Both fit in u16: chunk <= 1016 bytes and page < 1033 because of
+        // MAX_STANDBY_BYTES.
+        let len = (chunk.len() as u16).to_le_bytes();
+        let page_le = (page as u16).to_le_bytes();
+        report[..IMAGE_HEADER_LEN].copy_from_slice(&[
+            REPORT_IMAGE,
+            IMAGE_COMMAND_STANDBY,
+            0,
+            u8::from(page == last),
+            page_le[0],
+            page_le[1],
+            len[0],
+            len[1],
+        ]);
+        report[IMAGE_HEADER_LEN..IMAGE_HEADER_LEN + chunk.len()].copy_from_slice(chunk);
+        reports.push(report);
+    }
+    Ok(reports)
+}
+
+/// Sets the device's own sleep timer in seconds; 0 turns it off.
+pub fn sleep_timer_report(seconds: u32) -> [u8; FEATURE_REPORT_LEN] {
+    let mut report = [0u8; FEATURE_REPORT_LEN];
+    report[0] = REPORT_COMMAND;
+    report[1] = COMMAND_SLEEP_TIMER;
+    report[2..6].copy_from_slice(&seconds.to_le_bytes());
+    report
 }
 
 /// Returns the pressed state of each key, or `None` when the report is not
@@ -256,6 +306,29 @@ mod tests {
         report[..4].copy_from_slice(&[0x01, 0x00, 10, 0]);
         report[4 + 9] = 1;
         assert_eq!(parse_keys(&report, 8), Some(vec![false; 8]));
+    }
+
+    // Layout read from the official app
+    // (docs/clean-room/2026-10-26-orientation-screensaver-standby.md).
+    #[test]
+    fn splits_standby_image_into_reports() {
+        let jpeg: Vec<u8> = (0..2100u32).map(|i| i as u8).collect();
+        let reports = standby_reports(&jpeg).unwrap();
+        assert_eq!(reports.len(), 3);
+        assert_eq!(&reports[0][..8], &[0x02, 0x09, 0, 0, 0, 0, 0xf8, 0x03]);
+        assert_eq!(&reports[2][..8], &[0x02, 0x09, 0, 1, 2, 0, 0x44, 0x00]);
+        assert_eq!(&reports[2][8..8 + 0x44], &jpeg[2 * IMAGE_CHUNK_LEN..]);
+        assert!(reports[2][8 + 0x44..].iter().all(|&b| b == 0));
+        assert!(standby_reports(&vec![0u8; MAX_STANDBY_BYTES + 1]).is_err());
+        // The 194 560-byte MK.2 limit fits.
+        assert_eq!(standby_reports(&vec![1u8; 194_560]).unwrap().len(), 192);
+    }
+
+    #[test]
+    fn sleep_timer_is_little_endian_seconds() {
+        let r = sleep_timer_report(0x0102_0304);
+        assert_eq!(&r[..6], &[0x03, 0x0D, 0x04, 0x03, 0x02, 0x01]);
+        assert!(r[6..].iter().all(|&b| b == 0));
     }
 
     #[test]

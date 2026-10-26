@@ -132,10 +132,12 @@ sits at the bottom. Registry value names `auto_launch_enabled` and
 ## Design choices in Deckly (not observed)
 
 - Deckly shows General, Devices, Profiles and Style. Accounts, Plugins,
-  updates, the AI integration, screensavers, firmware updates and the
-  advanced device options are left out until features behind them exist.
-- Orientation offers Standard and Upside Down. Sleep After offers Never, 1,
-  2, 5, 10, 15 and 30 minutes, 1, 2 and 4 hours.
+  updates, the AI integration and firmware updates are left out until
+  features behind them exist. Orientation, the screensaver and the standby
+  screen (Advanced…) are covered in
+  [2026-10-26-orientation-screensaver-standby.md](2026-10-26-orientation-screensaver-standby.md).
+- Sleep After offers Never, 1, 2, 5, 10, 15 and 30 minutes, 1, 2 and 4
+  hours.
 - A disabled device is returned to its own idle screen and its keys are
   ignored. A sleeping device turns its backlight off; the first key press
   only wakes it.

@@ -62,9 +62,42 @@ pub struct DeviceModel {
     pub key_image_size: u32,
     pub protocol: Protocol,
     pub rotation: Rotation,
+    /// The screen behind the keys, where known. Only models with a known
+    /// screen accept a standby image.
+    pub screen: Option<Screen>,
     /// Verified on real hardware (see docs/devices.md).
     pub tested: bool,
 }
+
+/// The single screen the keys look onto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Screen {
+    pub width: u32,
+    pub height: u32,
+    /// Largest standby image (JPEG) the device takes, in bytes.
+    pub standby_max_bytes: u32,
+}
+
+/// A key's window on the screen, in screen pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyRect {
+    pub x: u32,
+    pub y: u32,
+    pub size: u32,
+}
+
+// Screens of the 15-key and 32-key families, from Elgato's documentation and
+// the official app (docs/clean-room/2026-10-26-orientation-screensaver-standby.md).
+const SCREEN_15: Option<Screen> = Some(Screen {
+    width: 480,
+    height: 272,
+    standby_max_bytes: 194_560,
+});
+const SCREEN_32: Option<Screen> = Some(Screen {
+    width: 1024,
+    height: 600,
+    standby_max_bytes: 614_400,
+});
 
 const fn model(
     kind: DeviceKind,
@@ -84,8 +117,13 @@ const fn model(
         key_image_size,
         protocol,
         rotation,
+        screen: None,
         tested: false,
     }
+}
+
+const fn with_screen(m: DeviceModel, screen: Option<Screen>) -> DeviceModel {
+    DeviceModel { screen, ..m }
 }
 
 impl DeviceModel {
@@ -96,53 +134,74 @@ impl DeviceModel {
         &[
             DeviceModel {
                 tested: true,
-                ..model(K::Mk2, "Stream Deck MK.2", 0x0080, (5, 3), 72, Main, Half)
+                ..with_screen(
+                    model(K::Mk2, "Stream Deck MK.2", 0x0080, (5, 3), 72, Main, Half),
+                    SCREEN_15,
+                )
             },
-            model(
-                K::OriginalV2,
-                "Stream Deck (v2)",
-                0x006D,
-                (5, 3),
-                72,
-                Main,
-                Half,
+            with_screen(
+                model(
+                    K::OriginalV2,
+                    "Stream Deck (v2)",
+                    0x006D,
+                    (5, 3),
+                    72,
+                    Main,
+                    Half,
+                ),
+                SCREEN_15,
             ),
-            model(
-                K::Mk2Scissor,
-                "Stream Deck MK.2 (scissor keys)",
-                0x00A5,
-                (5, 3),
-                72,
-                Main,
-                Half,
+            with_screen(
+                model(
+                    K::Mk2Scissor,
+                    "Stream Deck MK.2 (scissor keys)",
+                    0x00A5,
+                    (5, 3),
+                    72,
+                    Main,
+                    Half,
+                ),
+                SCREEN_15,
             ),
-            model(
-                K::Module15,
-                "Stream Deck 15-key module",
-                0x00B9,
-                (5, 3),
-                72,
-                Main,
-                Half,
+            with_screen(
+                model(
+                    K::Module15,
+                    "Stream Deck 15-key module",
+                    0x00B9,
+                    (5, 3),
+                    72,
+                    Main,
+                    Half,
+                ),
+                SCREEN_15,
             ),
-            model(K::Xl, "Stream Deck XL", 0x006C, (8, 4), 96, Main, Half),
-            model(
-                K::XlV2,
-                "Stream Deck XL (v2)",
-                0x008F,
-                (8, 4),
-                96,
-                Main,
-                Half,
+            with_screen(
+                model(K::Xl, "Stream Deck XL", 0x006C, (8, 4), 96, Main, Half),
+                SCREEN_32,
             ),
-            model(
-                K::Module32,
-                "Stream Deck 32-key module",
-                0x00BA,
-                (8, 4),
-                96,
-                Main,
-                Half,
+            with_screen(
+                model(
+                    K::XlV2,
+                    "Stream Deck XL (v2)",
+                    0x008F,
+                    (8, 4),
+                    96,
+                    Main,
+                    Half,
+                ),
+                SCREEN_32,
+            ),
+            with_screen(
+                model(
+                    K::Module32,
+                    "Stream Deck 32-key module",
+                    0x00BA,
+                    (8, 4),
+                    96,
+                    Main,
+                    Half,
+                ),
+                SCREEN_32,
             ),
             model(K::Neo, "Stream Deck Neo", 0x009A, (4, 2), 96, Main, Half),
             model(
@@ -225,6 +284,50 @@ impl DeviceModel {
             Protocol::Mini => ImageFormat::Bmp,
         }
     }
+
+    /// Size of the picture that spans all keys: the screen where it is
+    /// known, otherwise the key grid with gaps of 5/12 of a key.
+    pub fn panel_size(&self) -> (u32, u32) {
+        match self.screen {
+            Some(s) => (s.width, s.height),
+            None => {
+                let span = |n: u8| {
+                    let n = u32::from(n.max(1));
+                    n * self.key_image_size + (n - 1) * self.gap()
+                };
+                (span(self.columns), span(self.rows))
+            }
+        }
+    }
+
+    fn gap(&self) -> u32 {
+        self.key_image_size * 5 / 12
+    }
+
+    /// Where each key sits on the panel, row by row from the top left.
+    /// Keys are spread evenly with no outer margin (inferred for the
+    /// screens we know; see the clean-room note).
+    pub fn key_rects(&self) -> Vec<KeyRect> {
+        let (w, h) = self.panel_size();
+        let key = self.key_image_size;
+        let step = |extent: u32, n: u8| {
+            if n > 1 {
+                extent.saturating_sub(key) / u32::from(n - 1)
+            } else {
+                0
+            }
+        };
+        let (dx, dy) = (step(w, self.columns), step(h, self.rows));
+        (0..self.rows)
+            .flat_map(|r| {
+                (0..self.columns).map(move |c| KeyRect {
+                    x: u32::from(c) * dx,
+                    y: u32::from(r) * dy,
+                    size: key,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +374,54 @@ mod tests {
         assert_eq!((mini.key_count(), mini.key_image_size), (6, 80));
         assert_eq!(mini.image_format(), ImageFormat::Bmp);
         assert_eq!(DeviceModel::of(DeviceKind::Xl).key_count(), 32);
+    }
+
+    #[test]
+    fn mk2_keys_on_its_screen() {
+        let m = DeviceModel::of(DeviceKind::Mk2);
+        assert_eq!(m.panel_size(), (480, 272));
+        let rects = m.key_rects();
+        assert_eq!(rects.len(), 15);
+        assert_eq!(
+            rects[0],
+            KeyRect {
+                x: 0,
+                y: 0,
+                size: 72
+            }
+        );
+        assert_eq!(rects[1].x, 102);
+        assert_eq!(rects[5].y, 100);
+        assert_eq!(
+            rects[14],
+            KeyRect {
+                x: 408,
+                y: 200,
+                size: 72
+            }
+        );
+    }
+
+    #[test]
+    fn key_rects_stay_inside_the_panel() {
+        for m in DeviceModel::ALL {
+            let (w, h) = m.panel_size();
+            let rects = m.key_rects();
+            assert_eq!(rects.len(), usize::from(m.key_count()), "{}", m.name);
+            for r in rects {
+                assert!(r.x + r.size <= w && r.y + r.size <= h, "{}", m.name);
+            }
+        }
+        // A model without a known screen gets a grid with gaps.
+        let mini = DeviceModel::of(DeviceKind::Mini);
+        assert_eq!(mini.panel_size(), (3 * 80 + 2 * 33, 2 * 80 + 33));
+    }
+
+    #[test]
+    fn standby_needs_a_known_screen() {
+        assert!(DeviceModel::of(DeviceKind::Xl).screen.is_some());
+        assert!(DeviceModel::of(DeviceKind::Plus).screen.is_none());
+        assert!(DeviceModel::of(DeviceKind::Mini).screen.is_none());
     }
 
     #[test]

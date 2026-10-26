@@ -2,7 +2,8 @@
 //! settings file in the per-user configuration folder.
 
 use deckly_core::{Profile, Settings};
-use std::path::PathBuf;
+use image::RgbaImage;
+use std::path::{Path, PathBuf};
 
 /// Settings files larger than this are ignored.
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
@@ -80,6 +81,45 @@ pub fn delete_profile(id: &str) -> Result<(), String> {
     }
 }
 
+fn screensavers_dir() -> Option<PathBuf> {
+    Some(config_dir()?.join("screensavers"))
+}
+
+/// A file name for a device serial: its letters and digits, or a hash when
+/// it has none.
+fn serial_file_name(serial: &str) -> String {
+    let clean: String = serial
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(64)
+        .collect();
+    if clean.is_empty() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        serial.hash(&mut h);
+        format!("device-{:016x}", h.finish())
+    } else {
+        clean
+    }
+}
+
+/// Saves a device's screensaver picture as a PNG; returns its path.
+pub fn save_screensaver(serial: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    let dir = screensavers_dir().ok_or("no configuration folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.png", serial_file_name(serial)));
+    image.save(&path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Deletes a screensaver picture Deckly saved; other files are left alone.
+pub fn delete_screensaver(path: &Path) {
+    let ours = screensavers_dir().is_some_and(|dir| path.parent() == Some(dir.as_path()));
+    if ours {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Loads the settings; a missing file gives the defaults, a damaged one the
 /// defaults and an error to show.
 pub fn load_settings() -> (Settings, Option<String>) {
@@ -127,5 +167,13 @@ mod tests {
         assert!(profile_path("../evil").is_none());
         assert!(profile_path("").is_none());
         assert!(profile_path("a/b").is_none());
+    }
+
+    #[test]
+    fn serial_file_names_are_safe() {
+        assert_eq!(serial_file_name("A8RKA4212IEK6O"), "A8RKA4212IEK6O");
+        assert_eq!(serial_file_name("../x/y"), "xy");
+        assert!(serial_file_name("..//").starts_with("device-"));
+        assert_eq!(serial_file_name(&"z".repeat(500)).len(), 64);
     }
 }
