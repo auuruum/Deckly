@@ -7,11 +7,12 @@
 
 use crate::actions::{self, ACTIONS, Category};
 use crate::os::{Hotkey, MediaKey};
-use crate::render::{self, Renderer};
+use crate::prefs::{self, Preferences};
+use crate::render::Renderer;
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
-use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleAlign};
+use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleAlign, TitleStyle};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
     TextureOptions, Ui, Vec2, pos2, vec2,
@@ -115,7 +116,7 @@ pub struct App {
     clipboard: Option<KeyConfig>,
     dirty: HashSet<String>,
     last_edit: Instant,
-    settings_open: bool,
+    prefs: Preferences,
     rename: Option<(String, String)>,
     /// Share of the left column given to the canvas.
     split: f32,
@@ -127,7 +128,12 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply(&cc.egui_ctx);
         let (profiles, errors) = store::load_profiles();
-        let mut state = runtime::State::new(profiles, store::load_settings());
+        let (settings, settings_error) = store::load_settings();
+        let mut state = runtime::State::new(profiles, settings);
+        if let Some(e) = settings_error {
+            eprintln!("deckly: {e}");
+            state.notify("Settings could not be loaded; using defaults");
+        }
         if !errors.is_empty() {
             for e in &errors {
                 eprintln!("deckly: {e}");
@@ -155,7 +161,7 @@ impl App {
             clipboard: None,
             dirty: HashSet::new(),
             last_edit: Instant::now(),
-            settings_open: false,
+            prefs: Preferences::new(),
             rename: None,
             split: DEFAULT_SPLIT,
             list_width: LIST_WIDTH,
@@ -217,7 +223,7 @@ impl App {
         px: u32,
     ) -> egui::TextureId {
         let px = px.clamp(32, 288);
-        let hash = render::key_hash(key);
+        let hash = self.renderer.key_hash(key);
         if let Some(t) = self.textures.get(&(hash, px)) {
             return t.id();
         }
@@ -249,7 +255,10 @@ impl App {
         let profile_y = geo.top + 72.0;
 
         // Device name.
-        let name = device.map_or(profile.model().name, |d| d.model.name);
+        let name = match device {
+            Some(d) => runtime::lock(&self.state).device_name(d),
+            None => profile.model().name.to_owned(),
+        };
         let title = format!("{name} {}", icon::CARET_DOWN);
         let galley = painter.layout_no_wrap(title, bold(17.0), TEXT);
         let rect = Rect::from_min_size(pos2(left, title_y - galley.size().y / 2.0), galley.size());
@@ -264,14 +273,20 @@ impl App {
                 TEXT_FAINT,
             );
         }
-        let devices = runtime::lock(&self.state).devices.clone();
+        let devices: Vec<(deckly_device::ConnectedDevice, String)> = {
+            let s = runtime::lock(&self.state);
+            s.devices
+                .iter()
+                .map(|d| (d.clone(), s.device_name(d)))
+                .collect()
+        };
         egui::Popup::menu(&resp).show(|ui| {
             if devices.is_empty() {
                 ui.label(RichText::new("No device connected").color(TEXT_DIM));
             }
-            for other in &devices {
+            for (other, other_name) in &devices {
                 let current = device.is_some_and(|d| d.serial == other.serial);
-                let text = format!("{}  ({})", other.model.name, other.serial);
+                let text = format!("{other_name}  ({})", other.serial);
                 if ui.selectable_label(current, text).clicked() {
                     self.selected_device = Some(other.serial.clone());
                     self.selected_key = None;
@@ -315,7 +330,7 @@ impl App {
             TEXT,
         );
         if resp.clicked() {
-            self.settings_open = true;
+            self.prefs.open(ui.ctx(), device.map(|d| d.serial.as_str()));
         }
     }
 
@@ -340,14 +355,9 @@ impl App {
             }
             ui.separator();
             if ui.button(format!("{}  New Profile", icon::PLUS)).clicked() {
-                let p = Profile::new("New Profile", profile.device);
-                pick = Some(p.id.clone());
-                self.rename = Some((p.id.clone(), p.name.clone()));
-                let mut s = runtime::lock(&self.state);
-                if let Err(e) = store::save_profile(&p) {
-                    s.notify(format!("Cannot save profile: {e}"));
-                }
-                s.profiles.push(p);
+                let id = runtime::lock(&self.state).add_profile("New Profile", profile.device);
+                pick = Some(id.clone());
+                self.rename = Some((id, "New Profile".to_owned()));
             }
             if ui
                 .button(format!("{}  Rename", icon::PENCIL_SIMPLE))
@@ -362,11 +372,7 @@ impl App {
                 )
                 .clicked()
             {
-                let mut s = runtime::lock(&self.state);
-                s.profiles.retain(|p| p.id != profile.id);
-                if let Err(e) = store::delete_profile(&profile.id) {
-                    s.notify(format!("Cannot delete profile: {e}"));
-                }
+                runtime::lock(&self.state).delete_profile(&profile.id);
                 pick = choices
                     .iter()
                     .find(|(id, _)| *id != profile.id)
@@ -384,9 +390,7 @@ impl App {
             Some(d) => {
                 let mut s = runtime::lock(&self.state);
                 s.settings.assignments.insert(d.serial.clone(), id);
-                if let Err(e) = store::save_settings(&s.settings) {
-                    s.notify(format!("Cannot save settings: {e}"));
-                }
+                s.save_settings();
                 drop(s);
                 let _ = self.runtime.send(Msg::Refresh);
             }
@@ -855,6 +859,7 @@ impl App {
             return;
         };
         let before = key.clone();
+        let defaults = self.renderer.title_defaults;
         let def = actions::find(&key.action);
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -906,29 +911,7 @@ impl App {
                                     .desired_rows(2)
                                     .desired_width(260.0),
                             );
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut key.title_style.show, "Show");
-                                ui.color_edit_button_srgb(&mut key.title_style.color);
-                                egui::ComboBox::from_id_salt("title-size")
-                                    .selected_text(format!("{} pt", key.title_style.size))
-                                    .width(70.0)
-                                    .show_ui(ui, |ui| {
-                                        for s in TITLE_SIZES {
-                                            ui.selectable_value(
-                                                &mut key.title_style.size,
-                                                s,
-                                                format!("{s} pt"),
-                                            );
-                                        }
-                                    });
-                                for align in TitleAlign::ALL {
-                                    ui.selectable_value(
-                                        &mut key.title_style.align,
-                                        align,
-                                        align.label(),
-                                    );
-                                }
-                            });
+                            title_style_row(ui, &mut key.title_style, defaults);
                         });
                         ui.end_row();
                         self.action_form(ui, key, &profiles, page_count);
@@ -1107,62 +1090,15 @@ impl App {
 
     // ----- windows -------------------------------------------------------
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.settings_open;
-        egui::Window::new("Preferences")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(380.0)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
-                let mut s = runtime::lock(&self.state);
-                ui.label(RichText::new("Devices").strong());
-                let mut b = s.settings.brightness;
-                let r = ui.add(
-                    egui::Slider::new(&mut b, 0..=100)
-                        .text("Brightness")
-                        .suffix("%"),
-                );
-                if r.changed() {
-                    s.settings.brightness = b;
-                    let _ = self.runtime.send(Msg::Brightness);
-                }
-                if (r.drag_stopped() || (r.changed() && !r.dragged()))
-                    && let Err(e) = store::save_settings(&s.settings)
-                {
-                    s.notify(format!("Cannot save settings: {e}"));
-                }
-                ui.add_space(10.0);
-                ui.label(RichText::new("Storage").strong());
-                if let Some(dir) = store::config_dir() {
-                    ui.label(
-                        RichText::new(dir.display().to_string())
-                            .color(TEXT_DIM)
-                            .small(),
-                    );
-                    if ui
-                        .button(format!("{}  Open folder", icon::FOLDER))
-                        .clicked()
-                    {
-                        let _ = std::fs::create_dir_all(&dir);
-                        if let Err(e) = crate::os::open(&dir.to_string_lossy()) {
-                            s.notify(e);
-                        }
-                    }
-                }
-                ui.add_space(10.0);
-                ui.label(RichText::new("About").strong());
-                ui.label(format!("Deckly {}", env!("CARGO_PKG_VERSION")));
-                ui.label(
-                    RichText::new(
-                        "Unofficial. Not made, approved or supported by Elgato or Corsair.",
-                    )
-                    .color(TEXT_DIM)
-                    .small(),
-                );
-            });
-        self.settings_open = open;
+    fn preferences(&mut self, ctx: &egui::Context, device: Option<&str>, kind: DeviceKind) {
+        let mut env = prefs::Env {
+            state: &self.state,
+            runtime: &self.runtime,
+            renderer: &mut self.renderer,
+            device,
+            kind,
+        };
+        self.prefs.show(ctx, &mut env);
     }
 
     fn rename_window(&mut self, ctx: &egui::Context) {
@@ -1238,6 +1174,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.renderer.title_defaults = runtime::lock(&self.state).settings.title_style;
         let (device, profile_id) = self.resolve();
         let (mut profile, mut page) = {
             let s = runtime::lock(&self.state);
@@ -1314,7 +1251,11 @@ impl eframe::App for App {
             let _ = self.runtime.send(Msg::Refresh);
         }
 
-        self.settings_window(&ctx);
+        self.preferences(
+            &ctx,
+            device.as_ref().map(|d| d.serial.as_str()),
+            profile.device,
+        );
         self.rename_window(&ctx);
         self.notice(&ctx);
         self.save_pending(false);
@@ -1358,6 +1299,39 @@ fn action_row(ui: &mut Ui, action: &'static actions::ActionDef) {
     })
     .response
     .on_hover_text(action.tooltip);
+}
+
+/// Title show, colour, size and position. Editing makes the key keep its
+/// own style; the reset button makes it follow the global style again.
+fn title_style_row(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: TitleStyle) {
+    let mut s = style.unwrap_or(defaults);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut s.show, "Show");
+        ui.color_edit_button_srgb(&mut s.color);
+        egui::ComboBox::from_id_salt("title-size")
+            .selected_text(format!("{} pt", s.size))
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                for size in TITLE_SIZES {
+                    ui.selectable_value(&mut s.size, size, format!("{size} pt"));
+                }
+            });
+        for align in TitleAlign::ALL {
+            ui.selectable_value(&mut s.align, align, align.label());
+        }
+        if style.is_some()
+            && ui
+                .button(icon::ARROW_COUNTER_CLOCKWISE)
+                .on_hover_text("Use the global title style from Preferences")
+                .clicked()
+        {
+            *style = None;
+            return;
+        }
+        if s != style.unwrap_or(defaults) {
+            *style = Some(s);
+        }
+    });
 }
 
 fn hint(ui: &mut Ui, text: &str) {

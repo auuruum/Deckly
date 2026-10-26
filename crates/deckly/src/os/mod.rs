@@ -1,7 +1,9 @@
 //! Desktop integration used by the built-in actions: key and text input,
-//! media keys and opening files or URLs. Each platform lives in its own
-//! module; a platform without an implementation returns an error instead of
-//! silently doing nothing.
+//! media keys and opening files or URLs, and starting Deckly at login. Each
+//! platform lives in its own module; a platform without an implementation
+//! returns an error instead of silently doing nothing.
+
+pub mod autostart;
 
 #[cfg(windows)]
 mod windows;

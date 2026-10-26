@@ -24,6 +24,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-25 | [Stream Deck MK.2 HID protocol](2026-10-25-mk2-hid.md) | Enumeration, key input, key images, brightness, reset |
 | 2026-10-25 | [Official app 7.6: main window](2026-10-25-main-window.md) | Window layout, sizes and colours, key grid, page strip, action list |
 | 2026-10-26 | [Elgato's published HID documentation](2026-10-26-elgato-hid-docs.md) | Main and Mini protocols, every documented model, rotations |
+| 2026-10-26 | [Official app 7.6: Preferences window](2026-10-26-preferences.md) | Tabs, layout and colours, device, profile and title style settings |
 
 ## Open questions
 

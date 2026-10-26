@@ -1,12 +1,14 @@
 //! Key image rendering, shared by the editor canvas and the device.
 //!
-//! A key is drawn from its configuration alone: a custom image or the
-//! action's icon, then the title on top. The same pixels go to the screen
+//! A key is drawn from its configuration and the global title style: a
+//! custom image or the action's icon, then the title on top. The same pixels go to the screen
 //! (at a larger size) and to the device (as a JPEG at the key size).
 
 use crate::actions;
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
-use deckly_core::{DeviceModel, ImageFormat, KeyConfig, Rotation, TitleAlign};
+use deckly_core::{
+    DeviceModel, ImageFormat, KeyConfig, Orientation, Rotation, TitleAlign, TitleStyle,
+};
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -19,6 +21,8 @@ const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;
 
 pub struct Renderer {
+    /// Title style of keys that do not set their own.
+    pub title_defaults: TitleStyle,
     title_font: Option<FontArc>,
     icon_font: Option<FontArc>,
     images: HashMap<PathBuf, Option<RgbaImage>>,
@@ -27,6 +31,7 @@ pub struct Renderer {
 impl Renderer {
     pub fn new() -> Self {
         Self {
+            title_defaults: TitleStyle::default(),
             title_font: load_title_font(),
             icon_font: FontArc::try_from_slice(egui_phosphor::Variant::Regular.font_bytes()).ok(),
             images: HashMap::new(),
@@ -43,12 +48,13 @@ impl Renderer {
         let Some(key) = key else {
             return RgbaImage::from_pixel(size, size, EMPTY);
         };
+        let style = self.title_style(key);
         let mut img = match key.image.as_deref().and_then(|p| self.custom_image(p)) {
             Some(src) => imageops::resize(src, size, size, imageops::FilterType::Triangle),
             None => {
                 let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
                 if let Some(font) = &self.icon_font {
-                    let lift = if has_title(key) && key.title_style.align == TitleAlign::Bottom {
+                    let lift = if has_title(key, &style) && style.align == TitleAlign::Bottom {
                         size as f32 * 0.08
                     } else {
                         0.0
@@ -64,17 +70,47 @@ impl Renderer {
                 img
             }
         };
-        if has_title(key)
+        if has_title(key, &style)
             && let Some(font) = &self.title_font
         {
-            draw_title(&mut img, font, key, size);
+            draw_title(&mut img, font, &key.title, &style, size);
         }
         img
     }
 
-    /// Key image for the device: its size, orientation and file format.
-    pub fn device_image(&mut self, key: Option<&KeyConfig>, model: &DeviceModel) -> Vec<u8> {
-        let img = self.render(key, model.key_image_size);
+    /// The title style a key is drawn with.
+    pub fn title_style(&self, key: &KeyConfig) -> TitleStyle {
+        key.title_style.unwrap_or(self.title_defaults)
+    }
+
+    /// Changes whenever anything that affects a key's pixels changes.
+    pub fn key_hash(&self, key: Option<&KeyConfig>) -> u64 {
+        let mut h = DefaultHasher::new();
+        if let Some(key) = key {
+            key.action.hash(&mut h);
+            key.title.hash(&mut h);
+            self.title_style(key).hash(&mut h);
+            key.image.hash(&mut h);
+            // Only multimedia icons depend on settings today.
+            if key.action == actions::MULTIMEDIA {
+                actions::str_setting(&key.settings, "media").hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// Key image for the device: its size, the model's and the user's
+    /// orientation, and the model's file format.
+    pub fn device_image(
+        &mut self,
+        key: Option<&KeyConfig>,
+        model: &DeviceModel,
+        orientation: Orientation,
+    ) -> Vec<u8> {
+        let mut img = self.render(key, model.key_image_size);
+        if orientation == Orientation::UpsideDown {
+            imageops::rotate180_in_place(&mut img);
+        }
         let img = match model.rotation {
             Rotation::None => img,
             Rotation::Half => imageops::rotate180(&img),
@@ -111,24 +147,8 @@ impl Renderer {
     }
 }
 
-/// Changes whenever anything that affects a key's pixels changes.
-pub fn key_hash(key: Option<&KeyConfig>) -> u64 {
-    let mut h = DefaultHasher::new();
-    if let Some(key) = key {
-        key.action.hash(&mut h);
-        key.title.hash(&mut h);
-        key.title_style.hash(&mut h);
-        key.image.hash(&mut h);
-        // Only multimedia icons depend on settings today.
-        if key.action == actions::MULTIMEDIA {
-            actions::str_setting(&key.settings, "media").hash(&mut h);
-        }
-    }
-    h.finish()
-}
-
-fn has_title(key: &KeyConfig) -> bool {
-    key.title_style.show && !key.title.trim().is_empty()
+fn has_title(key: &KeyConfig, style: &TitleStyle) -> bool {
+    style.show && !key.title.trim().is_empty()
 }
 
 fn decode_image(path: &Path) -> Result<RgbaImage, String> {
@@ -253,12 +273,11 @@ fn draw_line(
     }
 }
 
-fn draw_title(img: &mut RgbaImage, font: &FontArc, key: &KeyConfig, size: u32) {
-    let style = key.title_style;
+fn draw_title(img: &mut RgbaImage, font: &FontArc, title: &str, style: &TitleStyle, size: u32) {
     let k = size as f32 / 72.0;
     let scale = PxScale::from(f32::from(style.size) * 1.2 * k);
     let sf = font.as_scaled(scale);
-    let lines: Vec<&str> = key.title.lines().take(MAX_TITLE_LINES).collect();
+    let lines: Vec<&str> = title.lines().take(MAX_TITLE_LINES).collect();
     let line_height = sf.height() + sf.line_gap();
     let block = line_height * lines.len() as f32 - sf.line_gap();
     let pad = 4.0 * k;
@@ -308,7 +327,7 @@ mod tests {
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
         key.title = "Title".into();
         for model in DeviceModel::ALL {
-            let data = r.device_image(Some(&key), model);
+            let data = r.device_image(Some(&key), model, Orientation::Standard);
             let magic: &[u8] = match model.image_format() {
                 ImageFormat::Jpeg => &[0xFF, 0xD8],
                 ImageFormat::Bmp => b"BM",
@@ -335,9 +354,9 @@ mod tests {
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
         key.image = Some(path.clone());
         let mut r = Renderer::new();
-        let mut corner = |kind| {
+        let mut corner = |kind, orientation| {
             let model = DeviceModel::of(kind);
-            let img = image::load_from_memory(&r.device_image(Some(&key), model))
+            let img = image::load_from_memory(&r.device_image(Some(&key), model, orientation))
                 .unwrap()
                 .into_luma8();
             let s = model.key_image_size - 1;
@@ -346,19 +365,36 @@ mod tests {
         };
         use deckly_core::DeviceKind as K;
         // Corners in order: top left, top right, bottom right, bottom left.
-        assert_eq!(corner(K::Plus), [true, false, false, false]);
-        assert_eq!(corner(K::Mk2), [false, false, true, false]);
-        assert_eq!(corner(K::Mini), [false, true, false, false]);
-        assert_eq!(corner(K::PlusXl), [false, false, false, true]);
+        let standard = Orientation::Standard;
+        assert_eq!(corner(K::Plus, standard), [true, false, false, false]);
+        assert_eq!(corner(K::Mk2, standard), [false, false, true, false]);
+        assert_eq!(corner(K::Mini, standard), [false, true, false, false]);
+        assert_eq!(corner(K::PlusXl, standard), [false, false, false, true]);
+        // Upside down adds half a turn on top of the model's own.
+        let flipped = Orientation::UpsideDown;
+        assert_eq!(corner(K::Plus, flipped), [false, false, true, false]);
+        assert_eq!(corner(K::Mk2, flipped), [true, false, false, false]);
+        assert_eq!(corner(K::Mini, flipped), [false, false, false, true]);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn hash_tracks_visible_changes() {
+        let mut r = Renderer::new();
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
-        let a = key_hash(Some(&key));
+        let a = r.key_hash(Some(&key));
         key.title = "x".into();
-        assert_ne!(a, key_hash(Some(&key)));
-        assert_ne!(key_hash(None), key_hash(Some(&key)));
+        let b = r.key_hash(Some(&key));
+        assert_ne!(a, b);
+        assert_ne!(r.key_hash(None), b);
+        // Keys without their own style change with the global one...
+        r.title_defaults.size = 20;
+        let c = r.key_hash(Some(&key));
+        assert_ne!(b, c);
+        // ...keys with their own style do not.
+        key.title_style = Some(TitleStyle::default());
+        let d = r.key_hash(Some(&key));
+        r.title_defaults.size = 9;
+        assert_eq!(d, r.key_hash(Some(&key)));
     }
 }

@@ -7,6 +7,7 @@ mod actions;
 mod app;
 mod logo;
 mod os;
+mod prefs;
 mod render;
 mod runtime;
 mod store;

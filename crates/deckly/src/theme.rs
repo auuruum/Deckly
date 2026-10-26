@@ -39,6 +39,17 @@ pub const POPUP: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 pub const ACCENT: Color32 = Color32::from_rgb(0x3E, 0x7A, 0xC0);
 pub const WARNING: Color32 = Color32::from_rgb(0xF0, 0xB4, 0x3C);
 
+// Preferences window.
+pub const PREF_STRIP: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
+pub const PREF_BODY: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
+pub const PREF_TAB_BORDER: Color32 = Color32::from_rgb(0x45, 0x45, 0x45);
+pub const PREF_PANEL: Color32 = Color32::from_rgb(0x29, 0x29, 0x29);
+pub const PREF_PANEL_BORDER: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
+pub const PREF_FIELD: Color32 = Color32::from_rgb(0x3D, 0x3D, 0x3D);
+pub const PREF_SEGMENT: Color32 = Color32::from_rgb(0x55, 0x55, 0x55);
+pub const PREF_CHECK: Color32 = Color32::from_rgb(0x36, 0x7A, 0xF6);
+pub const PREF_ROW_SELECTED: Color32 = Color32::from_rgb(0x00, 0x78, 0xFF);
+
 // Sizes at 100% scale.
 pub const LIST_WIDTH: f32 = 298.0;
 pub const KEY_SIZE: f32 = 70.0;

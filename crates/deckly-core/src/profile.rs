@@ -40,8 +40,9 @@ pub struct KeyConfig {
     pub action: String,
     #[serde(default)]
     pub title: String,
-    #[serde(default)]
-    pub title_style: TitleStyle,
+    /// `None` follows the global title style in the settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_style: Option<TitleStyle>,
     /// Custom key image (PNG or JPEG). `None` uses the action's icon.
     #[serde(default)]
     pub image: Option<PathBuf>,
@@ -58,6 +59,15 @@ pub struct TitleStyle {
     /// Font size in points at the 72 px key size; scaled for larger keys.
     pub size: u8,
     pub align: TitleAlign,
+}
+
+impl TitleStyle {
+    pub const MIN_SIZE: u8 = 6;
+    pub const MAX_SIZE: u8 = 40;
+
+    pub fn sanitize(&mut self) {
+        self.size = self.size.clamp(Self::MIN_SIZE, Self::MAX_SIZE);
+    }
 }
 
 impl Default for TitleStyle {
@@ -114,7 +124,7 @@ impl KeyConfig {
         Self {
             action: action.into(),
             title: String::new(),
-            title_style: TitleStyle::default(),
+            title_style: None,
             image: None,
             settings,
         }
@@ -153,7 +163,14 @@ impl Profile {
                 if key.title.chars().count() > MAX_TITLE_CHARS {
                     key.title = key.title.chars().take(MAX_TITLE_CHARS).collect();
                 }
-                key.title_style.size = key.title_style.size.clamp(6, 40);
+                if let Some(style) = &mut key.title_style {
+                    style.sanitize();
+                }
+                // Before the global title style existed every key stored
+                // one; an untouched default style now follows the global one.
+                if key.title_style == Some(TitleStyle::default()) {
+                    key.title_style = None;
+                }
             }
         }
         if self.id.is_empty() {
@@ -251,6 +268,23 @@ mod tests {
             p.pages[0].keys.keys().copied().collect::<Vec<_>>(),
             vec![14]
         );
+    }
+
+    #[test]
+    fn default_title_styles_follow_the_global_style() {
+        let text = r#"{"id":"a","name":"x","device":"mk2","pages":[{"id":"p","keys":{
+            "0":{"action":"a","title_style":{"show":true,"color":[255,255,255],"size":12,"align":"bottom"}},
+            "1":{"action":"b","title_style":{"size":99}},
+            "2":{"action":"c"}}}]}"#;
+        let p = Profile::from_json(text).unwrap();
+        let keys = &p.pages[0].keys;
+        assert_eq!(keys[&0].title_style, None);
+        assert_eq!(
+            keys[&1].title_style.map(|s| s.size),
+            Some(TitleStyle::MAX_SIZE)
+        );
+        assert_eq!(keys[&2].title_style, None);
+        assert!(!p.to_json().unwrap().contains("\"title_style\": null"));
     }
 
     #[test]

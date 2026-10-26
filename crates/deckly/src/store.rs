@@ -1,27 +1,11 @@
 //! Where Deckly keeps its files: one JSON file per profile plus a small
 //! settings file in the per-user configuration folder.
 
-use deckly_core::Profile;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use deckly_core::{Profile, Settings};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Settings {
-    pub brightness: u8,
-    /// Device serial number -> profile id shown on that device.
-    pub assignments: BTreeMap<String, String>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            brightness: 70,
-            assignments: BTreeMap::new(),
-        }
-    }
-}
+/// Settings files larger than this are ignored.
+const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 
 pub fn config_dir() -> Option<PathBuf> {
     let env = |name| {
@@ -96,11 +80,33 @@ pub fn delete_profile(id: &str) -> Result<(), String> {
     }
 }
 
-pub fn load_settings() -> Settings {
-    config_dir()
-        .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+/// Loads the settings; a missing file gives the defaults, a damaged one the
+/// defaults and an error to show.
+pub fn load_settings() -> (Settings, Option<String>) {
+    let Some(path) = config_dir().map(|d| d.join("settings.json")) else {
+        return (Settings::default(), None);
+    };
+    let read = || -> Result<Option<Settings>, String> {
+        let len = match std::fs::metadata(&path) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        if len > MAX_SETTINGS_BYTES {
+            return Err("file is too large".into());
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        Settings::from_json(&text)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    };
+    match read() {
+        Ok(s) => (s.unwrap_or_default(), None),
+        Err(e) => (
+            Settings::default(),
+            Some(format!("{}: {e}", path.display())),
+        ),
+    }
 }
 
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
@@ -121,11 +127,5 @@ mod tests {
         assert!(profile_path("../evil").is_none());
         assert!(profile_path("").is_none());
         assert!(profile_path("a/b").is_none());
-    }
-
-    #[test]
-    fn settings_tolerate_missing_fields() {
-        let s: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.brightness, 70);
     }
 }
