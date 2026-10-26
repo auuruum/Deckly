@@ -1,9 +1,11 @@
-//! Report encoding and decoding for the JPEG-image ("second generation")
-//! family: Stream Deck (v2), MK.2 and XL.
+//! Report encoding and decoding for Elgato's "main" protocol, spoken by
+//! every family except the Mini: Classic (MK.2), XL, Neo, + and + XL.
 //!
 //! Every layout and offset here is recorded with its evidence in
-//! docs/clean-room/2026-10-25-mk2-hid.md. All functions are pure so they can
-//! be tested without hardware; parsing never trusts the input.
+//! docs/clean-room/2026-10-25-mk2-hid.md (observed on an MK.2) and
+//! docs/clean-room/2026-10-26-elgato-hid-docs.md (Elgato's documentation).
+//! All functions are pure so they can be tested without hardware; parsing
+//! never trusts the input.
 
 /// Largest input report we read (report id included).
 pub const INPUT_REPORT_LEN: usize = 512;
@@ -12,13 +14,12 @@ pub const IMAGE_REPORT_LEN: usize = 1024;
 pub const IMAGE_HEADER_LEN: usize = 8;
 pub const IMAGE_CHUNK_LEN: usize = IMAGE_REPORT_LEN - IMAGE_HEADER_LEN;
 pub const FEATURE_REPORT_LEN: usize = 32;
-/// Key images above this size are refused; a 96 px JPEG is a few KB.
+/// Key images above this size are refused; a 120 px JPEG is a few KB and an
+/// 80 px BMP for the Mini about 19 KB.
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024;
-/// The device shows key images turned by 180 degrees, so they are sent
-/// pre-rotated.
-pub const IMAGE_ROTATED_180: bool = true;
 
 const REPORT_INPUT: u8 = 0x01;
+const INPUT_KEYS: u8 = 0x00;
 const REPORT_IMAGE: u8 = 0x02;
 const IMAGE_COMMAND_KEY: u8 = 0x07;
 const REPORT_COMMAND: u8 = 0x03;
@@ -81,10 +82,11 @@ pub fn image_reports(key: u8, jpeg: &[u8]) -> Result<Vec<[u8; IMAGE_REPORT_LEN]>
 }
 
 /// Returns the pressed state of each key, or `None` when the report is not
-/// a key report or is too short for `key_count` keys.
+/// a key report or is too short for `key_count` keys. Extra key bytes (the
+/// Neo's two touch sensors) are ignored. Dial and touch strip reports of the
+/// Stream Deck + family are not decoded yet.
 pub fn parse_keys(report: &[u8], key_count: u8) -> Option<Vec<bool>> {
-    let (&id, rest) = report.split_first()?;
-    if id != REPORT_INPUT || rest.first() != Some(&0x00) {
+    if report.first() != Some(&REPORT_INPUT) || report.get(1) != Some(&INPUT_KEYS) {
         return None;
     }
     let states = report.get(KEY_STATES_OFFSET..KEY_STATES_OFFSET + usize::from(key_count))?;
@@ -147,7 +149,7 @@ pub fn parse_layout(report: &[u8]) -> Option<Layout> {
     })
 }
 
-fn ascii(bytes: &[u8]) -> Option<String> {
+pub(crate) fn ascii(bytes: &[u8]) -> Option<String> {
     let text: String = bytes
         .iter()
         .take_while(|&&b| b != 0)
@@ -239,11 +241,21 @@ mod tests {
         report[2] = 15;
         report[4 + 2] = 1;
         let keys = parse_keys(&report, 15).unwrap();
+        assert_eq!(keys.len(), 15);
         assert_eq!(keys.iter().filter(|&&k| k).count(), 1);
         assert!(keys[2]);
         assert_eq!(parse_keys(&report[..10], 15), None);
         assert_eq!(parse_keys(&[0x02, 0, 0, 0], 1), None);
         assert_eq!(parse_keys(&[], 1), None);
+    }
+
+    #[test]
+    fn neo_sensor_bytes_are_ignored() {
+        // Neo: 8 keys plus 2 touch sensors appended as key bytes.
+        let mut report = [0u8; 64];
+        report[..4].copy_from_slice(&[0x01, 0x00, 10, 0]);
+        report[4 + 9] = 1;
+        assert_eq!(parse_keys(&report, 8), Some(vec![false; 8]));
     }
 
     #[test]

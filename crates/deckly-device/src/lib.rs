@@ -6,12 +6,14 @@
 //! images and brightness are sent through the manager. A disconnect is an
 //! ordinary event, never an error that stops the manager.
 
+pub mod mini;
 pub mod protocol;
 
 use async_hid::{AsyncHidFeatureHandle, AsyncHidRead, AsyncHidWrite, Device, DeviceId, HidBackend};
-use deckly_core::{DeviceModel, ELGATO_VENDOR_ID};
+use deckly_core::{DeviceModel, ELGATO_VENDOR_ID, Protocol};
 use futures_lite::StreamExt;
 use futures_lite::future::block_on;
+use protocol::{FEATURE_REPORT_LEN, IMAGE_REPORT_LEN, ProtocolError};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -79,10 +81,12 @@ impl DeviceManager {
         }
     }
 
-    /// Queues a JPEG image for a key. Images still queued for the same key
-    /// are replaced, so a burst of updates sends only the latest one.
-    pub fn set_image(&self, handle: Handle, key: u8, jpeg: Vec<u8>) {
-        self.send(handle, Command::Image(key, jpeg));
+    /// Queues an image for a key, already encoded and turned the way the
+    /// model needs (see [`DeviceModel::image_format`]). Images still queued
+    /// for the same key are replaced, so a burst of updates sends only the
+    /// latest one.
+    pub fn set_image(&self, handle: Handle, key: u8, image: Vec<u8>) {
+        self.send(handle, Command::Image(key, image));
     }
 
     pub fn set_brightness(&self, handle: Handle, percent: u8) {
@@ -168,11 +172,11 @@ async fn scan_devices(
                 lock(open).insert(device.id.clone(), handle);
                 let (tx, rx) = channel();
                 lock(writers).insert(handle, tx);
-                spawn_writer(handle, writer, feature, rx);
+                spawn_writer(handle, model, writer, feature, rx);
                 events(Event::Connected(info));
                 spawn_reader(
                     handle,
-                    model.key_count(),
+                    model,
                     reader,
                     events.clone(),
                     writers.clone(),
@@ -196,14 +200,25 @@ async fn open_device(
     async_hid::DeviceFeatureHandle,
 )> {
     let mut feature = device.open_feature_handle().await?;
-    let serial = read_feature(&mut feature, protocol::REPORT_SERIAL)
+    let (serial_id, firmware_id) = match model.protocol {
+        Protocol::Main => (protocol::REPORT_SERIAL, protocol::REPORT_FIRMWARE),
+        Protocol::Mini => (mini::REPORT_SERIAL, mini::REPORT_FIRMWARE),
+    };
+    let serial = read_feature(&mut feature, serial_id)
         .await
-        .and_then(|r| protocol::parse_serial(&r))
+        .and_then(|r| match model.protocol {
+            Protocol::Main => protocol::parse_serial(&r),
+            Protocol::Mini => mini::parse_serial(&r),
+        })
         .or_else(|| device.serial_number.clone())
         .unwrap_or_default();
-    let firmware = read_feature(&mut feature, protocol::REPORT_FIRMWARE)
-        .await
-        .and_then(|r| protocol::parse_firmware(&r));
+    let firmware =
+        read_feature(&mut feature, firmware_id)
+            .await
+            .and_then(|r| match model.protocol {
+                Protocol::Main => protocol::parse_firmware(&r),
+                Protocol::Mini => mini::parse_firmware(&r),
+            });
     let (reader, writer) = device.open().await?;
     let info = ConnectedDevice {
         handle: next_handle.fetch_add(1, Ordering::Relaxed),
@@ -217,8 +232,8 @@ async fn open_device(
 async fn read_feature(
     feature: &mut async_hid::DeviceFeatureHandle,
     id: u8,
-) -> Option<[u8; protocol::FEATURE_REPORT_LEN]> {
-    let mut buf = [0u8; protocol::FEATURE_REPORT_LEN];
+) -> Option<[u8; FEATURE_REPORT_LEN]> {
+    let mut buf = [0u8; FEATURE_REPORT_LEN];
     buf[0] = id;
     feature
         .read_feature_report(&mut buf)
@@ -227,9 +242,27 @@ async fn read_feature(
         .map(|_| buf)
 }
 
+fn parse_keys(model: &DeviceModel, report: &[u8]) -> Option<Vec<bool>> {
+    match model.protocol {
+        Protocol::Main => protocol::parse_keys(report, model.key_count()),
+        Protocol::Mini => mini::parse_keys(report, model.key_count()),
+    }
+}
+
+fn image_reports(
+    model: &DeviceModel,
+    key: u8,
+    image: &[u8],
+) -> Result<Vec<[u8; IMAGE_REPORT_LEN]>, ProtocolError> {
+    match model.protocol {
+        Protocol::Main => protocol::image_reports(key, image),
+        Protocol::Mini => mini::image_reports(key, image),
+    }
+}
+
 fn spawn_reader(
     handle: Handle,
-    key_count: u8,
+    model: &'static DeviceModel,
     mut reader: async_hid::DeviceReader,
     events: EventSink,
     writers: Writers,
@@ -238,16 +271,13 @@ fn spawn_reader(
 ) {
     let run = move || {
         let mut buf = [0u8; protocol::INPUT_REPORT_LEN];
-        let mut pressed = vec![false; usize::from(key_count)];
+        let mut pressed = vec![false; usize::from(model.key_count())];
         loop {
             let n = match block_on(reader.read_input_report(&mut buf)) {
                 Ok(n) => n,
                 Err(_) => break,
             };
-            let Some(states) = buf
-                .get(..n)
-                .and_then(|r| protocol::parse_keys(r, key_count))
-            else {
+            let Some(states) = buf.get(..n).and_then(|r| parse_keys(model, r)) else {
                 continue;
             };
             for (key, (&now, was)) in states.iter().zip(pressed.iter_mut()).enumerate() {
@@ -278,6 +308,7 @@ fn spawn_reader(
 
 fn spawn_writer(
     handle: Handle,
+    model: &'static DeviceModel,
     mut writer: async_hid::DeviceWriter,
     mut feature: async_hid::DeviceFeatureHandle,
     commands: Receiver<Command>,
@@ -289,9 +320,9 @@ fn spawn_writer(
             let mut others = Vec::new();
             for command in std::iter::once(first).chain(commands.try_iter()) {
                 match command {
-                    Command::Image(key, jpeg) => {
+                    Command::Image(key, image) => {
                         images.retain(|(k, _)| *k != key);
-                        images.push((key, jpeg));
+                        images.push((key, image));
                     }
                     Command::Reset => {
                         images.clear();
@@ -301,17 +332,19 @@ fn spawn_writer(
                 }
             }
             for command in others {
-                let report = match command {
-                    Command::Brightness(p) => protocol::brightness_report(p),
-                    Command::Reset => protocol::reset_report(),
-                    Command::Image(..) => continue,
+                let report = match (command, model.protocol) {
+                    (Command::Brightness(p), Protocol::Main) => protocol::brightness_report(p),
+                    (Command::Brightness(p), Protocol::Mini) => mini::brightness_report(p),
+                    (Command::Reset, Protocol::Main) => protocol::reset_report(),
+                    (Command::Reset, Protocol::Mini) => mini::reset_report(),
+                    (Command::Image(..), _) => continue,
                 };
                 if let Err(e) = block_on(feature.write_feature_report(&report)) {
                     eprintln!("deckly: feature write failed: {e}");
                 }
             }
-            for (key, jpeg) in images {
-                let reports = match protocol::image_reports(key, &jpeg) {
+            for (key, image) in images {
+                let reports = match image_reports(model, key, &image) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("deckly: {e}");

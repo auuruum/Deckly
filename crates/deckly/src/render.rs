@@ -6,7 +6,7 @@
 
 use crate::actions;
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
-use deckly_core::{KeyConfig, TitleAlign};
+use deckly_core::{DeviceModel, ImageFormat, KeyConfig, Rotation, TitleAlign};
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -72,19 +72,29 @@ impl Renderer {
         img
     }
 
-    /// JPEG for the device, in the orientation the device expects.
-    pub fn device_jpeg(&mut self, key: Option<&KeyConfig>, size: u32) -> Vec<u8> {
-        let mut img = self.render(key, size);
-        if deckly_device::protocol::IMAGE_ROTATED_180 {
-            imageops::rotate180_in_place(&mut img);
-        }
+    /// Key image for the device: its size, orientation and file format.
+    pub fn device_image(&mut self, key: Option<&KeyConfig>, model: &DeviceModel) -> Vec<u8> {
+        let img = self.render(key, model.key_image_size);
+        let img = match model.rotation {
+            Rotation::None => img,
+            Rotation::Half => imageops::rotate180(&img),
+            Rotation::Clockwise => imageops::rotate90(&img),
+            Rotation::CounterClockwise => imageops::rotate270(&img),
+        };
         let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
-        let mut jpeg = Vec::new();
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90);
-        if let Err(e) = rgb.write_with_encoder(encoder) {
-            eprintln!("deckly: JPEG encoding failed: {e}");
+        let mut out = Vec::new();
+        let result = match model.image_format() {
+            ImageFormat::Jpeg => rgb.write_with_encoder(
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90),
+            ),
+            ImageFormat::Bmp => {
+                rgb.write_with_encoder(image::codecs::bmp::BmpEncoder::new(&mut out))
+            }
+        };
+        if let Err(e) = result {
+            eprintln!("deckly: key image encoding failed: {e}");
         }
-        jpeg
+        out
     }
 
     fn custom_image(&mut self, path: &Path) -> Option<&RgbaImage> {
@@ -293,12 +303,54 @@ mod tests {
     }
 
     #[test]
-    fn device_jpeg_is_a_small_jpeg() {
+    fn device_images_fit_every_model() {
         let mut r = Renderer::new();
-        let key = KeyConfig::new(actions::HOTKEY, json!({}));
-        let jpeg = r.device_jpeg(Some(&key), 72);
-        assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
-        assert!(jpeg.len() < deckly_device::protocol::MAX_IMAGE_BYTES);
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.title = "Title".into();
+        for model in DeviceModel::ALL {
+            let data = r.device_image(Some(&key), model);
+            let magic: &[u8] = match model.image_format() {
+                ImageFormat::Jpeg => &[0xFF, 0xD8],
+                ImageFormat::Bmp => b"BM",
+            };
+            assert_eq!(&data[..2], magic, "{}", model.name);
+            assert!(data.len() < deckly_device::protocol::MAX_IMAGE_BYTES);
+            let decoded = image::load_from_memory(&data).unwrap();
+            assert_eq!(decoded.width(), model.key_image_size);
+            assert_eq!(decoded.height(), model.key_image_size);
+        }
+    }
+
+    #[test]
+    fn device_images_are_turned_per_model() {
+        // A key with a white top-left corner shows where that corner lands.
+        let path = std::env::temp_dir().join(format!("deckly-corner-{}.png", std::process::id()));
+        let mut src = RgbaImage::from_pixel(80, 80, Rgba([0, 0, 0, 255]));
+        for y in 0..20 {
+            for x in 0..20 {
+                src.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        src.save(&path).unwrap();
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.image = Some(path.clone());
+        let mut r = Renderer::new();
+        let mut corner = |kind| {
+            let model = DeviceModel::of(kind);
+            let img = image::load_from_memory(&r.device_image(Some(&key), model))
+                .unwrap()
+                .into_luma8();
+            let s = model.key_image_size - 1;
+            let bright = |x, y| img.get_pixel(x, y)[0] > 128;
+            [bright(0, 0), bright(s, 0), bright(s, s), bright(0, s)]
+        };
+        use deckly_core::DeviceKind as K;
+        // Corners in order: top left, top right, bottom right, bottom left.
+        assert_eq!(corner(K::Plus), [true, false, false, false]);
+        assert_eq!(corner(K::Mk2), [false, false, true, false]);
+        assert_eq!(corner(K::Mini), [false, true, false, false]);
+        assert_eq!(corner(K::PlusXl), [false, false, false, true]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

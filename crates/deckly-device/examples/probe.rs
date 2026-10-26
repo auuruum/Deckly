@@ -30,7 +30,10 @@ fn main() {
             );
             match d.open_feature_handle().await {
                 Ok(mut h) => {
-                    for id in [0x03u8, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B] {
+                    // Main protocol ids, then the Mini firmware ids.
+                    for id in [
+                        0x03u8, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xA0, 0xA1, 0xA2,
+                    ] {
                         let mut buf = [0u8; 32];
                         buf[0] = id;
                         match h.read_feature_report(&mut buf).await {

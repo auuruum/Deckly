@@ -6,5 +6,5 @@
 pub mod device;
 pub mod profile;
 
-pub use device::{DeviceKind, DeviceModel, ELGATO_VENDOR_ID};
+pub use device::{DeviceKind, DeviceModel, ELGATO_VENDOR_ID, ImageFormat, Protocol, Rotation};
 pub use profile::{KeyConfig, Page, Profile, ProfileError, TitleAlign, TitleStyle};

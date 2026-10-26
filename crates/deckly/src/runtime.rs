@@ -9,7 +9,7 @@
 use crate::actions::{self, Outcome};
 use crate::render::{self, Renderer};
 use crate::store::{self, Settings};
-use deckly_core::{DeviceKind, KeyConfig, Profile};
+use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Profile};
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Sender, channel};
@@ -298,7 +298,7 @@ fn refresh(
     sent: &mut HashMap<Handle, Vec<Option<u64>>>,
 ) {
     // Collect the work under the lock, render without it.
-    let mut work: Vec<(Handle, u32, Vec<Option<KeyConfig>>)> = Vec::new();
+    let mut work: Vec<(Handle, &'static DeviceModel, Vec<Option<KeyConfig>>)> = Vec::new();
     {
         let s = lock(state);
         for d in &s.devices {
@@ -310,10 +310,10 @@ fn refresh(
             let keys = (0..d.model.key_count())
                 .map(|k| page.keys.get(&k).cloned())
                 .collect();
-            work.push((d.handle, d.model.key_image_size, keys));
+            work.push((d.handle, d.model, keys));
         }
     }
-    for (handle, size, keys) in work {
+    for (handle, model, keys) in work {
         let Some(last) = sent.get_mut(&handle) else {
             continue;
         };
@@ -330,7 +330,7 @@ fn refresh(
             devices.set_image(
                 handle,
                 index as u8,
-                renderer.device_jpeg(key.as_ref(), size),
+                renderer.device_image(key.as_ref(), model),
             );
         }
     }

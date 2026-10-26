@@ -13,8 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"] }
 egui-phosphor = "0.14.0"
-# Key image rendering: decode custom PNG/JPEG images, encode device JPEGs.
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# Key image rendering: decode custom PNG/JPEG images, encode device JPEGs
+# (and BMPs for the Mini family).
+image = { version = "0.25.10", default-features = false, features = ["bmp", "png", "jpeg"] }
 ab_glyph = "0.2.32"
 # Native file dialogs (Win32, xdg-portal, AppKit); no GTK.
 rfd = "0.17.2"
