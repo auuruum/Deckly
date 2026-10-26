@@ -1084,6 +1084,24 @@ impl App {
                 });
                 ui.end_row();
             }
+            actions::SLEEP => {
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(
+                            "Open Preferences to customize Sleep settings and select a \
+                             screensaver image.",
+                        )
+                        .color(TEXT_DIM),
+                    );
+                    ui.add_space(4.0);
+                    if ui.button("Open Preferences…").clicked() {
+                        self.prefs
+                            .open_devices(ui.ctx(), self.selected_device.as_deref());
+                    }
+                });
+                ui.end_row();
+            }
             _ => {}
         }
     }

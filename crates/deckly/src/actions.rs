@@ -19,6 +19,7 @@ pub const PREVIOUS_PAGE: &str = "com.deckly.navigation.previous-page";
 pub const GO_TO_PAGE: &str = "com.deckly.navigation.go-to-page";
 pub const SWITCH_PROFILE: &str = "com.deckly.navigation.switch-profile";
 pub const BRIGHTNESS: &str = "com.deckly.device.brightness";
+pub const SLEEP: &str = "com.deckly.device.sleep";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
@@ -137,6 +138,14 @@ pub const ACTIONS: &[ActionDef] = &[
         tooltip: "Change the key brightness",
         defaults: || json!({ "mode": "up", "value": 10 }),
     },
+    ActionDef {
+        uuid: SLEEP,
+        name: "Sleep",
+        category: Category::Device,
+        icon: icon::MOON_STARS,
+        tooltip: "Put this device to sleep now",
+        defaults: || json!({}),
+    },
 ];
 
 pub fn find(uuid: &str) -> Option<&'static ActionDef> {
@@ -242,6 +251,8 @@ pub enum Outcome {
     GoToPage(usize),
     SwitchProfile(String),
     Brightness(BrightnessChange),
+    /// Sleep now, as if Sleep After had run out.
+    Sleep,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -313,6 +324,7 @@ pub fn run(key: &KeyConfig) -> Result<Outcome, String> {
             };
             Ok(Outcome::Brightness(change))
         }
+        SLEEP => Ok(Outcome::Sleep),
         other => Err(format!("unknown action {other}")),
     }
 }
@@ -345,6 +357,7 @@ mod tests {
             Ok(Outcome::GoToPage(0))
         );
         assert!(run(&key(SWITCH_PROFILE, json!({}))).is_err());
+        assert_eq!(run(&key(SLEEP, json!({}))), Ok(Outcome::Sleep));
         assert!(run(&key("com.example.nope", json!({}))).is_err());
     }
 

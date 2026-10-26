@@ -303,6 +303,13 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                     apply_settings(&state, &devices, &mut links);
                     refresh(&state, &devices, &mut renderer, &mut links);
                 }
+                Msg::Outcome(handle, Ok(Outcome::Sleep)) => {
+                    let awake = links.get(&handle).is_some_and(|l| l.enabled && !l.asleep);
+                    if awake {
+                        put_to_sleep(&state, &devices, &mut links, vec![handle]);
+                    }
+                    repaint();
+                }
                 Msg::Outcome(handle, result) => {
                     apply_outcome(&state, &devices, handle, result);
                     refresh(&state, &devices, &mut renderer, &mut links);
@@ -421,21 +428,36 @@ fn next_sleep(state: &Shared, links: &Links) -> Option<Instant> {
         .min()
 }
 
-/// Puts devices idle for longer than Sleep After to sleep: their
-/// screensaver is shown if they have one, else the backlight goes off.
+/// Puts devices idle for longer than Sleep After to sleep.
 fn fall_asleep(state: &Shared, devices: &DeviceManager, links: &mut Links) {
-    let mut sleepers = Vec::new();
-    {
+    let idle: Vec<Handle> = {
         let s = lock(state);
-        for (&handle, link) in links.iter() {
-            let Some(idle) = sleep_after(&s.settings, &link.serial) else {
-                continue;
-            };
-            if link.enabled && !link.asleep && link.active_at.elapsed() >= idle {
-                sleepers.push((handle, s.settings.device(&link.serial).screensaver));
-            }
-        }
-    }
+        links
+            .iter()
+            .filter(|(_, link)| {
+                sleep_after(&s.settings, &link.serial).is_some_and(|idle| {
+                    link.enabled && !link.asleep && link.active_at.elapsed() >= idle
+                })
+            })
+            .map(|(&handle, _)| handle)
+            .collect()
+    };
+    put_to_sleep(state, devices, links, idle);
+}
+
+/// Puts devices to sleep: their screensaver is shown if they have one,
+/// else the backlight goes off.
+fn put_to_sleep(state: &Shared, devices: &DeviceManager, links: &mut Links, handles: Vec<Handle>) {
+    let sleepers: Vec<(Handle, Option<std::path::PathBuf>)> = {
+        let s = lock(state);
+        handles
+            .into_iter()
+            .filter_map(|h| {
+                let serial = &links.get(&h)?.serial;
+                Some((h, s.settings.device(serial).screensaver))
+            })
+            .collect()
+    };
     // Pictures are decoded without holding the lock.
     for (handle, screensaver) in sleepers {
         let Some(link) = links.get_mut(&handle) else {
@@ -536,7 +558,8 @@ fn apply_outcome(
         return;
     };
     match result {
-        Ok(Outcome::Done) => {}
+        // Sleep is handled by the runtime loop, which owns the device links.
+        Ok(Outcome::Done | Outcome::Sleep) => {}
         Ok(Outcome::NextPage) => s.set_page(&profile_id, (page + 1) % pages.max(1)),
         Ok(Outcome::PreviousPage) => s.set_page(
             &profile_id,

@@ -66,8 +66,11 @@
   set, a "Reset" button appears next to it (screenshot) and clears it. The
   image is kept per device (`map_dev_sleep_wallpaper_path`, a null string on
   the MK.2 today).
-- A sleep-related action shows the hint "Open Preferences to customize Sleep
-  settings and select a screensaver image."
+- A "Sleep" action sits in the "Stream Deck" group of the action list
+  (moon icon; class `KA_Sleep`, UUID `com.elgato.streamdeck.system.sleep`).
+  Its inspector has only the title field, the hint "Open Preferences to
+  customize Sleep settings and select a screensaver image." and an "Open
+  Preferences…" button (owner's screenshots).
 
 ## Observed: Customize Image window
 
@@ -121,6 +124,8 @@
   position table was not found.
 - The screensaver stays on the keys until a key is pressed; the first press
   only wakes the device.
+- The Sleep action puts the device to sleep at once, the same way Sleep
+  After does when it runs out (its code was not read).
 
 ## Unknowns and next steps
 
@@ -152,6 +157,9 @@
   the screensaver image is shown on the keys instead. When a main-protocol
   device connects, Deckly sets the device's own sleep timer to 0 so a value
   left by another app cannot put the device to sleep on its own.
+- Deckly's Sleep action (`com.deckly.device.sleep`) is in its "Device"
+  category. Its "Open Preferences…" button opens Preferences on the Devices
+  tab.
 - "Advanced…" acts at once: "Set Image…" and "Reset" send the image to the
   device immediately; OK and Cancel only close the window.
 - The screensaver image is cropped in Deckly's Customize Image window and

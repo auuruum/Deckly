@@ -112,6 +112,12 @@ impl Preferences {
         self.autostart = None;
     }
 
+    /// Opens the window on the Devices tab.
+    pub fn open_devices(&mut self, ctx: &egui::Context, device: Option<&str>) {
+        self.open(ctx, device);
+        self.tab = Tab::Devices;
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, env: &mut Env<'_>) {
         if !self.open {
             return;
