@@ -20,6 +20,19 @@ const ICON_COLOR: [u8; 3] = [0xE6, 0xE7, 0xEA];
 const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;
 
+/// What a key shows that is not in its configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Live {
+    /// The current page number, counted from 1.
+    pub page: usize,
+}
+
+impl Default for Live {
+    fn default() -> Self {
+        Self { page: 1 }
+    }
+}
+
 pub struct Renderer {
     /// Title style of keys that do not set their own.
     pub title_defaults: TitleStyle,
@@ -43,7 +56,7 @@ impl Renderer {
         self.images.clear();
     }
 
-    pub fn render(&mut self, key: Option<&KeyConfig>, size: u32) -> RgbaImage {
+    pub fn render(&mut self, key: Option<&KeyConfig>, size: u32, live: Live) -> RgbaImage {
         let size = size.clamp(8, 1024);
         let Some(key) = key else {
             return RgbaImage::from_pixel(size, size, EMPTY);
@@ -53,12 +66,16 @@ impl Renderer {
             Some(src) => imageops::resize(src, size, size, imageops::FilterType::Triangle),
             None => {
                 let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
-                if let Some(font) = &self.icon_font {
-                    let lift = if has_title(key, &style) && style.align == TitleAlign::Bottom {
-                        size as f32 * 0.08
-                    } else {
-                        0.0
-                    };
+                let lift = if has_title(key, &style) && style.align == TitleAlign::Bottom {
+                    size as f32 * 0.08
+                } else {
+                    0.0
+                };
+                if key.action == actions::PAGE_INDICATOR {
+                    if let Some(font) = &self.title_font {
+                        draw_number(&mut img, font, live.page, lift);
+                    }
+                } else if let Some(font) = &self.icon_font {
                     draw_icon(
                         &mut img,
                         font,
@@ -84,7 +101,7 @@ impl Renderer {
     }
 
     /// Changes whenever anything that affects a key's pixels changes.
-    pub fn key_hash(&self, key: Option<&KeyConfig>) -> u64 {
+    pub fn key_hash(&self, key: Option<&KeyConfig>, live: Live) -> u64 {
         let mut h = DefaultHasher::new();
         if let Some(key) = key {
             key.action.hash(&mut h);
@@ -95,6 +112,9 @@ impl Renderer {
             if key.action == actions::MULTIMEDIA {
                 actions::str_setting(&key.settings, "media").hash(&mut h);
             }
+            if key.action == actions::PAGE_INDICATOR {
+                live.hash(&mut h);
+            }
         }
         h.finish()
     }
@@ -104,10 +124,11 @@ impl Renderer {
     pub fn device_image(
         &mut self,
         key: Option<&KeyConfig>,
+        live: Live,
         model: &DeviceModel,
         orientation: Orientation,
     ) -> Vec<u8> {
-        let img = self.render(key, model.key_image_size);
+        let img = self.render(key, model.key_image_size, live);
         encode_key(img, model, orientation)
     }
 
@@ -351,6 +372,17 @@ fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32, lift: f3
     outline.draw(|x, y, cov| blend(img, ox + x as i32, oy + y as i32, ICON_COLOR, cov));
 }
 
+/// The page number, large and centred, for Page Indicator keys.
+fn draw_number(img: &mut RgbaImage, font: &FontArc, number: usize, lift: f32) {
+    let size = img.width() as f32;
+    let text = number.to_string();
+    let scale = PxScale::from(size * if text.len() > 2 { 0.36 } else { 0.48 });
+    let sf = font.as_scaled(scale);
+    // Centre the digits' height (ascent only; digits have no descent).
+    let baseline = (size + sf.ascent() * 0.72) / 2.0 - lift;
+    draw_line(img, font, scale, &text, (0.0, baseline), ICON_COLOR);
+}
+
 fn line_width(font: &FontArc, scale: PxScale, line: &str) -> f32 {
     let sf = font.as_scaled(scale);
     let mut width = 0.0;
@@ -425,11 +457,17 @@ mod tests {
     #[test]
     fn renders_requested_sizes() {
         let mut r = Renderer::new();
-        assert_eq!(r.render(None, 72).dimensions(), (72, 72));
+        assert_eq!(r.render(None, 72, Live::default()).dimensions(), (72, 72));
         let mut key = KeyConfig::new(actions::WEBSITE, json!({}));
         key.title = "Hello\nWorld".into();
-        assert_eq!(r.render(Some(&key), 96).dimensions(), (96, 96));
-        assert_eq!(r.render(Some(&key), 0).dimensions(), (8, 8));
+        assert_eq!(
+            r.render(Some(&key), 96, Live::default()).dimensions(),
+            (96, 96)
+        );
+        assert_eq!(
+            r.render(Some(&key), 0, Live::default()).dimensions(),
+            (8, 8)
+        );
     }
 
     #[test]
@@ -437,7 +475,7 @@ mod tests {
         let mut r = Renderer::new();
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
         key.image = Some("does/not/exist.png".into());
-        let img = r.render(Some(&key), 72);
+        let img = r.render(Some(&key), 72, Live::default());
         assert_eq!(img.get_pixel(0, 0), &ICON_BACKGROUND);
     }
 
@@ -447,7 +485,7 @@ mod tests {
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
         key.title = "Title".into();
         for model in DeviceModel::ALL {
-            let data = r.device_image(Some(&key), model, Orientation::Standard);
+            let data = r.device_image(Some(&key), Live::default(), model, Orientation::Standard);
             let magic: &[u8] = match model.image_format() {
                 ImageFormat::Jpeg => &[0xFF, 0xD8],
                 ImageFormat::Bmp => b"BM",
@@ -476,9 +514,14 @@ mod tests {
         let mut r = Renderer::new();
         let mut corner = |kind, orientation| {
             let model = DeviceModel::of(kind);
-            let img = image::load_from_memory(&r.device_image(Some(&key), model, orientation))
-                .unwrap()
-                .into_luma8();
+            let img = image::load_from_memory(&r.device_image(
+                Some(&key),
+                Live::default(),
+                model,
+                orientation,
+            ))
+            .unwrap()
+            .into_luma8();
             let s = model.key_image_size - 1;
             let bright = |x, y| img.get_pixel(x, y)[0] > 128;
             [bright(0, 0), bright(s, 0), bright(s, s), bright(0, s)]
@@ -570,22 +613,36 @@ mod tests {
     }
 
     #[test]
+    fn page_indicator_shows_the_live_page() {
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::PAGE_INDICATOR, json!({}));
+        let (one, two) = (Live { page: 1 }, Live { page: 2 });
+        assert_ne!(r.key_hash(Some(&key), one), r.key_hash(Some(&key), two));
+        assert_ne!(r.render(Some(&key), 72, one), r.render(Some(&key), 72, two));
+        // A three-digit page still fits.
+        assert_eq!(r.render(Some(&key), 72, Live { page: 100 }).width(), 72);
+        // Other keys do not depend on the page.
+        let other = KeyConfig::new(actions::HOTKEY, json!({}));
+        assert_eq!(r.key_hash(Some(&other), one), r.key_hash(Some(&other), two));
+    }
+
+    #[test]
     fn hash_tracks_visible_changes() {
         let mut r = Renderer::new();
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
-        let a = r.key_hash(Some(&key));
+        let a = r.key_hash(Some(&key), Live::default());
         key.title = "x".into();
-        let b = r.key_hash(Some(&key));
+        let b = r.key_hash(Some(&key), Live::default());
         assert_ne!(a, b);
-        assert_ne!(r.key_hash(None), b);
+        assert_ne!(r.key_hash(None, Live::default()), b);
         // Keys without their own style change with the global one...
         r.title_defaults.size = 20;
-        let c = r.key_hash(Some(&key));
+        let c = r.key_hash(Some(&key), Live::default());
         assert_ne!(b, c);
         // ...keys with their own style do not.
         key.title_style = Some(TitleStyle::default());
-        let d = r.key_hash(Some(&key));
+        let d = r.key_hash(Some(&key), Live::default());
         r.title_defaults.size = 9;
-        assert_eq!(d, r.key_hash(Some(&key)));
+        assert_eq!(d, r.key_hash(Some(&key), Live::default()));
     }
 }

@@ -26,6 +26,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-26 | [Elgato's published HID documentation](2026-10-26-elgato-hid-docs.md) | Main and Mini protocols, every documented model, rotations |
 | 2026-10-26 | [Official app 7.6: Preferences window](2026-10-26-preferences.md) | Tabs, layout and colours, device, profile and title style settings |
 | 2026-10-26 | [Official app 7.6: orientation, screensaver, standby screen](2026-10-26-orientation-screensaver-standby.md) | Rotation choices, sleep timer and screensaver, Customize Image window, standby image upload |
+| 2026-10-26 | [Official app 7.6: Navigation actions](2026-10-26-navigation-actions.md) | Action list order and icons, folders and Parent Folder, Page Indicator |
 
 ## Open questions
 

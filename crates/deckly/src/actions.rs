@@ -18,6 +18,9 @@ pub const NEXT_PAGE: &str = "com.deckly.navigation.next-page";
 pub const PREVIOUS_PAGE: &str = "com.deckly.navigation.previous-page";
 pub const GO_TO_PAGE: &str = "com.deckly.navigation.go-to-page";
 pub const SWITCH_PROFILE: &str = "com.deckly.navigation.switch-profile";
+pub const CREATE_FOLDER: &str = deckly_core::profile::FOLDER_ACTION;
+pub const PARENT_FOLDER: &str = deckly_core::profile::PARENT_FOLDER_ACTION;
+pub const PAGE_INDICATOR: &str = "com.deckly.navigation.page-indicator";
 pub const BRIGHTNESS: &str = "com.deckly.device.brightness";
 pub const SLEEP: &str = "com.deckly.device.sleep";
 
@@ -98,20 +101,37 @@ pub const ACTIONS: &[ActionDef] = &[
         tooltip: "Media playback and volume keys",
         defaults: || json!({ "media": "play_pause" }),
     },
+    // Navigation, in the official list's order.
     ActionDef {
-        uuid: NEXT_PAGE,
-        name: "Next Page",
+        uuid: CREATE_FOLDER,
+        name: "Create Folder",
         category: Category::Navigation,
-        icon: icon::ARROW_RIGHT,
-        tooltip: "Go to the next page",
-        defaults: || json!({}),
+        icon: icon::FOLDER_SIMPLE_PLUS,
+        tooltip: "Group keys in a folder",
+        defaults: || json!({ "folder": "" }),
+    },
+    ActionDef {
+        uuid: SWITCH_PROFILE,
+        name: "Switch Profile",
+        category: Category::Navigation,
+        icon: icon::DOTS_NINE,
+        tooltip: "Switch this device to another profile",
+        defaults: || json!({ "profile": "" }),
     },
     ActionDef {
         uuid: PREVIOUS_PAGE,
         name: "Previous Page",
         category: Category::Navigation,
-        icon: icon::ARROW_LEFT,
+        icon: icon::ARROW_SQUARE_LEFT,
         tooltip: "Go to the previous page",
+        defaults: || json!({}),
+    },
+    ActionDef {
+        uuid: NEXT_PAGE,
+        name: "Next Page",
+        category: Category::Navigation,
+        icon: icon::ARROW_SQUARE_RIGHT,
+        tooltip: "Go to the next page",
         defaults: || json!({}),
     },
     ActionDef {
@@ -123,12 +143,12 @@ pub const ACTIONS: &[ActionDef] = &[
         defaults: || json!({ "page": 1 }),
     },
     ActionDef {
-        uuid: SWITCH_PROFILE,
-        name: "Switch Profile",
+        uuid: PAGE_INDICATOR,
+        name: "Page Indicator",
         category: Category::Navigation,
-        icon: icon::STACK,
-        tooltip: "Switch this device to another profile",
-        defaults: || json!({ "profile": "" }),
+        icon: icon::NUMBER_SQUARE_ONE,
+        tooltip: "Show the number of the current page",
+        defaults: || json!({}),
     },
     ActionDef {
         uuid: BRIGHTNESS,
@@ -148,8 +168,18 @@ pub const ACTIONS: &[ActionDef] = &[
     },
 ];
 
+/// Actions the app places itself; they are not in the action list.
+pub const PLACED: &[ActionDef] = &[ActionDef {
+    uuid: PARENT_FOLDER,
+    name: "Parent Folder",
+    category: Category::Navigation,
+    icon: icon::ARROW_BEND_LEFT_UP,
+    tooltip: "Go back to where this folder was opened",
+    defaults: || json!({}),
+}];
+
 pub fn find(uuid: &str) -> Option<&'static ActionDef> {
-    ACTIONS.iter().find(|a| a.uuid == uuid)
+    ACTIONS.iter().chain(PLACED).find(|a| a.uuid == uuid)
 }
 
 pub fn new_key(def: &ActionDef) -> KeyConfig {
@@ -167,6 +197,9 @@ pub fn key_icon(key: &KeyConfig) -> &'static str {
             Some(MediaKey::Mute) => icon::SPEAKER_X,
             _ => icon::PLAY_PAUSE,
         };
+    }
+    if key.action == CREATE_FOLDER {
+        return icon::FOLDER_SIMPLE;
     }
     find(&key.action).map_or(icon::PUZZLE_PIECE, |a| a.icon)
 }
@@ -250,6 +283,8 @@ pub enum Outcome {
     /// Zero-based page index.
     GoToPage(usize),
     SwitchProfile(String),
+    OpenFolder(String),
+    ParentFolder,
     Brightness(BrightnessChange),
     /// Sleep now, as if Sleep After had run out.
     Sleep,
@@ -315,6 +350,13 @@ pub fn run(key: &KeyConfig) -> Result<Outcome, String> {
             }
             Ok(Outcome::SwitchProfile(id.to_owned()))
         }
+        CREATE_FOLDER => match key.folder() {
+            Some(id) if !id.is_empty() => Ok(Outcome::OpenFolder(id.to_owned())),
+            _ => Err("this folder cannot be opened".into()),
+        },
+        PARENT_FOLDER => Ok(Outcome::ParentFolder),
+        // Only shows the page number.
+        PAGE_INDICATOR => Ok(Outcome::Done),
         BRIGHTNESS => {
             let value = int_setting(s, "value", 10).clamp(0, 100) as u8;
             let change = match str_setting(s, "mode") {
@@ -335,9 +377,30 @@ mod tests {
 
     #[test]
     fn uuids_are_unique() {
-        for a in ACTIONS {
-            assert_eq!(ACTIONS.iter().filter(|b| b.uuid == a.uuid).count(), 1);
+        let all: Vec<&ActionDef> = ACTIONS.iter().chain(PLACED).collect();
+        for a in &all {
+            assert_eq!(all.iter().filter(|b| b.uuid == a.uuid).count(), 1);
         }
+    }
+
+    #[test]
+    fn navigation_list_follows_the_official_order() {
+        let names: Vec<&str> = ACTIONS
+            .iter()
+            .filter(|a| a.category == Category::Navigation)
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Create Folder",
+                "Switch Profile",
+                "Previous Page",
+                "Next Page",
+                "Go to Page",
+                "Page Indicator"
+            ]
+        );
     }
 
     #[test]
@@ -358,6 +421,17 @@ mod tests {
         );
         assert!(run(&key(SWITCH_PROFILE, json!({}))).is_err());
         assert_eq!(run(&key(SLEEP, json!({}))), Ok(Outcome::Sleep));
+        assert_eq!(
+            run(&key(CREATE_FOLDER, json!({"folder": "f"}))),
+            Ok(Outcome::OpenFolder("f".into()))
+        );
+        assert!(run(&key(CREATE_FOLDER, json!({"folder": ""}))).is_err());
+        assert!(run(&key(CREATE_FOLDER, json!(null))).is_err());
+        assert_eq!(
+            run(&key(PARENT_FOLDER, json!({}))),
+            Ok(Outcome::ParentFolder)
+        );
+        assert_eq!(run(&key(PAGE_INDICATOR, json!({}))), Ok(Outcome::Done));
         assert!(run(&key("com.example.nope", json!({}))).is_err());
     }
 

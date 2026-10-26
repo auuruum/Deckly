@@ -8,10 +8,11 @@
 use crate::actions::{self, ACTIONS, Category};
 use crate::os::{Hotkey, MediaKey};
 use crate::prefs::{self, Preferences};
-use crate::render::Renderer;
+use crate::render::{Live, Renderer};
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
+use deckly_core::profile::MAX_FOLDER_DEPTH;
 use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleAlign, TitleStyle};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
@@ -19,6 +20,7 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icon;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -95,6 +97,32 @@ impl CanvasGeometry {
     }
 }
 
+/// A move between a page and its folders, applied after the frame's panels.
+#[derive(Clone, Debug, PartialEq)]
+enum FolderNav {
+    Open(String),
+    Up,
+    /// Keep this many folders open (0 goes back to the page).
+    Keep(usize),
+}
+
+/// What the canvas shows: a page, or a folder opened from it.
+struct View {
+    page: usize,
+    /// Open folders, outermost first.
+    path: Vec<String>,
+    live: Live,
+}
+
+impl View {
+    fn keys<'a>(&self, profile: &'a mut Profile) -> Option<&'a mut BTreeMap<u8, KeyConfig>> {
+        match self.path.last() {
+            Some(id) => profile.folder_mut(id).map(|f| &mut f.keys),
+            None => profile.pages.get_mut(self.page).map(|p| &mut p.keys),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum DragPayload {
     Action(&'static str),
@@ -118,6 +146,7 @@ pub struct App {
     last_edit: Instant,
     prefs: Preferences,
     rename: Option<(String, String)>,
+    folder_nav: Option<FolderNav>,
     /// Share of the left column given to the canvas.
     split: f32,
     /// Width of the action list; dragging its left edge changes it.
@@ -163,6 +192,7 @@ impl App {
             last_edit: Instant::now(),
             prefs: Preferences::new(),
             rename: None,
+            folder_nav: None,
             split: DEFAULT_SPLIT,
             list_width: LIST_WIDTH,
         }
@@ -221,16 +251,17 @@ impl App {
         ctx: &egui::Context,
         key: Option<&KeyConfig>,
         px: u32,
+        live: Live,
     ) -> egui::TextureId {
         let px = px.clamp(32, 288);
-        let hash = self.renderer.key_hash(key);
+        let hash = self.renderer.key_hash(key, live);
         if let Some(t) = self.textures.get(&(hash, px)) {
             return t.id();
         }
         if self.textures.len() > 512 {
             self.textures.clear();
         }
-        let img = self.renderer.render(key, px);
+        let img = self.renderer.render(key, px, live);
         let color = ColorImage::from_rgba_unmultiplied([px as usize, px as usize], img.as_raw());
         let tex = ctx.load_texture(format!("key-{hash:x}-{px}"), color, TextureOptions::LINEAR);
         let id = tex.id();
@@ -560,7 +591,7 @@ impl App {
         ui: &mut Ui,
         device: Option<&deckly_device::ConnectedDevice>,
         profile: &mut Profile,
-        page: &mut usize,
+        view: &mut View,
     ) {
         let model = profile.model();
         let geo = CanvasGeometry::new(ui.max_rect(), model.columns, model.rows);
@@ -583,7 +614,8 @@ impl App {
             None => HashSet::new(),
         };
         let mut changed = false;
-        let Some(keys) = profile.pages.get_mut(*page).map(|p| &mut p.keys) else {
+        let live = view.live;
+        let Some(keys) = view.keys(profile) else {
             return;
         };
         for index in 0..model.key_count() {
@@ -595,6 +627,10 @@ impl App {
             let mut rect = Rect::from_min_size(min, Vec2::splat(key_size));
             let response = ui.interact(rect, ui.id().with(("key", index)), Sense::click_and_drag());
             let config = keys.get(&index).cloned();
+            // The parent folder key stays in its folder; it can only move.
+            let placed = config
+                .as_ref()
+                .is_some_and(|k| k.action == actions::PARENT_FOLDER);
             if config.is_some() {
                 response.dnd_set_drag_payload(DragPayload::Key(index));
             }
@@ -615,7 +651,7 @@ impl App {
             let inner = rect.shrink(border);
             match &config {
                 Some(key) => {
-                    let tex = self.texture(ui.ctx(), Some(key), tex_px);
+                    let tex = self.texture(ui.ctx(), Some(key), tex_px, live);
                     painter.add(
                         egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
                             .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
@@ -629,7 +665,7 @@ impl App {
             if let Some(payload) = response.dnd_release_payload::<DragPayload>() {
                 match *payload {
                     DragPayload::Action(uuid) => {
-                        if let Some(def) = actions::find(uuid) {
+                        if let Some(def) = actions::find(uuid).filter(|_| !placed) {
                             keys.insert(index, actions::new_key(def));
                         }
                     }
@@ -653,10 +689,20 @@ impl App {
                 self.selected_key = Some(index);
                 self.recording_hotkey = false;
             }
+            // Double-clicking a folder opens it, as in the official app.
+            if response.double_clicked()
+                && let Some(key) = &config
+            {
+                if placed {
+                    self.folder_nav = Some(FolderNav::Up);
+                } else if let Some(id) = key.folder().filter(|id| !id.is_empty()) {
+                    self.folder_nav = Some(FolderNav::Open(id.to_owned()));
+                }
+            }
             response.context_menu(|ui| {
                 if ui
                     .add_enabled(
-                        config.is_some(),
+                        config.is_some() && !placed,
                         egui::Button::new(format!("{}  Copy", icon::COPY)),
                     )
                     .clicked()
@@ -666,7 +712,7 @@ impl App {
                 }
                 if ui
                     .add_enabled(
-                        self.clipboard.is_some(),
+                        self.clipboard.is_some() && !placed,
                         egui::Button::new(format!("{}  Paste", icon::CLIPBOARD)),
                     )
                     .clicked()
@@ -679,7 +725,7 @@ impl App {
                 }
                 if ui
                     .add_enabled(
-                        config.is_some(),
+                        config.is_some() && !placed,
                         egui::Button::new(format!("{}  Clear", icon::TRASH)),
                     )
                     .clicked()
@@ -696,6 +742,9 @@ impl App {
         if !typing
             && let Some(index) = self.selected_key
             && ui.input(|i| i.key_pressed(egui::Key::Delete))
+            && keys
+                .get(&index)
+                .is_some_and(|k| k.action != actions::PARENT_FOLDER)
             && keys.remove(&index).is_some()
         {
             changed = true;
@@ -704,7 +753,11 @@ impl App {
             self.mark_dirty(&profile.id);
         }
 
-        self.pager(ui, &geo, profile, page);
+        if view.path.is_empty() {
+            self.pager(ui, &geo, profile, &mut view.page);
+        } else {
+            self.folder_strip(ui, &geo, profile, view);
+        }
 
         // Preview of what is being dragged.
         if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(ui.ctx())
@@ -836,9 +889,72 @@ impl App {
         }
     }
 
+    /// Where the canvas is inside folders, in place of the page strip: the
+    /// page the folders were opened from, then each folder. Clicking one
+    /// goes back to it.
+    fn folder_strip(&mut self, ui: &mut Ui, geo: &CanvasGeometry, profile: &Profile, view: &View) {
+        const HEIGHT: f32 = 20.0;
+        const PAD: f32 = 10.0;
+        let mut crumbs = vec![format!(
+            "{}  Page {}",
+            icon::ARROW_BEND_LEFT_UP,
+            view.page + 1
+        )];
+        let mut parent = profile.pages.get(view.page);
+        for id in &view.path {
+            let title = parent
+                .and_then(|p| p.keys.values().find(|k| k.folder() == Some(id.as_str())))
+                .and_then(|k| k.title.lines().map(str::trim).find(|l| !l.is_empty()))
+                .map_or_else(|| "Folder".to_owned(), |t| t.chars().take(24).collect());
+            crumbs.push(title);
+            parent = profile.folder(id);
+        }
+        let painter = ui.painter().clone();
+        let galleys: Vec<_> = crumbs
+            .into_iter()
+            .map(|c| painter.layout_no_wrap(c, font(12.0), TEXT))
+            .collect();
+        let sep = painter.layout_no_wrap(icon::CARET_RIGHT.to_owned(), font(10.0), TEXT_FAINT);
+        let widths: Vec<f32> = galleys.iter().map(|g| g.size().x + 2.0 * PAD).collect();
+        let width = widths.iter().sum::<f32>() + sep.size().x * (widths.len() - 1) as f32 + 4.0;
+        let strip = Rect::from_center_size(
+            pos2(
+                geo.grid.center().x,
+                geo.grid.bottom() + CanvasGeometry::PAGER_GAP * geo.scale.min(1.0),
+            ),
+            vec2(width, HEIGHT),
+        );
+        painter.rect_filled(strip, CornerRadius::same(10), PAGER);
+        let last = galleys.len() - 1;
+        let mut x = strip.left() + 2.0;
+        for (i, (galley, w)) in galleys.into_iter().zip(widths).enumerate() {
+            let r = Rect::from_min_size(pos2(x, strip.top()), vec2(w, HEIGHT));
+            let resp = ui.interact(r, ui.id().with(("crumb", i)), Sense::click());
+            let color = if i == last {
+                painter.rect_filled(r.shrink2(vec2(1.0, 1.0)), CornerRadius::same(9), PAGER_CHIP);
+                PAGER_CHIP_TEXT
+            } else if resp.hovered() {
+                TEXT
+            } else {
+                TEXT_DIM
+            };
+            let size = galley.size();
+            painter.galley_with_override_text_color(r.center() - size / 2.0, galley, color);
+            if resp.clicked() && i != last {
+                self.folder_nav = Some(FolderNav::Keep(i));
+            }
+            x += w;
+            if i != last {
+                let at = pos2(x, strip.center().y - sep.size().y / 2.0);
+                painter.galley(at, sep.clone(), TEXT_FAINT);
+                x += sep.size().x;
+            }
+        }
+    }
+
     // ----- property inspector --------------------------------------------
 
-    fn inspector(&mut self, ui: &mut Ui, profile: &mut Profile, page: usize) {
+    fn inspector(&mut self, ui: &mut Ui, profile: &mut Profile, view: &View) {
         let profiles: Vec<(String, String)> = runtime::lock(&self.state)
             .profiles
             .iter()
@@ -850,11 +966,7 @@ impl App {
             hint(ui, "Select a key to edit its action.");
             return;
         };
-        let Some(key) = profile
-            .pages
-            .get_mut(page)
-            .and_then(|p| p.keys.get_mut(&index))
-        else {
+        let Some(key) = view.keys(profile).and_then(|k| k.get_mut(&index)) else {
             hint(ui, "Drag an action from the list onto this key.");
             return;
         };
@@ -880,7 +992,7 @@ impl App {
             // Key preview and image controls.
             ui.vertical(|ui| {
                 ui.set_width(110.0);
-                let tex = self.texture(ui.ctx(), Some(key), (96.0 * ppp) as u32);
+                let tex = self.texture(ui.ctx(), Some(key), (96.0 * ppp) as u32, view.live);
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
                 ui.painter().add(
                     egui::epaint::RectShape::filled(rect, CornerRadius::same(12), Color32::WHITE)
@@ -1084,6 +1196,32 @@ impl App {
                 });
                 ui.end_row();
             }
+            actions::CREATE_FOLDER => {
+                label(ui, "Folder");
+                let id = key.folder().filter(|id| !id.is_empty());
+                if ui
+                    .add_enabled(
+                        id.is_some(),
+                        egui::Button::new(format!("{}  Open Folder", icon::FOLDER_OPEN)),
+                    )
+                    .on_hover_text("Double-clicking the key opens it too")
+                    .clicked()
+                    && let Some(id) = id
+                {
+                    self.folder_nav = Some(FolderNav::Open(id.to_owned()));
+                }
+                ui.end_row();
+            }
+            actions::PARENT_FOLDER => {
+                label(ui, "Folder");
+                if ui
+                    .button(format!("{}  Open Parent Folder", icon::ARROW_BEND_LEFT_UP))
+                    .clicked()
+                {
+                    self.folder_nav = Some(FolderNav::Up);
+                }
+                ui.end_row();
+            }
             actions::SLEEP => {
                 ui.label("");
                 ui.vertical(|ui| {
@@ -1194,15 +1332,22 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.renderer.title_defaults = runtime::lock(&self.state).settings.title_style;
         let (device, profile_id) = self.resolve();
-        let (mut profile, mut page) = {
+        let (mut profile, mut view) = {
             let s = runtime::lock(&self.state);
             match s.profile(&profile_id) {
-                Some(p) => (p.clone(), s.page(p)),
+                Some(p) => (
+                    p.clone(),
+                    View {
+                        page: s.page(p),
+                        path: s.folder_path(p),
+                        live: s.live(p),
+                    },
+                ),
                 None => return,
             }
         };
         let original = profile.clone();
-        let original_page = page;
+        let (original_page, original_path) = (view.page, view.path.clone());
 
         let window = ui.available_rect_before_wrap();
         let max_list = (window.width() - MIN_CANVAS_WIDTH).clamp(LIST_WIDTH, MAX_LIST_WIDTH);
@@ -1224,11 +1369,11 @@ impl eframe::App for App {
             .resizable(false)
             .exact_size(inspector_h)
             .frame(egui::Frame::new().fill(CANVAS))
-            .show(ui, |ui| self.inspector(ui, &mut profile, page));
+            .show(ui, |ui| self.inspector(ui, &mut profile, &view));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             ui.painter()
                 .rect_filled(ui.max_rect(), CornerRadius::ZERO, CANVAS);
-            self.canvas(ui, device.as_ref(), &mut profile, &mut page);
+            self.canvas(ui, device.as_ref(), &mut profile, &mut view);
         });
         let divider_y = column.bottom() - inspector_h;
         let handle = Rect::from_x_y_ranges(column.x_range(), divider_y - 4.0..=divider_y + 4.0);
@@ -1256,15 +1401,33 @@ impl eframe::App for App {
             self.list_width = (window.right() - pos.x).clamp(LIST_WIDTH, max_list);
         }
 
+        if let Some(nav) = self.folder_nav.take() {
+            match nav {
+                FolderNav::Open(id) if view.path.len() < MAX_FOLDER_DEPTH => view.path.push(id),
+                FolderNav::Open(_) => {}
+                FolderNav::Up => {
+                    view.path.pop();
+                }
+                FolderNav::Keep(n) => view.path.truncate(n),
+            }
+            self.selected_key = None;
+            self.recording_hotkey = false;
+        }
+
         // Write the edited copy back. Profile switches made this frame
         // already changed which profile is current; only write if it still
         // exists.
-        if profile != original || page != original_page {
+        if profile != original {
+            // New folder keys get their folder, removed ones lose theirs.
+            profile.normalize_folders();
+        }
+        if profile != original || view.page != original_page || view.path != original_path {
             let mut s = runtime::lock(&self.state);
             if let Some(p) = s.profile_mut(&profile.id) {
                 *p = profile.clone();
             }
-            s.set_page(&profile.id, page);
+            s.set_page(&profile.id, view.page);
+            s.set_folder_path(&profile.id, view.path.clone());
             drop(s);
             let _ = self.runtime.send(Msg::Refresh);
         }

@@ -7,9 +7,10 @@
 //! the runtime re-renders only keys whose image changed.
 
 use crate::actions::{self, Outcome};
-use crate::render::{self, Renderer};
+use crate::render::{self, Live, Renderer};
 use crate::store;
-use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Orientation, Profile, Settings};
+use deckly_core::profile::MAX_FOLDER_DEPTH;
+use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Orientation, Page, Profile, Settings};
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
 use image::RgbaImage;
 use std::collections::{HashMap, HashSet};
@@ -25,6 +26,8 @@ pub struct State {
     pub devices: Vec<ConnectedDevice>,
     /// Current page index per profile id.
     pub pages: HashMap<String, usize>,
+    /// Open folders per profile id, outermost first.
+    pub folders: HashMap<String, Vec<String>>,
     /// Keys held down right now, for the editor's live view.
     pub pressed: HashSet<(Handle, u8)>,
     pub notice: Option<(String, Instant)>,
@@ -37,6 +40,7 @@ impl State {
             settings,
             devices: Vec::new(),
             pages: HashMap::new(),
+            folders: HashMap::new(),
             pressed: HashSet::new(),
             notice: None,
         }
@@ -71,6 +75,41 @@ impl State {
         }
     }
 
+    /// The folders open on a profile, outermost first. A folder that no
+    /// longer exists closes, with the folders inside it.
+    pub fn folder_path(&self, profile: &Profile) -> Vec<String> {
+        let mut path = self.folders.get(&profile.id).cloned().unwrap_or_default();
+        if let Some(gone) = path.iter().position(|id| profile.folder(id).is_none()) {
+            path.truncate(gone);
+        }
+        path
+    }
+
+    pub fn set_folder_path(&mut self, profile_id: &str, mut path: Vec<String>) {
+        path.truncate(MAX_FOLDER_DEPTH);
+        if path.is_empty() {
+            self.folders.remove(profile_id);
+        } else {
+            self.folders.insert(profile_id.to_owned(), path);
+        }
+    }
+
+    /// The keys a profile shows now: its innermost open folder, else its
+    /// current page.
+    pub fn shown<'a>(&self, profile: &'a Profile) -> Option<&'a Page> {
+        match self.folder_path(profile).last() {
+            Some(id) => profile.folder(id),
+            None => profile.pages.get(self.page(profile)),
+        }
+    }
+
+    /// What keys of a profile show besides their configuration.
+    pub fn live(&self, profile: &Profile) -> Live {
+        Live {
+            page: self.page(profile) + 1,
+        }
+    }
+
     /// Returns the first profile for this device model, creating a default
     /// one when there is none. The new profile is saved immediately.
     pub fn ensure_profile(&mut self, kind: DeviceKind) -> String {
@@ -97,6 +136,7 @@ impl State {
         let kind = self.profile(id).map(|p| p.device);
         self.profiles.retain(|p| p.id != id);
         self.pages.remove(id);
+        self.folders.remove(id);
         if let Err(e) = store::delete_profile(id) {
             self.notify(format!("Cannot delete profile: {e}"));
         }
@@ -141,12 +181,7 @@ impl State {
 
     fn key(&self, serial: &str, key: u8) -> Option<KeyConfig> {
         let profile = self.assigned(serial)?;
-        profile
-            .pages
-            .get(self.page(profile))?
-            .keys
-            .get(&key)
-            .cloned()
+        self.shown(profile)?.keys.get(&key).cloned()
     }
 }
 
@@ -557,21 +592,41 @@ fn apply_outcome(
     let Some(serial) = s.device(handle).map(|d| d.serial.clone()) else {
         return;
     };
-    let Some((profile_id, page, pages)) = s
+    let Some((profile_id, page, pages, mut path)) = s
         .assigned(&serial)
-        .map(|p| (p.id.clone(), s.page(p), p.pages.len()))
+        .map(|p| (p.id.clone(), s.page(p), p.pages.len(), s.folder_path(p)))
     else {
         return;
+    };
+    // Page actions leave any open folder for the page they go to.
+    let go_to_page = |s: &mut State, n: usize| {
+        s.set_folder_path(&profile_id, Vec::new());
+        s.set_page(&profile_id, n);
     };
     match result {
         // Sleep is handled by the runtime loop, which owns the device links.
         Ok(Outcome::Done | Outcome::Sleep) => {}
-        Ok(Outcome::NextPage) => s.set_page(&profile_id, (page + 1) % pages.max(1)),
-        Ok(Outcome::PreviousPage) => s.set_page(
-            &profile_id,
+        Ok(Outcome::NextPage) => go_to_page(&mut s, (page + 1) % pages.max(1)),
+        Ok(Outcome::PreviousPage) => go_to_page(
+            &mut s,
             page.checked_sub(1).unwrap_or(pages.saturating_sub(1)),
         ),
-        Ok(Outcome::GoToPage(n)) => s.set_page(&profile_id, n),
+        Ok(Outcome::GoToPage(n)) => go_to_page(&mut s, n),
+        Ok(Outcome::OpenFolder(id)) => {
+            let exists = s
+                .profile(&profile_id)
+                .is_some_and(|p| p.folder(&id).is_some());
+            if exists && path.len() < MAX_FOLDER_DEPTH {
+                path.push(id);
+                s.set_folder_path(&profile_id, path);
+            } else {
+                s.notify("Folder: this folder cannot be opened");
+            }
+        }
+        Ok(Outcome::ParentFolder) => {
+            path.pop();
+            s.set_folder_path(&profile_id, path);
+        }
         Ok(Outcome::SwitchProfile(id)) => {
             if s.profile(&id).is_some() {
                 s.settings.assignments.insert(serial, id);
@@ -593,7 +648,7 @@ fn apply_outcome(
 
 fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, links: &mut Links) {
     // Collect the work under the lock, render without it.
-    let mut work: Vec<(Handle, Vec<Option<KeyConfig>>)> = Vec::new();
+    let mut work: Vec<(Handle, Vec<Option<KeyConfig>>, Live)> = Vec::new();
     {
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style;
@@ -605,24 +660,25 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
             {
                 continue;
             }
-            let page = s
-                .assigned(&d.serial)
-                .and_then(|p| p.pages.get(s.page(p)))
+            let profile = s.assigned(&d.serial);
+            let page = profile
+                .and_then(|p| s.shown(p))
                 .cloned()
                 .unwrap_or_default();
+            let live = profile.map(|p| s.live(p)).unwrap_or_default();
             let keys = (0..d.model.key_count())
                 .map(|k| page.keys.get(&k).cloned())
                 .collect();
-            work.push((d.handle, keys));
+            work.push((d.handle, keys, live));
         }
     }
-    for (handle, keys) in work {
+    for (handle, keys, live) in work {
         let Some(link) = links.get_mut(&handle) else {
             continue;
         };
         let count = link.model.key_count();
         for (index, key) in keys.iter().enumerate() {
-            let hash = renderer.key_hash(key.as_ref());
+            let hash = renderer.key_hash(key.as_ref(), live);
             let Some(slot) = link.sent.get_mut(index) else {
                 continue;
             };
@@ -632,7 +688,7 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
             *slot = Some(hash);
             // index < key_count, which is a u8.
             let physical = link.orientation.map_key(index as u8, count);
-            let image = renderer.device_image(key.as_ref(), link.model, link.orientation);
+            let image = renderer.device_image(key.as_ref(), live, link.model, link.orientation);
             devices.set_image(handle, physical, image);
         }
     }
@@ -640,3 +696,41 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
 
 /// How long a notice stays visible in the editor.
 pub const NOTICE_TIME: Duration = Duration::from_secs(6);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn open_folders_are_shown_and_close_when_deleted() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages.push(deckly_core::Page::new());
+        profile.pages[1]
+            .keys
+            .insert(2, KeyConfig::new(actions::CREATE_FOLDER, json!({})));
+        profile.normalize_folders();
+        let folder = profile.pages[1].keys[&2]
+            .folder()
+            .unwrap_or_default()
+            .to_owned();
+        let id = profile.id.clone();
+        let mut s = State::new(vec![profile], Settings::default());
+        s.set_page(&id, 1);
+        s.set_folder_path(&id, vec![folder.clone()]);
+        let p = s.profile(&id).unwrap();
+        assert_eq!(s.shown(p).map(|f| f.id.as_str()), Some(folder.as_str()));
+        // The page indicator still counts the page the folder is on.
+        assert_eq!(s.live(p).page, 2);
+        // Deleting the folder key closes the folder.
+        let p = s.profile_mut(&id).unwrap();
+        p.pages[1].keys.clear();
+        p.normalize_folders();
+        let p = s.profile(&id).unwrap();
+        assert!(s.folder_path(p).is_empty());
+        assert_eq!(
+            s.shown(p).map(|f| f.id.as_str()),
+            Some(p.pages[1].id.as_str())
+        );
+    }
+}
