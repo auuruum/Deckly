@@ -71,8 +71,8 @@ pub struct Preferences {
     device: Option<String>,
     /// Profile selected on the Profiles tab.
     profile: Option<String>,
-    /// Profile being renamed in the list, with the text typed so far.
-    renaming: Option<(String, String)>,
+    /// Profile being renamed in the list.
+    renaming: Option<Rename>,
     /// Profile waiting for delete confirmation.
     confirm_delete: Option<String>,
     /// Style tab edits; they take effect with Apply.
@@ -83,6 +83,24 @@ pub struct Preferences {
     /// The Advanced Settings window, open for this device.
     advanced: Option<(String, &'static DeviceModel)>,
     cropper: Cropper,
+}
+
+/// A profile name being edited in place.
+struct Rename {
+    id: String,
+    text: String,
+    /// Focus the field and select its text on the next frame.
+    fresh: bool,
+}
+
+impl Rename {
+    fn new(id: String, text: String) -> Self {
+        Self {
+            id,
+            text,
+            fresh: true,
+        }
+    }
 }
 
 impl Preferences {
@@ -544,8 +562,11 @@ impl Preferences {
             self.profile = profiles.first().map(|(id, ..)| id.clone());
         }
 
-        // The list; double-click a name to rename it.
-        let mut commit: Option<(String, String)> = None;
+        // The list; double-click a name or press F2 to rename it. Enter or a
+        // click elsewhere keeps the new name, Escape drops it.
+        let mut commit = false;
+        let mut cancel = false;
+        let mut start: Option<(String, String)> = None;
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
@@ -563,18 +584,33 @@ impl Preferences {
                                 .rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
                         }
                         match &mut self.renaming {
-                            Some((rid, text)) if rid == id => {
-                                let edit = ui.put(
-                                    rect.shrink2(vec2(10.0, 4.0)),
-                                    egui::TextEdit::singleline(text)
-                                        .char_limit(MAX_PROFILE_NAME_CHARS)
-                                        .font(font(13.0)),
-                                );
-                                edit.request_focus();
-                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                    self.renaming = None;
-                                } else if edit.lost_focus() {
-                                    commit = Some((id.clone(), text.clone()));
+                            Some(r) if r.id == *id => {
+                                // The field's text starts where the name was drawn.
+                                let field = rect.shrink2(vec2(6.0, 4.0));
+                                let mut out = ui
+                                    .scope_builder(egui::UiBuilder::new().max_rect(field), |ui| {
+                                        egui::TextEdit::singleline(&mut r.text)
+                                            .char_limit(MAX_PROFILE_NAME_CHARS)
+                                            .font(font(13.0))
+                                            .vertical_align(egui::Align::Center)
+                                            .margin(vec2(10.0, 0.0))
+                                            .min_size(field.size())
+                                            .desired_width(field.width())
+                                            .show(ui)
+                                    })
+                                    .inner;
+                                if r.fresh {
+                                    r.fresh = false;
+                                    out.response.request_focus();
+                                    let all = egui::text::CCursorRange::select_all(&out.galley);
+                                    out.state.cursor.set_char_range(Some(all));
+                                    out.state.store(ui.ctx(), out.response.id);
+                                } else if out.response.lost_focus() {
+                                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                        cancel = true;
+                                    } else {
+                                        commit = true;
+                                    }
                                 }
                             }
                             _ => {
@@ -592,14 +628,25 @@ impl Preferences {
                             self.confirm_delete = None;
                         }
                         if resp.double_clicked() {
-                            self.renaming = Some((id.clone(), name.clone()));
+                            start = Some((id.clone(), name.clone()));
                         }
                     }
                 });
         });
-        if let Some((id, text)) = commit {
+        if commit {
+            self.finish_rename(env);
+        } else if cancel {
             self.renaming = None;
-            rename_profile(env, &id, &text);
+        }
+        if self.renaming.is_none() && ui.input(|i| i.key_pressed(egui::Key::F2)) {
+            start = profiles
+                .iter()
+                .find(|(id, ..)| Some(id) == self.profile.as_ref())
+                .map(|(id, name, _)| (id.clone(), name.clone()));
+        }
+        if let Some((id, name)) = start {
+            self.finish_rename(env);
+            self.renaming = Some(Rename::new(id, name));
         }
 
         // Add and remove buttons under the list.
@@ -614,9 +661,10 @@ impl Preferences {
             .on_hover_text("New profile")
             .clicked()
         {
+            self.finish_rename(env);
             let id = runtime::lock(env.state).add_profile("New Profile", env.kind);
             self.profile = Some(id.clone());
-            self.renaming = Some((id, "New Profile".to_owned()));
+            self.renaming = Some(Rename::new(id, "New Profile".to_owned()));
             self.confirm_delete = None;
         }
         let minus = at(o, 45.0, 444.0, 24.0, 24.0);
@@ -698,11 +746,19 @@ impl Preferences {
                 runtime::lock(env.state).delete_profile(&id);
                 self.confirm_delete = None;
                 self.profile = None;
+                self.renaming = None;
                 let _ = env.runtime.send(Msg::Refresh);
             }
             if button(ui, at(o, x + 80.0, 428.0, 70.0, 22.0), "Cancel").clicked() {
                 self.confirm_delete = None;
             }
+        }
+    }
+
+    /// Saves the name being typed, if any.
+    fn finish_rename(&mut self, env: &mut Env<'_>) {
+        if let Some(r) = self.renaming.take() {
+            rename_profile(env, &r.id, &r.text);
         }
     }
 
@@ -906,7 +962,7 @@ fn rename_profile(env: &mut Env<'_>, id: &str, text: &str) {
         return;
     }
     let mut s = runtime::lock(env.state);
-    let Some(p) = s.profile_mut(id) else {
+    let Some(p) = s.profile_mut(id).filter(|p| p.name != name) else {
         return;
     };
     p.name = name;
