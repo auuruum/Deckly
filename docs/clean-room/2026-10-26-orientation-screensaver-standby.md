@@ -167,10 +167,7 @@
   file's path.
 - The editor canvas keeps showing keys upright; only device images turn.
 - Deckly cannot ship the official default standby images. Its "Reset"
-  uploads a standby image drawn by Deckly: one rounded tile per key window,
-  coloured along the logo's blue-to-violet gradient. A single logo in the
-  middle of the screen was tried first and was mostly hidden by the gaps
-  between keys (owner's photo).
+  uploads a standby image drawn by Deckly (its logo on black).
 - The standby screen is offered only for models whose screen size is known
   (the 15-key Classic family and the 32-key XL family). Others report it as
   unsupported.

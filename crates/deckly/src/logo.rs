@@ -77,11 +77,6 @@ fn cells(size: u32) -> Vec<Cell> {
     cells
 }
 
-/// The grid colour `t` of the way from the first cell (0) to the last (1).
-pub fn cell_color(t: f32) -> [u8; 3] {
-    mix(FROM, TO, t.clamp(0.0, 1.0))
-}
-
 fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     let mut out = a;
     for (o, (a, b)) in out.iter_mut().zip(a.into_iter().zip(b)) {
@@ -92,7 +87,7 @@ fn mix(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 
 /// How much of the pixel centred at (`px`, `py`) a rounded square covers,
 /// from its signed distance; `unit` is the pixel size in canvas units.
-pub fn coverage(px: f32, py: f32, x: f32, y: f32, side: f32, radius: f32, unit: f32) -> f32 {
+fn coverage(px: f32, py: f32, x: f32, y: f32, side: f32, radius: f32, unit: f32) -> f32 {
     let half = side / 2.0;
     let qx = (px - x - half).abs() - half + radius;
     let qy = (py - y - half).abs() - half + radius;

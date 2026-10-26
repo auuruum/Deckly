@@ -228,35 +228,16 @@ pub fn standby_jpeg(img: &RgbaImage, model: &DeviceModel) -> Result<Vec<u8>, Str
     Err("the image does not fit on the device even at low quality".into())
 }
 
-/// Deckly's own standby picture. The screen shows only through the key
-/// windows, so each key gets a rounded tile coloured along the logo's
-/// blue-to-violet gradient: the whole device becomes the logo's key grid.
+/// Deckly's own standby picture: its logo in the middle of a black screen.
 pub fn default_standby(model: &DeviceModel) -> RgbaImage {
     let (w, h) = model.panel_size();
     let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
-    let columns = usize::from(model.columns.max(1));
-    let steps = (usize::from(model.columns) + usize::from(model.rows)).saturating_sub(2);
-    for (i, r) in model.key_rects().iter().enumerate() {
-        let t = (i / columns + i % columns) as f32 / steps.max(1) as f32;
-        let [cr, cg, cb] = crate::logo::cell_color(t);
-        let inset = r.size as f32 * 0.14;
-        let side = r.size as f32 - 2.0 * inset;
-        for y in r.y..(r.y + r.size).min(h) {
-            for x in r.x..(r.x + r.size).min(w) {
-                let cover = crate::logo::coverage(
-                    x as f32 + 0.5,
-                    y as f32 + 0.5,
-                    r.x as f32 + inset,
-                    r.y as f32 + inset,
-                    side,
-                    side * 0.23,
-                    1.0,
-                );
-                let a = (cover * 255.0).round() as u16;
-                let blend = |c: u8| ((u16::from(c) * a) / 255) as u8;
-                img.put_pixel(x, y, Rgba([blend(cr), blend(cg), blend(cb), 255]));
-            }
-        }
+    let size = (h / 2).max(8);
+    let icon = crate::logo::icon(size);
+    if let Some(logo) = RgbaImage::from_raw(icon.width, icon.height, icon.rgba) {
+        let x = (w.saturating_sub(logo.width()) / 2).into();
+        let y = (h.saturating_sub(logo.height()) / 2).into();
+        imageops::overlay(&mut img, &logo, x, y);
     }
     img
 }
@@ -523,21 +504,6 @@ mod tests {
         assert_eq!(cut_keys(&small, model).len(), 15);
         let missing = screensaver_keys(Path::new("does/not/exist.png"), model);
         assert!(missing.is_err());
-    }
-
-    #[test]
-    fn default_standby_lights_every_key() {
-        let mk2 = DeviceModel::of(deckly_core::DeviceKind::Mk2);
-        let img = default_standby(mk2);
-        let keys = cut_keys(&img, mk2);
-        // Each key shows a tile in its middle and black at its corner.
-        for key in &keys {
-            assert_ne!(key.get_pixel(36, 36), &Rgba([0, 0, 0, 255]));
-            assert_eq!(key.get_pixel(0, 0), &Rgba([0, 0, 0, 255]));
-        }
-        // Blue at the top left, violet at the bottom right, like the logo.
-        assert_eq!(keys[0].get_pixel(36, 36), &Rgba([0x3D, 0x8B, 0xFD, 255]));
-        assert_eq!(keys[14].get_pixel(36, 36), &Rgba([0x8B, 0x5C, 0xF6, 255]));
     }
 
     #[test]
