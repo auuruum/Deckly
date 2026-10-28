@@ -76,23 +76,12 @@ impl Renderer {
             Some(src) => fit_image(src, size),
             None => {
                 let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
-                let lift = if has_title(key, &style) && style.align == TitleAlign::Bottom {
-                    size as f32 * 0.08
-                } else {
-                    0.0
-                };
                 if key.action == actions::PAGE_INDICATOR {
                     if let Some(font) = &self.title_font {
-                        draw_number(&mut img, font, live.page, lift);
+                        draw_number(&mut img, font, live.page);
                     }
                 } else if let Some(font) = &self.icon_font {
-                    draw_icon(
-                        &mut img,
-                        font,
-                        actions::key_icon(key),
-                        size as f32 * 0.5,
-                        lift,
-                    );
+                    draw_icon(&mut img, font, actions::key_icon(key), size as f32 * 0.5);
                 }
                 img
             }
@@ -402,7 +391,7 @@ fn blend(img: &mut RgbaImage, x: i32, y: i32, color: [u8; 3], coverage: f32) {
     px.0[3] = 255;
 }
 
-fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32, lift: f32) {
+fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32) {
     let Some(c) = glyph.chars().next() else {
         return;
     };
@@ -415,18 +404,18 @@ fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32, lift: f3
     let b = outline.px_bounds();
     let (w, h) = (img.width() as f32, img.height() as f32);
     let ox = ((w - b.width()) / 2.0).round() as i32;
-    let oy = ((h - b.height()) / 2.0 - lift).round() as i32;
+    let oy = ((h - b.height()) / 2.0).round() as i32;
     outline.draw(|x, y, cov| blend(img, ox + x as i32, oy + y as i32, ICON_COLOR, cov));
 }
 
 /// The page number, large and centred, for Page Indicator keys.
-fn draw_number(img: &mut RgbaImage, font: &FontArc, number: usize, lift: f32) {
+fn draw_number(img: &mut RgbaImage, font: &FontArc, number: usize) {
     let size = img.width() as f32;
     let text = number.to_string();
     let scale = PxScale::from(size * if text.len() > 2 { 0.36 } else { 0.48 });
     let sf = font.as_scaled(scale);
     // Centre the digits' height (ascent only; digits have no descent).
-    let baseline = (size + sf.ascent() * 0.72) / 2.0 - lift;
+    let baseline = (size + sf.ascent() * 0.72) / 2.0;
     draw_line(img, font, scale, &text, (0.0, baseline), ICON_COLOR);
 }
 
