@@ -30,6 +30,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-28 | [Key press feedback](2026-10-28-key-press-feedback.md) | Held keys drawn smaller on the device |
 | 2026-10-28 | [Plugin host](2026-10-28-plugin-host.md) | Plugin launch arguments, registration, info object, events and commands, manifests |
 | 2026-10-28 | [Action copy and paste](2026-10-28-action-clipboard.md) | Keyboard shortcuts, replacement confirmation, complete key and folder snapshots |
+| 2026-10-28 | [Editor undo and redo](2026-10-28-editor-history.md) | Profile edit history, action and page restoration, shortcuts and memory limits |
 
 ## Open questions
 

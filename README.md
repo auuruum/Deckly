@@ -43,6 +43,20 @@ The Parent Folder key stays protected. Shortcuts in text fields continue
 to copy and paste text, and action shortcuts are disabled during hotkey
 recording and confirmation dialogs.
 
+## Undo and redo
+
+Ctrl+Z undoes the last edit in the current profile; Ctrl+Y redoes it.
+On macOS use Cmd+Z and Cmd+Shift+Z. This covers placing, replacing,
+moving and clearing key actions, built-in action settings, titles, images,
+and adding or deleting pages, including their folders. Text fields keep
+their own text undo while focused. New edits discard that profile's redo.
+
+History lasts for the current session, with a shared limit of 100 edits and
+32 MiB of snapshot buffers. Oldest entries are discarded at either limit.
+It does not undo device preferences, profile creation/deletion, changes made
+by plugins, or actions already executed on the computer. If a profile changes
+outside the editor, its old history is discarded instead of overwriting it.
+
 ## Plugins
 
 Deckly runs plugins written for the Stream Deck SDK unchanged, each as its

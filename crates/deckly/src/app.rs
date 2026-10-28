@@ -7,6 +7,7 @@
 
 use crate::actions::{self, ACTIONS, Category};
 use crate::clipboard::{self, KeyClipboard};
+use crate::history::{Direction, History, Location};
 use crate::os::{Hotkey, MediaKey};
 use crate::plugins::{self, KeyImage, Overlay};
 use crate::prefs::{self, Preferences};
@@ -118,6 +119,14 @@ struct View {
 }
 
 impl View {
+    fn location(&self, key: Option<u8>) -> Location {
+        Location {
+            page: self.page,
+            path: self.path.clone(),
+            key,
+        }
+    }
+
     fn keys<'a>(&self, profile: &'a mut Profile) -> Option<&'a mut BTreeMap<u8, KeyConfig>> {
         match self.path.last() {
             Some(id) => profile.folder_mut(id).map(|f| &mut f.keys),
@@ -183,6 +192,8 @@ pub struct App {
     recording_hotkey: bool,
     clipboard: Option<KeyClipboard>,
     pending_paste: Option<PendingPaste>,
+    history: History,
+    history_shortcut: Option<Direction>,
     dirty: HashSet<String>,
     last_edit: Instant,
     prefs: Preferences,
@@ -250,6 +261,8 @@ impl App {
             recording_hotkey: false,
             clipboard: None,
             pending_paste: None,
+            history: History::default(),
+            history_shortcut: None,
             dirty: HashSet::new(),
             last_edit: Instant::now(),
             prefs: Preferences::new(),
@@ -1086,13 +1099,20 @@ impl App {
 
         // Grid focus is distinct from text fields, buttons and hotkey recording.
         let grid_focus = self.selected_key.map(|index| ui.id().with(("key", index)));
-        let shortcuts = !self.recording_hotkey
+        let editor_shortcuts = !self.recording_hotkey
             && self.rename.is_none()
             && self.pending_paste.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
-            && ui.ctx().memory(|m| {
-                m.top_modal_layer().is_none() && m.focused().is_none_or(|id| Some(id) == grid_focus)
-            });
+            && ui.ctx().memory(|m| m.top_modal_layer().is_none());
+        let shortcuts = editor_shortcuts
+            && ui
+                .ctx()
+                .memory(|m| m.focused().is_none_or(|id| Some(id) == grid_focus));
+        if let Some(direction) =
+            history_shortcut(ui.ctx(), editor_shortcuts && !ui.ctx().text_edit_focused())
+        {
+            self.history_shortcut = Some(direction);
+        }
         if shortcuts
             && let Some(index) = self.selected_key
             && ui.input(|i| i.key_pressed(egui::Key::Delete))
@@ -1803,6 +1823,63 @@ impl App {
 
     // ----- windows -------------------------------------------------------
 
+    fn finish_edit(
+        &mut self,
+        ctx: &egui::Context,
+        profile: &mut Profile,
+        view: &mut View,
+        original: &Profile,
+        original_location: Location,
+        group: Option<u64>,
+    ) {
+        if profile != original {
+            profile.normalize_folders();
+            if let Err(e) = self.history.record(
+                original,
+                profile,
+                original_location,
+                view.location(self.selected_key),
+                group,
+            ) {
+                runtime::lock(&self.state).notify(e);
+            }
+        }
+        if let Some(direction) = self.history_shortcut.take() {
+            self.apply_history(ctx, profile, view, direction);
+        }
+    }
+
+    fn apply_history(
+        &mut self,
+        ctx: &egui::Context,
+        profile: &mut Profile,
+        view: &mut View,
+        direction: Direction,
+    ) {
+        match self.history.step(profile, direction) {
+            Ok(Some((restored, location))) => {
+                *profile = restored;
+                view.page = location.page.min(profile.pages.len().saturating_sub(1));
+                view.path = location.path;
+                view.live.page = view.page + 1;
+                self.selected_key = location.key.filter(|k| *k < profile.model().key_count());
+                self.recording_hotkey = false;
+                self.pending_paste = None;
+                self.folder_nav = None;
+                // Reopen the inspector from restored settings, even for the same UUID.
+                if let Some(host) = &self.host {
+                    host.close_inspector();
+                }
+                self.plugin_page_requested = None;
+                self.plugin_page_area = None;
+                self.mark_dirty(&profile.id);
+                ctx.request_repaint();
+            }
+            Ok(None) => {}
+            Err(e) => runtime::lock(&self.state).notify(e),
+        }
+    }
+
     fn key_command(
         &mut self,
         ctx: &egui::Context,
@@ -2011,6 +2088,7 @@ impl eframe::App for App {
             }
         };
         let original = profile.clone();
+        let original_location = view.location(self.selected_key);
         let (original_page, original_path) = (view.page, view.path.clone());
 
         let window = ui.available_rect_before_wrap();
@@ -2034,6 +2112,26 @@ impl eframe::App for App {
             .exact_size(inspector_h)
             .frame(egui::Frame::new().fill(CANVAS))
             .show(ui, |ui| self.inspector(ui, &mut profile, &view));
+        let typing = ctx.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Key { pressed: true, .. }
+                )
+            })
+        });
+        let inspector_edit = (typing && profile != original)
+            .then(|| ctx.memory(|m| m.focused()))
+            .flatten()
+            .map(|focus| {
+                (
+                    egui::Id::new((&profile.id, view.page, &view.path, self.selected_key, focus))
+                        .value(),
+                    profile.clone(),
+                )
+            });
         egui::CentralPanel::no_frame().show(ui, |ui| {
             ui.painter()
                 .rect_filled(ui.max_rect(), CornerRadius::ZERO, CANVAS);
@@ -2083,10 +2181,17 @@ impl eframe::App for App {
         // Write the edited copy back. Profile switches made this frame
         // already changed which profile is current; only write if it still
         // exists.
-        if profile != original {
-            // New folder keys get their folder, removed ones lose theirs.
-            profile.normalize_folders();
-        }
+        let group = inspector_edit
+            .filter(|(_, edited)| edited == &profile)
+            .map(|(id, _)| id);
+        self.finish_edit(
+            &ctx,
+            &mut profile,
+            &mut view,
+            &original,
+            original_location,
+            group,
+        );
         if profile != original || view.page != original_page || view.path != original_path {
             let mut s = runtime::lock(&self.state);
             if let Some(p) = s.profile_mut(&profile.id) {
@@ -2429,6 +2534,40 @@ fn clipboard_events(ctx: &egui::Context, enabled: bool) -> Vec<egui::Event> {
     })
 }
 
+fn history_shortcut(ctx: &egui::Context, enabled: bool) -> Option<Direction> {
+    if !enabled {
+        return None;
+    }
+    let mac = matches!(ctx.os(), egui::os::OperatingSystem::Mac);
+    ctx.input_mut(|i| {
+        let found = i.events.iter().enumerate().find_map(|(index, event)| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            if !modifiers.command || modifiers.alt {
+                return None;
+            }
+            let direction = match (*key, modifiers.shift) {
+                (egui::Key::Z, false) => Direction::Undo,
+                (egui::Key::Y, false) => Direction::Redo,
+                (egui::Key::Z, true) if mac => Direction::Redo,
+                _ => return None,
+            };
+            Some((index, direction))
+        });
+        found.map(|(index, direction)| {
+            i.events.remove(index);
+            direction
+        })
+    })
+}
+
 /// Returns `Some(Some(hotkey))` when a combination was pressed,
 /// `Some(None)` when recording was cancelled with Esc, `None` otherwise.
 fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
@@ -2486,6 +2625,8 @@ mod clipboard_tests {
             recording_hotkey: false,
             clipboard: None,
             pending_paste: None,
+            history: History::default(),
+            history_shortcut: None,
             dirty: HashSet::new(),
             last_edit: Instant::now(),
             prefs: Preferences::new(),
@@ -2514,14 +2655,158 @@ mod clipboard_tests {
             ..Default::default()
         };
         let mut output = ctx.run_ui(input, |ui| {
+            let original = profile.clone();
+            let original_location = view.location(app.selected_key);
             if text_focus {
                 ui.text_edit_singleline(&mut app.search).request_focus();
             }
             app.canvas(ui, None, profile, &mut view);
             app.paste_confirmation(ctx, profile, &view);
+            app.finish_edit(ctx, profile, &mut view, &original, original_location, None);
         });
         output.textures_delta.clear();
         output.shapes
+    }
+
+    fn shortcut(key: egui::Key, mac: bool, shift: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: true,
+                ctrl: !mac,
+                mac_cmd: mac,
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn undo_redo_keyboard_restores_paste_and_delete_without_touching_the_source() {
+        for mac in [false, true] {
+            let ctx = egui::Context::default();
+            ctx.set_os(if mac {
+                egui::os::OperatingSystem::Mac
+            } else {
+                egui::os::OperatingSystem::Windows
+            });
+            apply(&ctx);
+            let mut app = editor();
+            let mut profile = Profile::new("Test", DeviceKind::Mk2);
+            let key = KeyConfig::new(actions::WEBSITE, json!({"url": "https://example.com"}));
+            profile.pages[0].keys.insert(0, key.clone());
+            let copy = KeyClipboard::copy(&profile, &profile.pages[0].id, 0).unwrap();
+            app.selected_key = Some(1);
+            frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![egui::Event::Paste(copy.text().unwrap())],
+                false,
+            );
+            frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![shortcut(egui::Key::Z, mac, false)],
+                false,
+            );
+            assert!(!profile.pages[0].keys.contains_key(&1));
+            let redo = if mac {
+                shortcut(egui::Key::Z, true, true)
+            } else {
+                shortcut(egui::Key::Y, false, false)
+            };
+            frame(&ctx, &mut app, &mut profile, vec![redo], false);
+            assert_eq!(profile.pages[0].keys[&1], key);
+            frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![egui::Event::Key {
+                    key: egui::Key::Delete,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                false,
+            );
+            assert!(!profile.pages[0].keys.contains_key(&1));
+            frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![shortcut(egui::Key::Z, mac, false)],
+                false,
+            );
+            assert_eq!(profile.pages[0].keys[&1], key);
+            assert_eq!(profile.pages[0].keys[&0], key);
+        }
+    }
+
+    #[test]
+    fn undo_is_blocked_in_text_fields_and_hotkey_recording_but_button_focus_is_allowed() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let original = profile.clone();
+        profile.pages[0]
+            .keys
+            .insert(0, KeyConfig::new(actions::WEBSITE, json!({})));
+        app.history
+            .record(
+                &original,
+                &profile,
+                Location::default(),
+                Location::default(),
+                None,
+            )
+            .unwrap();
+        let edited = profile.clone();
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![shortcut(egui::Key::Z, false, false)],
+            true,
+        );
+        assert_eq!(profile, edited);
+        app.recording_hotkey = true;
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![shortcut(egui::Key::Z, false, false)],
+            false,
+        );
+        assert_eq!(profile, edited);
+        app.recording_hotkey = false;
+        let mut view = View {
+            page: 0,
+            path: Vec::new(),
+            live: Live::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![shortcut(egui::Key::Z, false, false)],
+                ..Default::default()
+            },
+            |ui| {
+                ui.push_id("page-control", |ui| {
+                    ui.button("Page control").request_focus()
+                });
+                app.canvas(ui, None, &mut profile, &mut view);
+                let location = view.location(app.selected_key);
+                app.finish_edit(&ctx, &mut profile, &mut view, &edited, location, None);
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(profile, original);
     }
 
     #[test]

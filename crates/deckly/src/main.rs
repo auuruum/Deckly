@@ -7,6 +7,7 @@ mod actions;
 mod app;
 mod clipboard;
 mod cropper;
+mod history;
 mod logo;
 mod os;
 mod plugins;
