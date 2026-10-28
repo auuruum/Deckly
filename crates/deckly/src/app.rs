@@ -471,8 +471,8 @@ impl App {
         );
         let half = tabs.width() / 2.0;
         for (i, (tab, label)) in [
-            (ListTab::Keys, format!("{}  Keys", icon::SQUARE)),
-            (ListTab::Plugins, "Plugins".to_owned()),
+            (ListTab::Keys, format!("{}  Keys", icon::HAND_TAP)),
+            (ListTab::Plugins, format!("{}  Plugins", icon::PUZZLE_PIECE)),
         ]
         .into_iter()
         .enumerate()
