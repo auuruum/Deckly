@@ -1,5 +1,6 @@
 //! Installing plugins: `.streamDeckPlugin` archives (zip files holding one
-//! `<uuid>.sdPlugin` folder) and plain plugin folders.
+//! `<uuid>.sdPlugin` folder), zip downloads holding either, and plain
+//! plugin folders.
 //!
 //! Archives are untrusted: entry names must stay inside the target folder and
 //! sizes and counts are bounded. Files are unpacked into a staging folder
@@ -82,8 +83,14 @@ fn staged(root: TempDir, dir: PathBuf) -> Result<Staged, InstallError> {
     })
 }
 
-/// Unpacks a `.streamDeckPlugin` archive into a staging folder.
+/// Unpacks a `.streamDeckPlugin` archive into a staging folder. Plain zip
+/// downloads work too: the plugin folder may sit inside other folders, or
+/// the zip may hold one `.streamDeckPlugin` file.
 pub fn stage_archive(archive: &Path, plugins_dir: &Path) -> Result<Staged, InstallError> {
+    unpack(archive, plugins_dir, true)
+}
+
+fn unpack(archive: &Path, plugins_dir: &Path, open_inner: bool) -> Result<Staged, InstallError> {
     let mut file = File::open(archive)?;
     let mut magic = [0u8; 6];
     if file.read_exact(&mut magic).is_ok() && &magic == b"ELGATO" {
@@ -97,7 +104,8 @@ pub fn stage_archive(archive: &Path, plugins_dir: &Path) -> Result<Staged, Insta
     // The staging folder is removed again on any error.
     let root = staging_root(plugins_dir)?;
     let mut total = 0u64;
-    let mut top: Option<String> = None;
+    let mut top: Option<PathBuf> = None;
+    let mut inner = None;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
@@ -108,30 +116,44 @@ pub fn stage_archive(archive: &Path, plugins_dir: &Path) -> Result<Staged, Insta
                 entry.name()
             )));
         };
-        let Some(first) = name
+        let Some(parts) = name
             .components()
-            .next()
-            .and_then(|c| c.as_os_str().to_str())
+            .map(|c| c.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>()
         else {
             continue;
         };
         // Archives made on a Mac carry a resource-fork folder.
-        if !first.ends_with(".sdPlugin") {
+        if parts.first() == Some(&"__MACOSX") {
             continue;
         }
+        let Some(at) = parts.iter().position(|p| p.ends_with(".sdPlugin")) else {
+            let packed = name
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("streamDeckPlugin"));
+            if packed && !entry.is_dir() && inner.replace(i).is_some() {
+                return Err(InstallError::NotAPlugin(
+                    "more than one plugin in the archive".into(),
+                ));
+            }
+            continue;
+        };
+        let folder: PathBuf = parts[..=at].iter().collect();
         match &top {
-            None => top = Some(first.to_owned()),
-            Some(t) if t != first => {
+            None => top = Some(folder),
+            Some(t) if *t != folder => {
                 return Err(InstallError::NotAPlugin(
                     "more than one plugin folder in the archive".into(),
                 ));
             }
             Some(_) => {}
         }
-        if name.components().count() > MAX_DEPTH {
+        if parts.len() - at > MAX_DEPTH {
             return Err(InstallError::NotAPlugin("folders nest too deep".into()));
         }
-        let out = root.0.join(&name);
+        let out: PathBuf = std::iter::once(root.0.as_os_str())
+            .chain(parts[at..].iter().map(|p| p.as_ref()))
+            .collect();
         if entry.is_dir() {
             std::fs::create_dir_all(&out)?;
             continue;
@@ -153,19 +175,52 @@ pub fn stage_archive(archive: &Path, plugins_dir: &Path) -> Result<Staged, Insta
             std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o755))?;
         }
     }
-    let top = top.ok_or_else(|| InstallError::NotAPlugin("no .sdPlugin folder inside".into()))?;
-    let dir = root.0.join(&top);
+    if top.is_none()
+        && open_inner
+        && let Some(i) = inner
+    {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| InstallError::NotAPlugin(e.to_string()))?;
+        let path = root.0.join("inner.streamDeckPlugin");
+        let written = io::copy(
+            &mut (&mut entry).take(MAX_TOTAL_BYTES + 1),
+            &mut File::create(&path)?,
+        )?;
+        if written > MAX_TOTAL_BYTES {
+            return Err(InstallError::TooLarge);
+        }
+        // One level only, so nested archives cannot recurse.
+        return unpack(&path, plugins_dir, false);
+    }
+    let dir = top
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|n| root.0.join(n))
+        .ok_or_else(|| InstallError::NotAPlugin("no .sdPlugin folder inside".into()))?;
     staged(root, dir)
 }
 
-/// Copies a `<uuid>.sdPlugin` folder into a staging folder.
+/// Copies a `<uuid>.sdPlugin` folder, or the one such folder inside `src`
+/// (an unpacked download), into a staging folder.
 pub fn stage_folder(src: &Path, plugins_dir: &Path) -> Result<Staged, InstallError> {
-    let name = src
+    let Some(name) = src
         .file_name()
         .and_then(|n| n.to_str())
         .filter(|n| n.ends_with(".sdPlugin"))
-        .ok_or_else(|| InstallError::NotAPlugin("the folder name must end in .sdPlugin".into()))?
-        .to_owned();
+        .map(str::to_owned)
+    else {
+        let mut inner = std::fs::read_dir(src)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.extension().is_some_and(|e| e == "sdPlugin"));
+        return match (inner.next(), inner.next()) {
+            (Some(dir), None) => stage_folder(&dir, plugins_dir),
+            _ => Err(InstallError::NotAPlugin(
+                "the folder must be a .sdPlugin folder or hold one".into(),
+            )),
+        };
+    };
     // Check the manifest before copying anything.
     Manifest::load(src).map_err(InstallError::Manifest)?;
     let root = staging_root(plugins_dir)?;
@@ -369,7 +424,66 @@ mod tests {
         let staged = stage_folder(&src, &plugins).unwrap();
         commit(staged, &plugins).unwrap();
         assert!(plugins.join("com.example.p.sdPlugin/bin/p.js").is_file());
+        // A folder holding one plugin folder (an unpacked download).
+        commit(stage_folder(&dir.join("src"), &plugins).unwrap(), &plugins).unwrap();
+        std::fs::create_dir_all(dir.join("src/com.other.sdPlugin")).unwrap();
         assert!(stage_folder(&dir.join("src"), &plugins).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installs_plain_zip_downloads() {
+        let dir = temp("zip");
+        let plugins = dir.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        // The plugin folder inside a release folder, with Mac leftovers.
+        let file = dir.join("p.zip");
+        archive(
+            &file,
+            &[
+                ("p-1.0/com.example.p.sdPlugin/manifest.json", MANIFEST),
+                ("p-1.0/com.example.p.sdPlugin/bin/p.js", b"x"),
+                ("p-1.0/readme.txt", b"x"),
+                (
+                    "__MACOSX/p-1.0/com.example.p.sdPlugin/._manifest.json",
+                    b"x",
+                ),
+            ],
+        );
+        commit(stage_archive(&file, &plugins).unwrap(), &plugins).unwrap();
+        assert!(plugins.join("com.example.p.sdPlugin/bin/p.js").is_file());
+        // A zip holding a .streamDeckPlugin file.
+        let packed = dir.join("p.streamDeckPlugin");
+        archive(
+            &packed,
+            &[("com.example.p.sdPlugin/manifest.json", MANIFEST)],
+        );
+        let bytes = std::fs::read(&packed).unwrap();
+        archive(&file, &[("dl/p.streamDeckPlugin", &bytes)]);
+        assert_eq!(stage_archive(&file, &plugins).unwrap().manifest.name, "P");
+        // Archives nested twice are not opened.
+        let twice = dir.join("twice.streamDeckPlugin");
+        std::fs::copy(&file, &twice).unwrap();
+        archive(
+            &file,
+            &[("twice.streamDeckPlugin", &std::fs::read(&twice).unwrap())],
+        );
+        assert!(stage_archive(&file, &plugins).is_err());
+        // Two plugins in one zip are refused.
+        archive(
+            &file,
+            &[
+                ("a/com.example.p.sdPlugin/manifest.json", MANIFEST),
+                ("b/com.example.p.sdPlugin/manifest.json", MANIFEST),
+            ],
+        );
+        assert!(stage_archive(&file, &plugins).is_err());
+        let staging: Vec<_> = std::fs::read_dir(&plugins)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(staging, ["com.example.p.sdPlugin"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

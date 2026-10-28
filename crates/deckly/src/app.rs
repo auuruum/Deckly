@@ -615,7 +615,9 @@ impl App {
             ui.add_space(17.0);
             if ui
                 .button(format!("{}  Install…", icon::DOWNLOAD_SIMPLE))
-                .on_hover_text("Install a .streamDeckPlugin file (or drop one on the window)")
+                .on_hover_text(
+                    "Install a .streamDeckPlugin or .zip file (or drop one on the window)",
+                )
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Plugin", &["streamDeckPlugin", "zip"])
@@ -625,7 +627,7 @@ impl App {
             }
             if ui
                 .button(format!("{}  Add Folder…", icon::FOLDER_PLUS))
-                .on_hover_text("Install a <plugin id>.sdPlugin folder")
+                .on_hover_text("Install a <plugin id>.sdPlugin folder, or a folder holding one")
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new().pick_folder()
             {
@@ -2232,8 +2234,10 @@ impl eframe::App for App {
                 .iter()
                 .map(|f| f.path().to_path_buf())
                 .filter(|p| {
-                    p.extension().is_some_and(|e| e == "streamDeckPlugin")
-                        || (p.is_dir() && p.extension().is_some_and(|e| e == "sdPlugin"))
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or_default();
+                    p.is_dir()
+                        || ext.eq_ignore_ascii_case("streamDeckPlugin")
+                        || ext.eq_ignore_ascii_case("zip")
                 })
                 .collect()
         });

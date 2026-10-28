@@ -61,8 +61,9 @@ outside the editor, its old history is discarded instead of overwriting it.
 
 Deckly runs plugins written for the Stream Deck SDK unchanged, each as its
 own process. Install one from the Plugins tab ("Install…" for a
-`.streamDeckPlugin` file, "Add Folder…" for a `<plugin id>.sdPlugin`
-folder) or drop the file on the window. Plugin actions then appear in the
+`.streamDeckPlugin` file or a `.zip` download that holds one or a
+`<plugin id>.sdPlugin` folder, "Add Folder…" for a `.sdPlugin` folder or
+a folder holding one) or drop the file or folder on the window. Plugin actions then appear in the
 Keys tab under the plugin's name.
 
 - Node.js plugins run on the Node.js major their manifest asks for: a
