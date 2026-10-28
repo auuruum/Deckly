@@ -5,6 +5,7 @@
 //! (at a larger size) and to the device (as a JPEG at the key size).
 
 use crate::actions;
+use crate::plugins::{Mark, Overlay};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
     DeviceModel, ImageFormat, KeyConfig, KeyPress, Orientation, Rotation, TitleAlign, TitleStyle,
@@ -66,14 +67,28 @@ impl Renderer {
         self.images.clear();
     }
 
-    pub fn render(&mut self, key: Option<&KeyConfig>, size: u32, live: Live) -> RgbaImage {
+    /// Draws a key. `overlay` is what its plugin shows, for plugin keys.
+    pub fn render(
+        &mut self,
+        key: Option<&KeyConfig>,
+        size: u32,
+        live: Live,
+        overlay: Option<&Overlay>,
+    ) -> RgbaImage {
         let size = size.clamp(8, 1024);
         let Some(key) = key else {
             return RgbaImage::from_pixel(size, size, EMPTY);
         };
         let style = self.title_style(key);
-        let mut img = match key.image.as_deref().and_then(|p| self.custom_image(p)) {
-            Some(src) => fit_image(src, size),
+        // The user's own image wins over the plugin's.
+        let picture = key
+            .image
+            .as_deref()
+            .and_then(|p| self.custom_image(p))
+            .map(|src| fit_image(src, size))
+            .or_else(|| overlay?.image.as_ref().map(|i| fit_image(&i.img, size)));
+        let mut img = match picture {
+            Some(img) => img,
             None => {
                 let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
                 if key.action == actions::PAGE_INDICATOR {
@@ -86,10 +101,17 @@ impl Renderer {
                 img
             }
         };
-        if has_title(key, &style)
+        let title = shown_title(key, overlay);
+        if style.show
+            && !title.trim().is_empty()
             && let Some(font) = &self.title_font
         {
-            draw_title(&mut img, font, &key.title, &style, size);
+            draw_title(&mut img, font, title, &style, size);
+        }
+        if let Some(mark) = overlay.and_then(|o| o.mark)
+            && let Some(font) = &self.icon_font
+        {
+            draw_mark(&mut img, font, mark);
         }
         if let Some(percent) = self.pressed_size(live) {
             img = shrink(&img, percent);
@@ -103,9 +125,10 @@ impl Renderer {
     }
 
     /// Changes whenever anything that affects a key's pixels changes.
-    pub fn key_hash(&self, key: Option<&KeyConfig>, live: Live) -> u64 {
+    pub fn key_hash(&self, key: Option<&KeyConfig>, live: Live, overlay: Option<&Overlay>) -> u64 {
         let mut h = DefaultHasher::new();
         if let Some(key) = key {
+            overlay.hash(&mut h);
             key.action.hash(&mut h);
             key.title.hash(&mut h);
             self.title_style(key).hash(&mut h);
@@ -133,10 +156,11 @@ impl Renderer {
         &mut self,
         key: Option<&KeyConfig>,
         live: Live,
+        overlay: Option<&Overlay>,
         model: &DeviceModel,
         orientation: Orientation,
     ) -> Vec<u8> {
-        let img = self.render(key, model.key_image_size, live);
+        let img = self.render(key, model.key_image_size, live, overlay);
         encode_key(img, model, orientation)
     }
 
@@ -182,8 +206,28 @@ fn shrink(img: &RgbaImage, percent: u8) -> RgbaImage {
     out
 }
 
-fn has_title(key: &KeyConfig, style: &TitleStyle) -> bool {
-    style.show && !key.title.trim().is_empty()
+/// The user's title, else the one the key's plugin set.
+fn shown_title<'a>(key: &'a KeyConfig, overlay: Option<&'a Overlay>) -> &'a str {
+    if key.title.trim().is_empty() {
+        overlay.and_then(|o| o.title.as_deref()).unwrap_or("")
+    } else {
+        &key.title
+    }
+}
+
+/// A plugin's short feedback: a warning sign or a check mark over the key.
+fn draw_mark(img: &mut RgbaImage, font: &FontArc, mark: Mark) {
+    for px in img.pixels_mut() {
+        for c in &mut px.0[..3] {
+            *c /= 3;
+        }
+    }
+    let (glyph, color) = match mark {
+        Mark::Alert => (egui_phosphor::regular::WARNING, [0xF0, 0xB4, 0x3C]),
+        Mark::Ok => (egui_phosphor::regular::CHECK_CIRCLE, [0x4C, 0xC3, 0x5E]),
+    };
+    let size = img.width() as f32 * 0.6;
+    draw_icon_colored(img, font, glyph, size, color);
 }
 
 /// Turns a key-sized image for the user's orientation and the model, then
@@ -392,6 +436,10 @@ fn blend(img: &mut RgbaImage, x: i32, y: i32, color: [u8; 3], coverage: f32) {
 }
 
 fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32) {
+    draw_icon_colored(img, font, glyph, px, ICON_COLOR);
+}
+
+fn draw_icon_colored(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32, color: [u8; 3]) {
     let Some(c) = glyph.chars().next() else {
         return;
     };
@@ -405,7 +453,7 @@ fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32) {
     let (w, h) = (img.width() as f32, img.height() as f32);
     let ox = ((w - b.width()) / 2.0).round() as i32;
     let oy = ((h - b.height()) / 2.0).round() as i32;
-    outline.draw(|x, y, cov| blend(img, ox + x as i32, oy + y as i32, ICON_COLOR, cov));
+    outline.draw(|x, y, cov| blend(img, ox + x as i32, oy + y as i32, color, cov));
 }
 
 /// The page number, large and centred, for Page Indicator keys.
@@ -506,15 +554,18 @@ mod tests {
     #[test]
     fn renders_requested_sizes() {
         let mut r = Renderer::new();
-        assert_eq!(r.render(None, 72, Live::default()).dimensions(), (72, 72));
+        assert_eq!(
+            r.render(None, 72, Live::default(), None).dimensions(),
+            (72, 72)
+        );
         let mut key = KeyConfig::new(actions::WEBSITE, json!({}));
         key.title = "Hello\nWorld".into();
         assert_eq!(
-            r.render(Some(&key), 96, Live::default()).dimensions(),
+            r.render(Some(&key), 96, Live::default(), None).dimensions(),
             (96, 96)
         );
         assert_eq!(
-            r.render(Some(&key), 0, Live::default()).dimensions(),
+            r.render(Some(&key), 0, Live::default(), None).dimensions(),
             (8, 8)
         );
     }
@@ -524,7 +575,7 @@ mod tests {
         let mut r = Renderer::new();
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
         key.image = Some("does/not/exist.png".into());
-        let img = r.render(Some(&key), 72, Live::default());
+        let img = r.render(Some(&key), 72, Live::default(), None);
         assert_eq!(img.get_pixel(0, 0), &ICON_BACKGROUND);
     }
 
@@ -534,7 +585,13 @@ mod tests {
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
         key.title = "Title".into();
         for model in DeviceModel::ALL {
-            let data = r.device_image(Some(&key), Live::default(), model, Orientation::Standard);
+            let data = r.device_image(
+                Some(&key),
+                Live::default(),
+                None,
+                model,
+                Orientation::Standard,
+            );
             let magic: &[u8] = match model.image_format() {
                 ImageFormat::Jpeg => &[0xFF, 0xD8],
                 ImageFormat::Bmp => b"BM",
@@ -566,6 +623,7 @@ mod tests {
             let img = image::load_from_memory(&r.device_image(
                 Some(&key),
                 Live::default(),
+                None,
                 model,
                 orientation,
             ))
@@ -667,16 +725,26 @@ mod tests {
         let key = KeyConfig::new(actions::PAGE_INDICATOR, json!({}));
         let one = Live::default();
         let two = Live { page: 2, ..one };
-        assert_ne!(r.key_hash(Some(&key), one), r.key_hash(Some(&key), two));
-        assert_ne!(r.render(Some(&key), 72, one), r.render(Some(&key), 72, two));
+        assert_ne!(
+            r.key_hash(Some(&key), one, None),
+            r.key_hash(Some(&key), two, None)
+        );
+        assert_ne!(
+            r.render(Some(&key), 72, one, None),
+            r.render(Some(&key), 72, two, None)
+        );
         // A three-digit page still fits.
         assert_eq!(
-            r.render(Some(&key), 72, Live { page: 100, ..one }).width(),
+            r.render(Some(&key), 72, Live { page: 100, ..one }, None)
+                .width(),
             72
         );
         // Other keys do not depend on the page.
         let other = KeyConfig::new(actions::HOTKEY, json!({}));
-        assert_eq!(r.key_hash(Some(&other), one), r.key_hash(Some(&other), two));
+        assert_eq!(
+            r.key_hash(Some(&other), one, None),
+            r.key_hash(Some(&other), two, None)
+        );
     }
 
     #[test]
@@ -693,16 +761,19 @@ mod tests {
             pressed: true,
             ..up
         };
-        assert_ne!(r.key_hash(Some(&key), up), r.key_hash(Some(&key), down));
-        let normal = r.render(Some(&key), 72, up);
-        let held = r.render(Some(&key), 72, down);
+        assert_ne!(
+            r.key_hash(Some(&key), up, None),
+            r.key_hash(Some(&key), down, None)
+        );
+        let normal = r.render(Some(&key), 72, up, None);
+        let held = r.render(Some(&key), 72, down, None);
         assert_eq!(held.dimensions(), (72, 72));
         // The picture fills the key normally and leaves a black frame held.
         assert_eq!(normal.get_pixel(1, 1).0, [255, 255, 255, 255]);
         assert_eq!(held.get_pixel(1, 1), &EMPTY);
         assert_eq!(held.get_pixel(36, 36).0, [255, 255, 255, 255]);
         // An empty key looks the same either way, so nothing is resent.
-        assert_eq!(r.key_hash(None, up), r.key_hash(None, down));
+        assert_eq!(r.key_hash(None, up, None), r.key_hash(None, down, None));
         // A larger shrink leaves a wider frame.
         let frame = |img: &RgbaImage| {
             (0..36)
@@ -711,12 +782,18 @@ mod tests {
         };
         let before = frame(&held);
         r.key_press.size = 60;
-        assert_ne!(r.key_hash(Some(&key), down), r.key_hash(Some(&key), up));
-        assert!(frame(&r.render(Some(&key), 72, down)) > before);
+        assert_ne!(
+            r.key_hash(Some(&key), down, None),
+            r.key_hash(Some(&key), up, None)
+        );
+        assert!(frame(&r.render(Some(&key), 72, down, None)) > before);
         // With the effect off a held key looks like any other.
         r.key_press.shrink = false;
-        assert_eq!(r.key_hash(Some(&key), up), r.key_hash(Some(&key), down));
-        assert_eq!(r.render(Some(&key), 72, down), normal);
+        assert_eq!(
+            r.key_hash(Some(&key), up, None),
+            r.key_hash(Some(&key), down, None)
+        );
+        assert_eq!(r.render(Some(&key), 72, down, None), normal);
         let _ = std::fs::remove_file(path);
     }
 
@@ -724,19 +801,19 @@ mod tests {
     fn hash_tracks_visible_changes() {
         let mut r = Renderer::new();
         let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
-        let a = r.key_hash(Some(&key), Live::default());
+        let a = r.key_hash(Some(&key), Live::default(), None);
         key.title = "x".into();
-        let b = r.key_hash(Some(&key), Live::default());
+        let b = r.key_hash(Some(&key), Live::default(), None);
         assert_ne!(a, b);
-        assert_ne!(r.key_hash(None, Live::default()), b);
+        assert_ne!(r.key_hash(None, Live::default(), None), b);
         // Keys without their own style change with the global one...
         r.title_defaults.size = 20;
-        let c = r.key_hash(Some(&key), Live::default());
+        let c = r.key_hash(Some(&key), Live::default(), None);
         assert_ne!(b, c);
         // ...keys with their own style do not.
         key.title_style = Some(TitleStyle::default());
-        let d = r.key_hash(Some(&key), Live::default());
+        let d = r.key_hash(Some(&key), Live::default(), None);
         r.title_defaults.size = 9;
-        assert_eq!(d, r.key_hash(Some(&key), Live::default()));
+        assert_eq!(d, r.key_hash(Some(&key), Live::default(), None));
     }
 }

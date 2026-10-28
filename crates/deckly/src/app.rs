@@ -7,6 +7,7 @@
 
 use crate::actions::{self, ACTIONS, Category};
 use crate::os::{Hotkey, MediaKey};
+use crate::plugins::{self, KeyImage, Overlay};
 use crate::prefs::{self, Preferences};
 use crate::render::{Live, Renderer};
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
@@ -14,6 +15,7 @@ use crate::store;
 use crate::theme::*;
 use deckly_core::profile::MAX_FOLDER_DEPTH;
 use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleStyle};
+use deckly_plugin_host::{Host, Status};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
     TextureOptions, Ui, Vec2, pos2, vec2,
@@ -22,6 +24,7 @@ use egui_phosphor::regular as icon;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -122,9 +125,10 @@ impl View {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum DragPayload {
-    Action(&'static str),
+    /// A built-in or plugin action, by UUID.
+    Action(String),
     Key(u8),
 }
 
@@ -138,7 +142,12 @@ pub struct App {
     selected_key: Option<u8>,
     search: String,
     tab: ListTab,
-    expanded: HashSet<&'static str>,
+    /// Open categories in the action list, by name.
+    expanded: HashSet<String>,
+    /// `None` when the plugin host could not start.
+    host: Option<Host>,
+    /// Textures of plugin images, by image id.
+    images: HashMap<u64, TextureHandle>,
     recording_hotkey: bool,
     clipboard: Option<KeyConfig>,
     dirty: HashSet<String>,
@@ -173,7 +182,21 @@ impl App {
         }
         let state: Shared = Arc::new(std::sync::Mutex::new(state));
         let ctx = cc.egui_ctx.clone();
-        let runtime = runtime::start(state.clone(), Arc::new(move || ctx.request_repaint()));
+        let repaint: runtime::Repaint = Arc::new(move || ctx.request_repaint());
+        let (host, host_events) = start_host();
+        if host.is_none() {
+            runtime::lock(&state).notify("Plugins could not be started");
+        }
+        let runtime = runtime::start(state.clone(), repaint.clone(), host.clone());
+        if let (Some(host), Some(events)) = (&host, host_events) {
+            plugins::start(
+                state.clone(),
+                runtime.clone(),
+                host.clone(),
+                events,
+                repaint,
+            );
+        }
         Self {
             state,
             runtime,
@@ -184,7 +207,9 @@ impl App {
             selected_key: None,
             search: String::new(),
             tab: ListTab::Keys,
-            expanded: HashSet::from([Category::System.label()]),
+            expanded: HashSet::from([Category::System.label().to_owned()]),
+            host,
+            images: HashMap::new(),
             recording_hotkey: false,
             clipboard: None,
             dirty: HashSet::new(),
@@ -251,21 +276,41 @@ impl App {
         key: Option<&KeyConfig>,
         px: u32,
         live: Live,
+        overlay: Option<&Overlay>,
     ) -> egui::TextureId {
         let px = px.clamp(32, 288);
-        let hash = self.renderer.key_hash(key, live);
+        let hash = self.renderer.key_hash(key, live, overlay);
         if let Some(t) = self.textures.get(&(hash, px)) {
             return t.id();
         }
         if self.textures.len() > 512 {
             self.textures.clear();
         }
-        let img = self.renderer.render(key, px, live);
+        let img = self.renderer.render(key, px, live, overlay);
         let color = ColorImage::from_rgba_unmultiplied([px as usize, px as usize], img.as_raw());
         let tex = ctx.load_texture(format!("key-{hash:x}-{px}"), color, TextureOptions::LINEAR);
         let id = tex.id();
         self.textures.insert((hash, px), tex);
         id
+    }
+
+    /// A texture for a plugin image (action and category icons).
+    fn image_texture(&mut self, ctx: &egui::Context, image: &KeyImage) -> egui::TextureId {
+        if self.images.len() > 512 {
+            self.images.clear();
+        }
+        self.images
+            .entry(image.id)
+            .or_insert_with(|| {
+                let size = [image.img.width() as usize, image.img.height() as usize];
+                let color = ColorImage::from_rgba_unmultiplied(size, image.img.as_raw());
+                ctx.load_texture(
+                    format!("plugin-{:x}", image.id),
+                    color,
+                    TextureOptions::LINEAR,
+                )
+            })
+            .id()
     }
 
     // ----- device header -------------------------------------------------
@@ -501,18 +546,190 @@ impl App {
         let body = Rect::from_min_max(pos2(full.left(), header.bottom() + 2.0), full.max);
         ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| match self.tab {
             ListTab::Keys => self.key_actions(ui),
-            ListTab::Plugins => {
-                ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new(icon::PUZZLE_PIECE)
-                            .size(28.0)
-                            .color(TEXT_FAINT),
-                    );
-                    ui.label(RichText::new("Plugins are not supported yet.").color(TEXT_DIM));
-                });
+            ListTab::Plugins => self.plugin_list(ui),
+        });
+    }
+
+    /// Installed plugins with their status, and buttons to add more.
+    fn plugin_list(&mut self, ui: &mut Ui) {
+        let Some(host) = self.host.clone() else {
+            hint(ui, "Plugins could not be started.");
+            return;
+        };
+        let catalog: Vec<Arc<plugins::CatalogPlugin>> =
+            runtime::lock(&self.state).catalog.plugins.clone();
+        let query = self.search.trim().to_lowercase();
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.add_space(17.0);
+            if ui
+                .button(format!("{}  Install…", icon::DOWNLOAD_SIMPLE))
+                .on_hover_text("Install a .streamDeckPlugin file (or drop one on the window)")
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Plugin", &["streamDeckPlugin", "zip"])
+                    .pick_file()
+            {
+                self.install(vec![path]);
+            }
+            if ui
+                .button(format!("{}  Add Folder…", icon::FOLDER_PLUS))
+                .on_hover_text("Install a <plugin id>.sdPlugin folder")
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new().pick_folder()
+            {
+                self.install(vec![path]);
+            }
+            if ui
+                .button(icon::FOLDER_OPEN)
+                .on_hover_text("Open the plugins folder")
+                .clicked()
+            {
+                open_path(&self.state, &host.plugins_dir().to_string_lossy());
             }
         });
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                if catalog.is_empty() {
+                    ui.add_space(30.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(icon::PUZZLE_PIECE)
+                                .size(28.0)
+                                .color(TEXT_FAINT),
+                        );
+                        ui.label(RichText::new("No plugins installed.").color(TEXT_DIM));
+                    });
+                }
+                for p in catalog {
+                    if !query.is_empty() && !p.name.to_lowercase().contains(&query) {
+                        continue;
+                    }
+                    self.plugin_row(ui, &host, &p);
+                }
+            });
+    }
+
+    fn plugin_row(&mut self, ui: &mut Ui, host: &Host, p: &plugins::CatalogPlugin) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
+        }
+        let icon_rect =
+            Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(32.0));
+        match &p.icon {
+            Some(img) => {
+                let tex = self.image_texture(ui.ctx(), img);
+                ui.painter().image(
+                    tex,
+                    icon_rect,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            None => {
+                ui.painter().text(
+                    icon_rect.center(),
+                    Align2::CENTER_CENTER,
+                    icon::PUZZLE_PIECE,
+                    font(24.0),
+                    ITEM_ICON,
+                );
+            }
+        }
+        let x = rect.left() + 66.0;
+        let name = if p.version.is_empty() {
+            p.name.clone()
+        } else {
+            format!("{}  {}", p.name, p.version)
+        };
+        ui.painter().text(
+            pos2(x, rect.top() + 16.0),
+            Align2::LEFT_CENTER,
+            name,
+            bold(13.0),
+            TEXT,
+        );
+        let (status, color) = status_text(&p.status);
+        ui.painter().text(
+            pos2(x, rect.top() + 35.0),
+            Align2::LEFT_CENTER,
+            status,
+            font(11.0),
+            color,
+        );
+        let resp = resp.on_hover_text(match &p.status {
+            Status::Failed(why) | Status::Restarting(why) => why.clone(),
+            _ if p.author.is_empty() => p.id.clone(),
+            _ => format!("{}\nby {}", p.id, p.author),
+        });
+        let log = host.logs_dir().join(format!("{}.log", p.id));
+        resp.context_menu(|ui| {
+            if ui
+                .button(format!("{}  Restart", icon::ARROW_CLOCKWISE))
+                .clicked()
+            {
+                host.restart(&p.id);
+                ui.close();
+            }
+            if ui
+                .button(format!("{}  Open Log", icon::FILE_TEXT))
+                .clicked()
+            {
+                open_path(&self.state, &log.to_string_lossy());
+                ui.close();
+            }
+            if ui
+                .button(format!("{}  Open Folder", icon::FOLDER_OPEN))
+                .clicked()
+            {
+                open_path(&self.state, &p.dir.to_string_lossy());
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(format!("{}  Uninstall", icon::TRASH)).clicked() {
+                let host = host.clone();
+                let state = self.state.clone();
+                let (id, name) = (p.id.clone(), p.name.clone());
+                std::thread::spawn(move || {
+                    let text = match host.remove(&id) {
+                        Ok(()) => format!("{name} was uninstalled"),
+                        Err(e) => format!("Cannot uninstall {name}: {e}"),
+                    };
+                    runtime::lock(&state).notify(text);
+                });
+                ui.close();
+            }
+        });
+    }
+
+    /// Installs plugin archives or folders off the UI thread.
+    fn install(&mut self, paths: Vec<PathBuf>) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let state = self.state.clone();
+        std::thread::spawn(move || {
+            for path in paths {
+                let text = match host.install(&path) {
+                    Ok(id) => {
+                        let name = host
+                            .plugins()
+                            .into_iter()
+                            .find(|p| p.id == id)
+                            .and_then(|p| p.manifest.map(|m| m.name.clone()))
+                            .unwrap_or(id);
+                        format!("{name} was installed")
+                    }
+                    Err(e) => format!("Cannot install {}: {e}", path.display()),
+                };
+                runtime::lock(&state).notify(text);
+            }
+        });
+        self.tab = ListTab::Plugins;
     }
 
     fn key_actions(&mut self, ui: &mut Ui) {
@@ -530,57 +747,115 @@ impl App {
                     if items.is_empty() {
                         continue;
                     }
-                    // Collapsed categories open while searching.
-                    let open = !query.is_empty() || self.expanded.contains(category.label());
-                    let (rect, resp) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), CATEGORY_ROW),
-                        Sense::click(),
-                    );
-                    let fill = if resp.hovered() {
-                        LIST_HOVER
-                    } else {
-                        LIST_HEADER
-                    };
-                    let p = ui.painter();
-                    p.rect_filled(rect, CornerRadius::ZERO, fill);
-                    let y = rect.center().y;
-                    let chevron = if open {
-                        icon::CARET_DOWN
-                    } else {
-                        icon::CARET_RIGHT
-                    };
-                    p.text(
-                        pos2(rect.left() + 23.0, y),
-                        Align2::CENTER_CENTER,
-                        chevron,
-                        font(13.0),
-                        CHEVRON,
-                    );
-                    p.text(
-                        pos2(rect.left() + 55.0, y),
-                        Align2::CENTER_CENTER,
-                        category.icon(),
-                        font(22.0),
-                        TEXT,
-                    );
-                    p.text(
-                        pos2(rect.left() + 76.0, y),
-                        Align2::LEFT_CENTER,
-                        category.label(),
-                        bold(13.0),
-                        TEXT,
-                    );
-                    if resp.clicked() && !self.expanded.remove(category.label()) {
-                        self.expanded.insert(category.label());
-                    }
+                    let open = self.category_row(ui, category.label(), &query, |p, r| {
+                        p.text(
+                            r.center(),
+                            Align2::CENTER_CENTER,
+                            category.icon(),
+                            font(22.0),
+                            TEXT,
+                        );
+                    });
                     if open {
                         for action in items {
-                            action_row(ui, action);
+                            let glyph = |p: &egui::Painter, r: Rect, color| {
+                                p.text(
+                                    r.center(),
+                                    Align2::CENTER_CENTER,
+                                    action.icon,
+                                    font(19.0),
+                                    color,
+                                );
+                            };
+                            action_row(ui, action.uuid, action.name, action.tooltip, glyph);
+                        }
+                    }
+                    ui.add_space(2.0);
+                }
+                // Plugin actions, one category per plugin.
+                let catalog = runtime::lock(&self.state).catalog.plugins.clone();
+                for plugin in catalog {
+                    let items: Vec<&plugins::CatalogAction> = plugin
+                        .actions
+                        .iter()
+                        .filter(|a| a.visible)
+                        .filter(|a| query.is_empty() || a.name.to_lowercase().contains(&query))
+                        .collect();
+                    if items.is_empty() {
+                        continue;
+                    }
+                    let icon_tex = plugin
+                        .category_icon
+                        .as_ref()
+                        .or(plugin.icon.as_ref())
+                        .map(|img| self.image_texture(ui.ctx(), img));
+                    let open = self.category_row(ui, &plugin.category, &query, |p, r| {
+                        draw_list_icon(p, r.shrink(4.0), icon_tex, TEXT);
+                    });
+                    if open {
+                        for action in items {
+                            let tex = action
+                                .icon
+                                .as_ref()
+                                .map(|img| self.image_texture(ui.ctx(), img));
+                            let glyph = |p: &egui::Painter, r: Rect, color| {
+                                draw_list_icon(p, r.shrink(5.0), tex, color);
+                            };
+                            action_row(ui, &action.uuid, &action.name, &action.tooltip, glyph);
                         }
                     }
                     ui.add_space(2.0);
                 }
             });
+    }
+
+    /// A category header in the action list; returns whether it is open.
+    /// Collapsed categories open while searching.
+    fn category_row(
+        &mut self,
+        ui: &mut Ui,
+        label: &str,
+        query: &str,
+        draw_icon: impl FnOnce(&egui::Painter, Rect),
+    ) -> bool {
+        let open = !query.is_empty() || self.expanded.contains(label);
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), CATEGORY_ROW), Sense::click());
+        let fill = if resp.hovered() {
+            LIST_HOVER
+        } else {
+            LIST_HEADER
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::ZERO, fill);
+        let y = rect.center().y;
+        let chevron = if open {
+            icon::CARET_DOWN
+        } else {
+            icon::CARET_RIGHT
+        };
+        p.text(
+            pos2(rect.left() + 23.0, y),
+            Align2::CENTER_CENTER,
+            chevron,
+            font(13.0),
+            CHEVRON,
+        );
+        draw_icon(
+            p,
+            Rect::from_center_size(pos2(rect.left() + 55.0, y), Vec2::splat(24.0)),
+        );
+        p.text(
+            pos2(rect.left() + 76.0, y),
+            Align2::LEFT_CENTER,
+            label,
+            bold(13.0),
+            TEXT,
+        );
+        if resp.clicked() && !self.expanded.remove(label) {
+            self.expanded.insert(label.to_owned());
+        }
+        open
     }
 
     // ----- key canvas ----------------------------------------------------
@@ -614,6 +889,24 @@ impl App {
         };
         let mut changed = false;
         let live = view.live;
+        let page_id = view
+            .path
+            .last()
+            .cloned()
+            .or_else(|| profile.pages.get(view.page).map(|p| p.id.clone()))
+            .unwrap_or_default();
+        let overlays: HashMap<u8, Overlay> = match view.keys(profile) {
+            Some(keys) => {
+                let s = runtime::lock(&self.state);
+                keys.iter()
+                    .filter_map(|(&i, k)| Some((i, s.overlay(&plugins::context(&page_id, i), k)?)))
+                    .collect()
+            }
+            None => HashMap::new(),
+        };
+        if overlays.values().any(|o| o.mark.is_some()) {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
         let Some(keys) = view.keys(profile) else {
             return;
         };
@@ -652,7 +945,7 @@ impl App {
             let inner = rect.shrink(border);
             match &config {
                 Some(key) => {
-                    let tex = self.texture(ui.ctx(), Some(key), tex_px, live);
+                    let tex = self.texture(ui.ctx(), Some(key), tex_px, live, overlays.get(&index));
                     painter.add(
                         egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
                             .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
@@ -664,13 +957,17 @@ impl App {
             }
 
             if let Some(payload) = response.dnd_release_payload::<DragPayload>() {
-                match *payload {
-                    DragPayload::Action(uuid) => {
-                        if let Some(def) = actions::find(uuid).filter(|_| !placed) {
+                match &*payload {
+                    DragPayload::Action(_) if placed => {}
+                    DragPayload::Action(uuid) => match actions::find(uuid) {
+                        Some(def) => {
                             keys.insert(index, actions::new_key(def));
                         }
-                    }
-                    DragPayload::Key(from) if from != index => {
+                        None => {
+                            keys.insert(index, KeyConfig::new(uuid.as_str(), json!({})));
+                        }
+                    },
+                    &DragPayload::Key(from) if from != index => {
                         let a = keys.remove(&from);
                         let b = keys.remove(&index);
                         if let Some(a) = a {
@@ -764,7 +1061,7 @@ impl App {
         if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(ui.ctx())
             && let Some(pos) = ui.ctx().pointer_interact_pos()
         {
-            let glyph = match *payload {
+            let glyph = match &*payload {
                 DragPayload::Action(uuid) => {
                     actions::find(uuid).map_or(icon::PUZZLE_PIECE, |a| a.icon)
                 }
@@ -956,6 +1253,12 @@ impl App {
     // ----- property inspector --------------------------------------------
 
     fn inspector(&mut self, ui: &mut Ui, profile: &mut Profile, view: &View) {
+        let page_id = view
+            .path
+            .last()
+            .cloned()
+            .or_else(|| profile.pages.get(view.page).map(|p| p.id.clone()))
+            .unwrap_or_default();
         let profiles: Vec<(String, String)> = runtime::lock(&self.state)
             .profiles
             .iter()
@@ -974,14 +1277,41 @@ impl App {
         let before = key.clone();
         let defaults = self.renderer.title_defaults;
         let def = actions::find(&key.action);
+        let context = plugins::context(&page_id, index);
+        let (overlay, plugin) = {
+            let s = runtime::lock(&self.state);
+            let plugin = s.catalog.action(&key.action).map(|(p, a)| PluginView {
+                name: p.name.clone(),
+                action: a.name.clone(),
+                tooltip: a.tooltip.clone(),
+                icon: a.icon.clone(),
+                status: p.status.clone(),
+                has_inspector: a.has_inspector,
+                instance: s.instance(&context, key),
+            });
+            (s.overlay(&context, key), plugin)
+        };
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            let glyph = def.map_or(icon::PUZZLE_PIECE, |d| d.icon);
-            ui.label(RichText::new(glyph).size(18.0).color(ITEM_ICON));
-            ui.label(RichText::new(def.map_or(key.action.as_str(), |d| d.name)).font(bold(14.0)));
-            if let Some(d) = def {
-                ui.label(RichText::new(d.tooltip).color(TEXT_DIM));
+            match &plugin {
+                Some(p) => {
+                    let tex = p.icon.as_ref().map(|img| self.image_texture(ui.ctx(), img));
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    draw_list_icon(ui.painter(), r, tex, ITEM_ICON);
+                    ui.label(RichText::new(&p.action).font(bold(14.0)));
+                    ui.label(RichText::new(format!("{}  {}", p.name, p.tooltip)).color(TEXT_DIM));
+                }
+                None => {
+                    let glyph = def.map_or(icon::PUZZLE_PIECE, |d| d.icon);
+                    ui.label(RichText::new(glyph).size(18.0).color(ITEM_ICON));
+                    let name = def.map_or(key.action.as_str(), |d| d.name);
+                    ui.label(RichText::new(name).font(bold(14.0)));
+                    match def {
+                        Some(d) => ui.label(RichText::new(d.tooltip).color(TEXT_DIM)),
+                        None => ui.label(RichText::new("Plugin not installed").color(WARNING)),
+                    };
+                }
             }
         });
         ui.add_space(8.0);
@@ -993,7 +1323,13 @@ impl App {
             // Key preview and image controls.
             ui.vertical(|ui| {
                 ui.set_width(110.0);
-                let tex = self.texture(ui.ctx(), Some(key), (96.0 * ppp) as u32, view.live);
+                let tex = self.texture(
+                    ui.ctx(),
+                    Some(key),
+                    (96.0 * ppp) as u32,
+                    view.live,
+                    overlay.as_ref(),
+                );
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
                 ui.painter().add(
                     egui::epaint::RectShape::filled(rect, CornerRadius::same(12), Color32::WHITE)
@@ -1027,13 +1363,52 @@ impl App {
                             title_style_button(ui, &mut key.title_style, defaults);
                         });
                         ui.end_row();
-                        self.action_form(ui, key, &profiles, page_count);
+                        match &plugin {
+                            Some(p) => self.plugin_form(ui, p),
+                            None => self.action_form(ui, key, &profiles, page_count),
+                        }
                     });
             });
         });
         if *key != before {
             self.mark_dirty(&profile.id);
         }
+    }
+
+    /// Settings of a plugin action: its property inspector opens in a window
+    /// of its own (the `deckly-web` helper).
+    fn plugin_form(&mut self, ui: &mut Ui, p: &PluginView) {
+        ui.label(RichText::new("Settings").color(TEXT_DIM));
+        ui.vertical(|ui| {
+            if p.has_inspector {
+                let open = self
+                    .host
+                    .as_ref()
+                    .and_then(Host::inspector)
+                    .is_some_and(|i| i.context == p.instance.context);
+                let text = if open {
+                    format!("{}  Close Settings", icon::X)
+                } else {
+                    format!("{}  Open Settings", icon::SLIDERS_HORIZONTAL)
+                };
+                if ui.button(text).clicked()
+                    && let Some(host) = &self.host
+                {
+                    if open {
+                        host.close_inspector();
+                    } else {
+                        host.open_inspector(p.instance.clone());
+                    }
+                }
+            } else {
+                ui.label(RichText::new("This action has no settings.").color(TEXT_DIM));
+            }
+            let (status, color) = status_text(&p.status);
+            if p.status != Status::Running {
+                ui.label(RichText::new(status).color(color));
+            }
+        });
+        ui.end_row();
     }
 
     fn action_form(
@@ -1445,6 +1820,36 @@ impl eframe::App for App {
         );
         self.rename_window(&ctx);
         self.notice(&ctx);
+        // Plugins dropped on the window are installed.
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| {
+                    p.extension().is_some_and(|e| e == "streamDeckPlugin")
+                        || (p.is_dir() && p.extension().is_some_and(|e| e == "sdPlugin"))
+                })
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.install(dropped);
+        }
+        // The settings window follows the selected key.
+        if let Some(host) = &self.host
+            && let Some(open) = host.inspector()
+        {
+            let page_id = view
+                .path
+                .last()
+                .cloned()
+                .or_else(|| profile.pages.get(view.page).map(|p| p.id.clone()))
+                .unwrap_or_default();
+            let selected = self.selected_key.map(|k| plugins::context(&page_id, k));
+            if selected.as_deref() != Some(open.context.as_str()) {
+                host.close_inspector();
+            }
+        }
         self.save_pending(false);
         if !self.dirty.is_empty() {
             ctx.request_repaint_after(SAVE_DELAY);
@@ -1453,39 +1858,145 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.save_pending(true);
+        if let Some(host) = &self.host {
+            host.shutdown();
+        }
         let _ = self.runtime.send(Msg::Shutdown);
         // Give the writer threads a moment to send the reset.
         std::thread::sleep(Duration::from_millis(150));
     }
 }
 
-fn action_row(ui: &mut Ui, action: &'static actions::ActionDef) {
-    let id = egui::Id::new(("action", action.uuid));
-    ui.dnd_drag_source(id, DragPayload::Action(action.uuid), |ui| {
-        let (rect, resp) =
-            ui.allocate_exact_size(vec2(ui.available_width(), ACTION_ROW), Sense::hover());
-        let p = ui.painter();
-        if resp.hovered() {
-            p.rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
+/// One action in the list, dragged onto a key to place it.
+fn action_row(
+    ui: &mut Ui,
+    uuid: &str,
+    name: &str,
+    tooltip: &str,
+    draw_icon: impl FnOnce(&egui::Painter, Rect, Color32),
+) {
+    let id = egui::Id::new(("action", uuid));
+    let resp = ui
+        .dnd_drag_source(id, DragPayload::Action(uuid.to_owned()), |ui| {
+            let (rect, resp) =
+                ui.allocate_exact_size(vec2(ui.available_width(), ACTION_ROW), Sense::hover());
+            let p = ui.painter();
+            if resp.hovered() {
+                p.rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
+            }
+            draw_icon(
+                p,
+                Rect::from_center_size(
+                    pos2(rect.left() + 55.0, rect.center().y),
+                    Vec2::splat(24.0),
+                ),
+                ITEM_ICON,
+            );
+            let color = if resp.hovered() { TEXT } else { TEXT_DIM };
+            p.text(
+                pos2(rect.left() + 76.0, rect.center().y),
+                Align2::LEFT_CENTER,
+                name,
+                font(13.0),
+                color,
+            );
+        })
+        .response;
+    if !tooltip.is_empty() {
+        resp.on_hover_text(tooltip);
+    }
+}
+
+/// A plugin image in the action list, tinted like the built-in icons; a
+/// puzzle piece when the plugin has none.
+fn draw_list_icon(p: &egui::Painter, rect: Rect, tex: Option<egui::TextureId>, tint: Color32) {
+    match tex {
+        Some(tex) => {
+            p.image(
+                tex,
+                rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                tint,
+            );
         }
-        p.text(
-            pos2(rect.left() + 55.0, rect.center().y),
-            Align2::CENTER_CENTER,
-            action.icon,
-            font(19.0),
-            ITEM_ICON,
-        );
-        let color = if resp.hovered() { TEXT } else { TEXT_DIM };
-        p.text(
-            pos2(rect.left() + 76.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            action.name,
-            font(13.0),
-            color,
-        );
-    })
-    .response
-    .on_hover_text(action.tooltip);
+        None => {
+            p.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                icon::PUZZLE_PIECE,
+                font(rect.height() * 0.8),
+                tint,
+            );
+        }
+    }
+}
+
+/// What the inspector shows for a plugin key.
+struct PluginView {
+    name: String,
+    action: String,
+    tooltip: String,
+    icon: Option<plugins::Image>,
+    status: Status,
+    has_inspector: bool,
+    instance: deckly_plugin_host::Instance,
+}
+
+fn status_text(status: &Status) -> (String, Color32) {
+    match status {
+        Status::Running => ("Running".into(), TEXT_DIM),
+        Status::Starting => ("Starting…".into(), TEXT_DIM),
+        Status::Restarting(why) => (format!("Restarting: {why}"), WARNING),
+        Status::Failed(why) => (format!("Not running: {why}"), WARNING),
+    }
+}
+
+fn open_path(state: &Shared, path: &str) {
+    if let Err(e) = crate::os::open(path) {
+        runtime::lock(state).notify(e);
+    }
+}
+
+/// Starts the plugin host; plugins live in the config folder and run with
+/// the `deckly-web` helper installed next to Deckly.
+fn start_host() -> (
+    Option<Host>,
+    Option<std::sync::mpsc::Receiver<deckly_plugin_host::HostEvent>>,
+) {
+    let Some(dir) = store::config_dir() else {
+        return (None, None);
+    };
+    let helper = std::env::current_exe().ok().and_then(|exe| {
+        let name = if cfg!(windows) {
+            "deckly-web.exe"
+        } else {
+            "deckly-web"
+        };
+        Some(exe.parent()?.join(name))
+    });
+    let config = deckly_plugin_host::Config {
+        plugins_dir: dir.join("plugins"),
+        logs_dir: dir.join("logs").join("plugins"),
+        web_helper: helper,
+        node: std::env::var_os("DECKLY_NODE").map(PathBuf::from),
+        app: deckly_plugin_host::AppInfo {
+            language: "en".into(),
+            platform_version: String::new(),
+            font: if cfg!(windows) {
+                "Segoe UI".into()
+            } else {
+                String::new()
+            },
+        },
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    match Host::start(config, tx) {
+        Ok(host) => (Some(host), Some(rx)),
+        Err(e) => {
+            eprintln!("deckly: cannot start plugins: {e}");
+            (None, None)
+        }
+    }
 }
 
 /// The "T" button beside the title field. It opens the title's show,

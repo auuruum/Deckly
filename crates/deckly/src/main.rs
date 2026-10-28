@@ -8,6 +8,7 @@ mod app;
 mod cropper;
 mod logo;
 mod os;
+mod plugins;
 mod prefs;
 mod render;
 mod runtime;

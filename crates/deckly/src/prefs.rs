@@ -913,14 +913,14 @@ impl Preferences {
         let mut key = KeyConfig::new(actions::WEBSITE, json!({}));
         key.title = "Preview".into();
         key.title_style = Some(*style);
-        let hash = renderer.key_hash(Some(&key), Live::default());
+        let hash = renderer.key_hash(Some(&key), Live::default(), None);
         let ppp = ui.ctx().pixels_per_point();
         let border = KEY_BORDER_WIDTH;
         let px = ((rect.width() - 2.0 * border) * ppp).round() as u32;
         let texture = match &self.preview {
             Some((h, t)) if *h == hash && t.size()[0] == px as usize => t.id(),
             _ => {
-                let img = renderer.render(Some(&key), px, Live::default());
+                let img = renderer.render(Some(&key), px, Live::default(), None);
                 let size = [img.width() as usize, img.height() as usize];
                 let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
                 let t = ui

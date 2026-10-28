@@ -36,9 +36,11 @@ Crates form layers. A crate may depend only on crates in lower layers.
 | --- | --- | --- |
 | L0 | `deckly-core` | Device model table, profile/page/key/action data model, serialization, validation. No I/O except profile load/save. |
 | L1 | `deckly-device` | Stream Deck HID protocol: report encoding/decoding (pure, unit-tested) and the transport that talks to real devices. |
+| L2 | `deckly-plugin-host` | Host side of the SDK plugin protocol: manifests, plugin installs, the local WebSocket server, plugin processes and their restarts. |
 | L3 | `deckly` | The desktop app: egui UI, key image rendering, built-in action execution, runtime wiring. |
+| helper | `deckly-web` | Separate process with the system web view for HTML plugins and Property Inspectors. Never linked into the app. |
 
-Planned, add when the work starts (not before): `deckly-plugin-host` (L2, SDK WebSocket host and plugin process manager), `deckly-cli` (headless control and inspection), `deckly-pi` (optional Property Inspector helper process).
+Planned, add when the work starts (not before): `deckly-cli` (headless control and inspection).
 
 ## 4. Golden rules
 

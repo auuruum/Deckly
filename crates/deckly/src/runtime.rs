@@ -7,11 +7,15 @@
 //! the runtime re-renders only keys whose image changed.
 
 use crate::actions::{self, Outcome};
+use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
 use crate::store;
 use deckly_core::profile::MAX_FOLDER_DEPTH;
-use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Orientation, Page, Profile, Settings};
+use deckly_core::{
+    DeviceKind, DeviceModel, KeyConfig, Orientation, Page, Profile, Settings, TitleStyle,
+};
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
+use deckly_plugin_host::{Host, Instance, protocol};
 use image::RgbaImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
@@ -31,6 +35,10 @@ pub struct State {
     /// Keys held down right now, for the editor's live view.
     pub pressed: HashSet<(Handle, u8)>,
     pub notice: Option<(String, Instant)>,
+    /// Installed plugins and their actions.
+    pub catalog: plugins::Catalog,
+    /// What plugins set on their keys, by context.
+    pub plugin_keys: HashMap<String, plugins::PluginKey>,
 }
 
 impl State {
@@ -43,6 +51,8 @@ impl State {
             folders: HashMap::new(),
             pressed: HashSet::new(),
             notice: None,
+            catalog: plugins::Catalog::default(),
+            plugin_keys: HashMap::new(),
         }
     }
 
@@ -184,6 +194,12 @@ impl State {
         let profile = self.assigned(serial)?;
         self.shown(profile)?.keys.get(&key).cloned()
     }
+
+    /// The context of a key on what a device shows now.
+    fn context(&self, serial: &str, key: u8) -> Option<String> {
+        let page = self.shown(self.assigned(serial)?)?;
+        Some(plugins::context(&page.id, key))
+    }
 }
 
 pub fn lock(state: &Shared) -> MutexGuard<'_, State> {
@@ -196,6 +212,10 @@ pub enum Msg {
     Device(Event),
     /// Profiles or pages changed; resend images that differ.
     Refresh,
+    /// Only what plugins show changed; custom images stay cached.
+    Redraw,
+    /// A plugin (re)started and needs to hear about devices and its keys.
+    PluginStarted(String),
     /// Device preferences or the global title style changed.
     Settings,
     Outcome(Handle, Result<Outcome, String>),
@@ -225,6 +245,17 @@ struct Link {
     screensaver: bool,
     /// Last key press, for Sleep After.
     active_at: Instant,
+    /// The plugin key shown on each key, as its plugin was told.
+    shown: Vec<Option<Shown>>,
+}
+
+/// A plugin key as its plugin last heard of it.
+#[derive(Clone)]
+struct Shown {
+    plugin: String,
+    instance: Instance,
+    title: String,
+    style: TitleStyle,
 }
 
 impl Link {
@@ -238,6 +269,7 @@ impl Link {
             asleep: false,
             screensaver: false,
             active_at: Instant::now(),
+            shown: vec![None; usize::from(info.model.key_count())],
         }
     }
 
@@ -257,7 +289,7 @@ impl Link {
 
 type Links = HashMap<Handle, Link>;
 
-pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
+pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg> {
     let (tx, rx) = channel::<Msg>();
     let device_tx = tx.clone();
     let action_tx = tx.clone();
@@ -277,12 +309,17 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
         // DECKLY_DEBUG=1 prints device events and action results to stderr.
         let debug = std::env::var_os("DECKLY_DEBUG").is_some();
         loop {
-            // Wait for the next message, or until a device should sleep.
-            let msg = match next_sleep(&state, &links) {
+            // Wait for the next message, until a device should sleep, or
+            // until a plugin's Alert/OK mark ends.
+            let mark_end = lock(&state).next_mark_end();
+            let wake = next_sleep(&state, &links).into_iter().chain(mark_end).min();
+            let msg = match wake {
                 Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(msg) => msg,
                     Err(RecvTimeoutError::Timeout) => {
                         fall_asleep(&state, &devices, &mut links);
+                        refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                        repaint();
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -302,21 +339,46 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
             match msg {
                 Msg::Device(Event::Connected(info)) => {
                     connect(&state, &info);
+                    if let Some(host) = &host {
+                        let s = lock(&state);
+                        let device = plugins::device_info(&s, &info);
+                        let all = s
+                            .devices
+                            .iter()
+                            .map(|d| plugins::device_info(&s, d))
+                            .collect();
+                        drop(s);
+                        host.set_devices(all);
+                        host.broadcast(&protocol::device_did_connect(&device));
+                    }
                     links.insert(info.handle, Link::new(&info));
                     // Deckly runs Sleep After itself; a timer left in the
                     // device by another app would put it to sleep behind
                     // Deckly's back.
                     devices.set_sleep_timer(info.handle, 0);
                     apply_settings(&state, &devices, &mut links);
-                    refresh(&state, &devices, &mut renderer, &mut links);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
                 Msg::Device(Event::Disconnected(handle)) => {
                     let mut s = lock(&state);
                     s.devices.retain(|d| d.handle != handle);
                     s.pressed.retain(|&(h, _)| h != handle);
-                    links.remove(&handle);
+                    let all = s
+                        .devices
+                        .iter()
+                        .map(|d| plugins::device_info(&s, d))
+                        .collect();
                     drop(s);
+                    let link = links.remove(&handle);
+                    if let (Some(host), Some(link)) = (&host, link) {
+                        for shown in link.shown.iter().flatten() {
+                            host.send(&shown.plugin, shown.instance.event("willDisappear"));
+                        }
+                        host.set_devices(all);
+                        let id = protocol::device_id(&link.serial);
+                        host.broadcast(&protocol::device_did_disconnect(&id));
+                    }
                     repaint();
                 }
                 Msg::Device(Event::Key {
@@ -324,13 +386,18 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                     key,
                     pressed,
                 }) => {
-                    let run = key_event(&state, &devices, &mut links, handle, key, pressed);
-                    if let Some(config) = run {
-                        let _ = actions.send((handle, config));
+                    match key_event(&state, &devices, &mut links, handle, key, pressed) {
+                        Some(hit) if hit.plugin => {
+                            plugin_key(&state, host.as_ref(), &links, handle, &hit, pressed);
+                        }
+                        Some(hit) if pressed => {
+                            let _ = actions.send((handle, hit.config));
+                        }
+                        _ => {}
                     }
                     // Shows the held key smaller (or normal again), and the
                     // keys a screensaver covered.
-                    refresh(&state, &devices, &mut renderer, &mut links);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
                 Msg::Standby { serial, image } => {
@@ -338,11 +405,19 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                 }
                 Msg::Refresh => {
                     renderer.clear_image_cache();
-                    refresh(&state, &devices, &mut renderer, &mut links);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                }
+                Msg::Redraw => {
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                }
+                Msg::PluginStarted(id) => {
+                    if let Some(host) = &host {
+                        plugin_started(&state, host, &links, &id);
+                    }
                 }
                 Msg::Settings => {
                     apply_settings(&state, &devices, &mut links);
-                    refresh(&state, &devices, &mut renderer, &mut links);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                 }
                 Msg::Outcome(handle, Ok(Outcome::Sleep)) => {
                     let awake = links.get(&handle).is_some_and(|l| l.enabled && !l.asleep);
@@ -353,7 +428,7 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                 }
                 Msg::Outcome(handle, result) => {
                     apply_outcome(&state, &devices, handle, result);
-                    refresh(&state, &devices, &mut renderer, &mut links);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
                 Msg::Shutdown => {
@@ -426,7 +501,16 @@ fn apply_settings(state: &Shared, devices: &DeviceManager, links: &mut Links) {
     }
 }
 
-/// Handles a key change; returns the key whose action should run.
+/// A key change that reaches an action.
+struct KeyHit {
+    config: KeyConfig,
+    /// Key index as the user sees it.
+    index: u8,
+    /// A plugin action, which hears releases too.
+    plugin: bool,
+}
+
+/// Handles a key change; returns the key whose action should hear of it.
 fn key_event(
     state: &Shared,
     devices: &DeviceManager,
@@ -434,15 +518,26 @@ fn key_event(
     handle: Handle,
     physical: u8,
     pressed: bool,
-) -> Option<KeyConfig> {
+) -> Option<KeyHit> {
     let link = links.get_mut(&handle)?;
     let key = link.orientation.map_key(physical, link.model.key_count());
     let mut s = lock(state);
+    let hit = |s: &State, config: KeyConfig| KeyHit {
+        plugin: s.catalog.action(&config.action).is_some(),
+        config,
+        index: key,
+    };
     // A release always counts, so no key stays held after the device was
-    // disabled with a key down.
+    // disabled with a key down. Plugins hear the release of a press they
+    // heard.
     if !pressed {
-        s.pressed.remove(&(handle, key));
-        return None;
+        if !s.pressed.remove(&(handle, key)) {
+            return None;
+        }
+        return s
+            .key(&link.serial, key)
+            .map(|c| hit(&s, c))
+            .filter(|h| h.plugin);
     }
     if !link.enabled {
         return None;
@@ -455,7 +550,95 @@ fn key_event(
         return None;
     }
     s.pressed.insert((handle, key));
-    s.key(&link.serial, key)
+    s.key(&link.serial, key).map(|c| hit(&s, c))
+}
+
+/// Sends a plugin key's press or release to its plugin. An action with
+/// several states moves to the next one when released, after the plugin
+/// heard the release.
+fn plugin_key(
+    state: &Shared,
+    host: Option<&Host>,
+    links: &Links,
+    handle: Handle,
+    hit: &KeyHit,
+    pressed: bool,
+) {
+    let (Some(host), Some(link)) = (host, links.get(&handle)) else {
+        return;
+    };
+    let mut s = lock(state);
+    let Some(context) = s.context(&link.serial, hit.index) else {
+        return;
+    };
+    let Some((plugin, states, automatic)) = s
+        .catalog
+        .action(&hit.config.action)
+        .map(|(p, a)| (p.id.clone(), a.states.len(), a.automatic_states))
+    else {
+        return;
+    };
+    let mut instance = s.instance(&context, &hit.config);
+    instance.device = protocol::device_id(&link.serial);
+    host.send(
+        &plugin,
+        instance.event(if pressed { "keyDown" } else { "keyUp" }),
+    );
+    if !pressed && automatic && states > 1 {
+        let key = s.plugin_key(&context, states);
+        key.state = (key.state + 1) % states;
+    }
+}
+
+/// Tells a plugin that just registered about the devices and its keys.
+fn plugin_started(state: &Shared, host: &Host, links: &Links, plugin: &str) {
+    let s = lock(state);
+    for d in &s.devices {
+        host.send(
+            plugin,
+            protocol::device_did_connect(&plugins::device_info(&s, d)),
+        );
+    }
+    drop(s);
+    for shown in links.values().flat_map(|l| l.shown.iter().flatten()) {
+        if shown.plugin == plugin {
+            host.send(plugin, shown.instance.event("willAppear"));
+        }
+    }
+}
+
+/// Tells plugins when their keys appear, disappear or get a new title.
+fn update_shown(host: Option<&Host>, slot: &mut Option<Shown>, new: Option<Shown>) {
+    if let Some(host) = host {
+        match (slot.as_ref(), new.as_ref()) {
+            (Some(old), Some(n))
+                if old.instance.context == n.instance.context
+                    && old.instance.action == n.instance.action
+                    && old.instance.device == n.instance.device =>
+            {
+                if old.title != n.title || old.style != n.style {
+                    let align = match n.style.align {
+                        deckly_core::TitleAlign::Top => "top",
+                        deckly_core::TitleAlign::Middle => "middle",
+                        deckly_core::TitleAlign::Bottom => "bottom",
+                    };
+                    let msg =
+                        n.instance
+                            .title_parameters(&n.title, n.style.show, n.style.size, align);
+                    host.send(&n.plugin, msg);
+                }
+            }
+            _ => {
+                if let Some(old) = slot.as_ref() {
+                    host.send(&old.plugin, old.instance.event("willDisappear"));
+                }
+                if let Some(n) = new.as_ref() {
+                    host.send(&n.plugin, n.instance.event("willAppear"));
+                }
+            }
+        }
+    }
+    *slot = new;
 }
 
 /// When the next awake device should fall asleep, if any should.
@@ -649,9 +832,20 @@ fn apply_outcome(
 }
 
 /// A key's configuration and what it shows besides, as sent to a device.
-type KeyView = (Option<KeyConfig>, Live);
+struct KeyView {
+    key: Option<KeyConfig>,
+    live: Live,
+    overlay: Option<Overlay>,
+    shown: Option<Shown>,
+}
 
-fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, links: &mut Links) {
+fn refresh(
+    state: &Shared,
+    devices: &DeviceManager,
+    renderer: &mut Renderer,
+    links: &mut Links,
+    host: Option<&Host>,
+) {
     // Collect the work under the lock, render without it.
     let mut work: Vec<(Handle, Vec<KeyView>)> = Vec::new();
     {
@@ -672,10 +866,30 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
                 .cloned()
                 .unwrap_or_default();
             let live = profile.map(|p| s.live(p)).unwrap_or_default();
+            let device_id = protocol::device_id(&d.serial);
             let keys = (0..d.model.key_count())
                 .map(|k| {
                     let pressed = s.pressed.contains(&(d.handle, k));
-                    (page.keys.get(&k).cloned(), Live { pressed, ..live })
+                    let key = page.keys.get(&k).cloned();
+                    let context = plugins::context(&page.id, k);
+                    let overlay = key.as_ref().and_then(|c| s.overlay(&context, c));
+                    let shown = key.as_ref().filter(|_| overlay.is_some()).and_then(|c| {
+                        let (plugin, _) = s.catalog.action(&c.action)?;
+                        let mut instance = s.instance(&context, c);
+                        instance.device = device_id.clone();
+                        Some(Shown {
+                            plugin: plugin.id.clone(),
+                            instance,
+                            title: c.title.clone(),
+                            style: renderer.title_style(c),
+                        })
+                    });
+                    KeyView {
+                        key,
+                        live: Live { pressed, ..live },
+                        overlay,
+                        shown,
+                    }
                 })
                 .collect();
             work.push((d.handle, keys));
@@ -686,9 +900,12 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
             continue;
         };
         let count = link.model.key_count();
-        for (index, (key, live)) in keys.iter().enumerate() {
-            let live = *live;
-            let hash = renderer.key_hash(key.as_ref(), live);
+        for (index, view) in keys.into_iter().enumerate() {
+            if let Some(slot) = link.shown.get_mut(index) {
+                update_shown(host, slot, view.shown);
+            }
+            let (key, live, overlay) = (view.key, view.live, view.overlay);
+            let hash = renderer.key_hash(key.as_ref(), live, overlay.as_ref());
             let Some(slot) = link.sent.get_mut(index) else {
                 continue;
             };
@@ -698,7 +915,13 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
             *slot = Some(hash);
             // index < key_count, which is a u8.
             let physical = link.orientation.map_key(index as u8, count);
-            let image = renderer.device_image(key.as_ref(), live, link.model, link.orientation);
+            let image = renderer.device_image(
+                key.as_ref(),
+                live,
+                overlay.as_ref(),
+                link.model,
+                link.orientation,
+            );
             devices.set_image(handle, physical, image);
         }
     }

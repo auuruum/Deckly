@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 deckly-core.workspace = true
 deckly-device.workspace = true
+deckly-plugin-host.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"] }
@@ -17,6 +18,8 @@ egui-phosphor = "0.14.0"
 # (and BMPs for the Mini family).
 image = { version = "0.25.10", default-features = false, features = ["bmp", "png", "jpeg"] }
 ab_glyph = "0.2.32"
+# Plugins send and ship SVG key images; text in them uses system fonts.
+resvg = { version = "0.49.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 # Native file dialogs (Win32, xdg-portal, AppKit); no GTK.
 rfd = "0.17.2"
 
