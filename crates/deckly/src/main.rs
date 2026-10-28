@@ -26,7 +26,7 @@ fn main() -> eframe::Result {
     {
         std::process::exit(deckly_plugin_host::run_guard(&args[1..]));
     }
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deckly")
             .with_app_id("deckly")
@@ -35,9 +35,46 @@ fn main() -> eframe::Result {
             .with_min_inner_size([852.0, 742.0]),
         ..Default::default()
     };
+    lean_wgpu(&mut options.wgpu_options.wgpu_setup);
     eframe::run_native(
         "Deckly",
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
+}
+
+/// The editor draws a few small textures, so wgpu's default memory blocks
+/// (64-256 MB each) are mostly waste. On Windows, initializing Vulkan and GL
+/// next to DX12 also loads every one of those drivers into the process.
+/// `WGPU_BACKEND` still overrides the backend.
+fn lean_wgpu(setup: &mut eframe::egui_wgpu::WgpuSetup) {
+    use eframe::egui_wgpu::{WgpuSetup, wgpu};
+    let WgpuSetup::CreateNew(setup) = setup else {
+        return;
+    };
+    if cfg!(windows) && wgpu::Backends::from_env().is_none() {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    }
+    let device = std::sync::Arc::clone(&setup.device_descriptor);
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| wgpu::DeviceDescriptor {
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        ..device(adapter)
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui_wgpu::{WgpuSetup, wgpu};
+
+    #[test]
+    fn windows_uses_only_dx12_unless_overridden() {
+        let mut setup = eframe::egui_wgpu::WgpuConfiguration::default().wgpu_setup;
+        super::lean_wgpu(&mut setup);
+        let WgpuSetup::CreateNew(setup) = setup else {
+            panic!("default setup creates a new device");
+        };
+        if cfg!(windows) && wgpu::Backends::from_env().is_none() {
+            assert_eq!(setup.instance_descriptor.backends, wgpu::Backends::DX12);
+        }
+    }
 }

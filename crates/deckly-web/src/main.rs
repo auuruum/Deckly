@@ -169,6 +169,11 @@ fn run() -> Result<(), String> {
         .with_initialization_script(page.connect)
         .with_background_color(BACKGROUND)
         .with_devtools(debug);
+    #[cfg(windows)]
+    let builder = {
+        use wry::WebViewBuilderExtWindows;
+        builder.with_additional_browser_args(BROWSER_ARGS)
+    };
     let webview = build_webview(builder, &window)?;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
@@ -227,6 +232,13 @@ fn build_webview(builder: WebViewBuilder<'_>, window: &Window) -> Result<WebView
         builder.build_gtk(vbox).map_err(|e| e.to_string())
     }
 }
+
+/// Wry's defaults plus `--disable-gpu`: plugin pages are small forms and
+/// scripts, and the GPU process alone costs about 50 MB. Every helper must
+/// pass the same arguments, since they share one WebView2 data folder.
+#[cfg(windows)]
+const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+     --autoplay-policy=no-user-gesture-required --disable-gpu";
 
 fn parse_command(line: &str) -> Option<Command> {
     let words: Vec<&str> = line
