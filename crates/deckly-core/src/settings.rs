@@ -70,7 +70,7 @@ impl Default for KeyPress {
     fn default() -> Self {
         Self {
             shrink: true,
-            size: 85,
+            size: 80,
         }
     }
 }

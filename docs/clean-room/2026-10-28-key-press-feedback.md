@@ -29,7 +29,7 @@
 
 ## Unknown and next steps
 
-1. The exact scale. Deckly draws the held picture at 85% of the key by
+1. The exact scale. Deckly draws the held picture at 80% of the key by
    default, centred on black; compare side by side with the official app, or
    capture the uploaded image over USB, and adjust the default.
 2. Whether the official app lets the user turn the effect off or change its
