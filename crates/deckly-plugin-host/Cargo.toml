@@ -13,6 +13,8 @@ tungstenite = { version = "0.30.0", default-features = false, features = ["hands
 # `.streamDeckPlugin` archives are zip files; deflate through zlib-rs (pure Rust).
 zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 uuid = { version = "1.29.0", features = ["v4"] }
+# Checks Node.js downloads against the release's SHA-256 list.
+sha2 = "0.10.9"
 
 [lints]
 workspace = true

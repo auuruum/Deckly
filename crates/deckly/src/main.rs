@@ -16,6 +16,14 @@ mod store;
 mod theme;
 
 fn main() -> eframe::Result {
+    // Deckly runs each plugin through a copy of itself in guard mode.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|a| a == deckly_plugin_host::GUARD_ARG)
+    {
+        std::process::exit(deckly_plugin_host::run_guard(&args[1..]));
+    }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deckly")

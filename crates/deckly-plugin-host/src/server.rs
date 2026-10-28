@@ -10,7 +10,6 @@ use crate::protocol::{MAX_MESSAGE_BYTES, parse_registration};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -46,6 +45,7 @@ struct Inner {
     allowed: HashSet<String>,
     peers: HashMap<String, Peer>,
     connections: usize,
+    next_conn: u64,
 }
 
 #[derive(Clone)]
@@ -59,29 +59,40 @@ fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
 }
 
 impl Server {
-    /// Listens on a free port on the loopback address. `events` is called
-    /// from connection threads.
+    /// Listens on a free port on the loopback address, IPv4 and, where the
+    /// system has it, IPv6: plugin libraries often connect to `localhost`,
+    /// which may resolve to either. `events` is called from connection
+    /// threads.
     pub fn start(events: impl Fn(ServerEvent) + Send + Sync + 'static) -> io::Result<Self> {
         let events: Events = Arc::new(events);
-        let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        let port = listener.local_addr()?.port();
+        let v4 = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = v4.local_addr()?.port();
         let inner = Arc::new(Mutex::new(Inner::default()));
         let server = Self { port, inner };
-        let accept = server.clone();
+        server.accept(v4, events.clone())?;
+        // Without IPv6 (or with the port taken there) IPv4 alone serves.
+        if let Ok(v6) = TcpListener::bind(("::1", port)) {
+            server.accept(v6, events)?;
+        }
+        Ok(server)
+    }
+
+    fn accept(&self, listener: TcpListener, events: Events) -> io::Result<()> {
+        let accept = self.clone();
         std::thread::Builder::new()
             .name("deckly-plugin-accept".into())
             .spawn(move || {
-                let ids = AtomicU64::new(1);
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { continue };
-                    {
+                    let conn = {
                         let mut s = lock(&accept.inner);
                         if s.connections >= MAX_CONNECTIONS {
                             continue;
                         }
                         s.connections += 1;
-                    }
-                    let conn = ids.fetch_add(1, Ordering::Relaxed);
+                        s.next_conn += 1;
+                        s.next_conn
+                    };
                     let server = accept.clone();
                     let events = events.clone();
                     let spawned = std::thread::Builder::new()
@@ -95,7 +106,7 @@ impl Server {
                     }
                 }
             })?;
-        Ok(server)
+        Ok(())
     }
 
     pub fn port(&self) -> u16 {
@@ -342,6 +353,22 @@ mod tests {
                 text: "still here".into()
             }
         );
+    }
+
+    #[test]
+    fn localhost_works_over_ipv6_too() {
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let server = Server::start(move |e| drop(lock_tx(&tx).send(e))).unwrap();
+        server.allow("tok6");
+        let Ok(stream) = TcpStream::connect(("::1", server.port())) else {
+            return; // no IPv6 on this machine
+        };
+        let (mut ws, _) =
+            tungstenite::client(format!("ws://[::1]:{}", server.port()), stream).unwrap();
+        ws.send(Message::text(r#"{"event":"registerPlugin","uuid":"tok6"}"#))
+            .unwrap();
+        assert!(matches!(next(&rx), ServerEvent::Registered { .. }));
     }
 
     #[test]

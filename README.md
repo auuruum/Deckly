@@ -27,8 +27,10 @@ own process. Install one from the Plugins tab ("Install…" for a
 folder) or drop the file on the window. Plugin actions then appear in the
 Keys tab under the plugin's name.
 
-- Node.js plugins need Node.js 20 or newer on `PATH` (or `DECKLY_NODE` set
-  to the `node` program).
+- Node.js plugins run on the Node.js major their manifest asks for: a
+  matching `node` on `PATH`, else Deckly downloads the official build from
+  nodejs.org once (checked against its SHA-256 list) into `runtimes`.
+  `DECKLY_NODE` forces one `node` for every plugin.
 - HTML plugins and action settings ("Open Settings") run in `deckly-web`,
   a helper next to the Deckly program that uses the system web view
   (WebView2 on Windows, WebKitGTK on Linux, WKWebView on macOS). Windows

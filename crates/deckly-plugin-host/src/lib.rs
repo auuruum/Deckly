@@ -9,16 +9,20 @@
 //! Deckly is an independent app and is not made, approved or supported by
 //! Elgato or Corsair.
 
+mod guard;
 pub mod install;
 pub mod manifest;
+mod node;
 pub mod protocol;
 mod server;
 
+pub use guard::{GUARD_ARG, run_guard};
 pub use manifest::{Entry, Manifest};
 pub use protocol::{AppInfo, Command, DeviceInfo, Instance};
 
 use server::{Server, ServerEvent};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,8 +44,15 @@ pub struct Config {
     pub logs_dir: PathBuf,
     /// `deckly-web`, which runs HTML plugins and property inspectors.
     pub web_helper: Option<PathBuf>,
-    /// Node.js; found on `PATH` when not given.
+    /// One Node.js for every plugin, overriding the version each manifest
+    /// asks for (a developer setting).
     pub node: Option<PathBuf>,
+    /// Where Node.js builds downloaded for plugins are kept.
+    pub runtimes_dir: PathBuf,
+    /// A program that runs `<guard> --plugin-guard <plugin command>` (see
+    /// [`run_guard`]); Deckly passes itself. Without one, plugins run
+    /// directly and may outlive a host that crashed.
+    pub guard: Option<PathBuf>,
     pub app: AppInfo,
 }
 
@@ -51,6 +62,8 @@ pub enum Status {
     Running,
     /// Waiting to start again after it stopped.
     Restarting(String),
+    /// Waiting for what it needs to run (the Node.js it asks for).
+    Installing(String),
     /// Not running, with the reason.
     Failed(String),
 }
@@ -113,6 +126,7 @@ enum Ctl {
     OpenInspector(Instance),
     CloseInspector,
     Shutdown(Sender<()>),
+    NodeInstalled(String, Result<PathBuf, String>),
 }
 
 #[derive(Clone)]
@@ -151,6 +165,9 @@ impl Host {
             logs_dir: config.logs_dir.clone(),
         };
         let mut supervisor = Supervisor {
+            ctl: host.ctl.clone(),
+            node_waiting: HashMap::new(),
+            node_fallback: HashMap::new(),
             config,
             server,
             shared,
@@ -304,6 +321,11 @@ struct Supervisor {
     events: Sender<HostEvent>,
     slots: HashMap<String, Slot>,
     inspector_child: Option<Child>,
+    /// Plugins waiting for a Node.js major being installed.
+    node_waiting: HashMap<String, Vec<String>>,
+    /// A Node.js of another major used when a major could not be installed.
+    node_fallback: HashMap<String, PathBuf>,
+    ctl: Sender<Ctl>,
 }
 
 impl Supervisor {
@@ -350,6 +372,7 @@ impl Supervisor {
                 }
                 Some(Ctl::OpenInspector(instance)) => self.open_inspector(instance),
                 Some(Ctl::CloseInspector) => self.close_inspector(),
+                Some(Ctl::NodeInstalled(major, result)) => self.node_installed(&major, result),
                 Some(Ctl::Shutdown(reply)) => {
                     self.close_inspector();
                     let ids: Vec<String> = self.slots.keys().cloned().collect();
@@ -516,28 +539,31 @@ impl Supervisor {
         ];
         let entry = manifest.entry(&dir);
         let web = matches!(entry, Ok(Entry::Html(_)));
+        let plugin_args = plugin_args.map(OsString::from);
+        let node = match &entry {
+            Ok(Entry::Node(_)) => match self.node_for(id, &manifest) {
+                Some(node) => Some(node),
+                // Started again once Node.js is installed.
+                None => return,
+            },
+            _ => None,
+        };
         let command = match entry {
-            Ok(Entry::Node(script)) => self.node().map(|node| {
-                let mut c = std::process::Command::new(node);
-                c.arg("--no-global-search-paths")
-                    .arg("--enable-source-maps");
+            Ok(Entry::Node(script)) => node.ok_or_else(String::new).map(|node| {
+                let mut args: Vec<OsString> = vec![
+                    "--no-global-search-paths".into(),
+                    "--enable-source-maps".into(),
+                ];
                 match manifest.node_debug.as_str() {
-                    "enabled" => {
-                        c.arg("--inspect=127.0.0.1:0");
-                    }
-                    "break" => {
-                        c.arg("--inspect-brk=127.0.0.1:0");
-                    }
+                    "enabled" => args.push("--inspect=127.0.0.1:0".into()),
+                    "break" => args.push("--inspect-brk=127.0.0.1:0".into()),
                     _ => {}
                 }
-                c.arg(script).args(&plugin_args);
-                c
+                args.push(script.into());
+                args.extend(plugin_args);
+                self.guarded(node.into(), args)
             }),
-            Ok(Entry::Native(program)) => {
-                let mut c = std::process::Command::new(program);
-                c.args(&plugin_args);
-                Ok(c)
-            }
+            Ok(Entry::Native(program)) => Ok(self.guarded(program.into(), plugin_args.to_vec())),
             Ok(Entry::Html(page)) => self.web_helper().map(|helper| {
                 let mut c = std::process::Command::new(helper);
                 c.arg("plugin")
@@ -558,10 +584,14 @@ impl Supervisor {
             }
         };
         let log = self.config.logs_dir.join(format!("{id}.log"));
-        // deckly-web exits when this pipe closes, so it never outlives Deckly.
-        command
-            .current_dir(&dir)
-            .stdin(if web { Stdio::piped() } else { Stdio::null() });
+        // The guard and deckly-web stop when this pipe closes, so plugins
+        // never outlive Deckly.
+        let lifeline = web || self.config.guard.is_some();
+        command.current_dir(&dir).stdin(if lifeline {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         // shortcut: the plugin's own output is not size-limited; the log is
         // truncated at each start. Rotate it if plugins turn out to flood it.
         if let Ok(file) = File::create(&log)
@@ -590,10 +620,88 @@ impl Supervisor {
         }
     }
 
-    fn node(&self) -> Result<PathBuf, String> {
-        self.config.node.clone().or_else(find_node).ok_or_else(|| {
-            "needs Node.js, which was not found; install Node.js 20 or newer".to_owned()
-        })
+    /// A plugin command, run through the guard when there is one.
+    fn guarded(&self, program: OsString, args: Vec<OsString>) -> std::process::Command {
+        match &self.config.guard {
+            Some(guard) => {
+                let mut c = std::process::Command::new(guard);
+                c.arg(GUARD_ARG).arg(program).args(args);
+                c
+            }
+            None => {
+                let mut c = std::process::Command::new(program);
+                c.args(args);
+                c
+            }
+        }
+    }
+
+    /// The Node.js a plugin asks for in its manifest, or `None` while it is
+    /// being installed; the plugin starts when the install ends.
+    fn node_for(&mut self, id: &str, manifest: &Manifest) -> Option<PathBuf> {
+        if let Some(node) = &self.config.node {
+            return Some(node.clone());
+        }
+        let major = manifest
+            .node_version
+            .as_deref()
+            .and_then(node::major)
+            .unwrap_or_else(|| node::DEFAULT_MAJOR.to_owned());
+        if let Some(found) = node::find(&self.config.runtimes_dir, &major)
+            .or_else(|| self.node_fallback.get(&major).cloned())
+        {
+            return Some(found);
+        }
+        let first = !self.node_waiting.contains_key(&major);
+        let waiting = self.node_waiting.entry(major.clone()).or_default();
+        if !waiting.iter().any(|w| w == id) {
+            waiting.push(id.to_owned());
+        }
+        if first {
+            let ctl = self.ctl.clone();
+            let runtimes = self.config.runtimes_dir.clone();
+            let m = major.clone();
+            let spawned = std::thread::Builder::new()
+                .name("deckly-node-install".into())
+                .spawn(move || {
+                    let result = node::install(&runtimes, &m);
+                    let _ = ctl.send(Ctl::NodeInstalled(m, result));
+                });
+            if let Err(e) = spawned {
+                self.node_installed(&major, Err(e.to_string()));
+                return None;
+            }
+        }
+        self.note(id, &format!("installing Node.js {major} from nodejs.org"));
+        self.set_status(id, Status::Installing(format!("Node.js {major}")));
+        None
+    }
+
+    /// Starts the plugins that waited for a Node.js install. When it failed
+    /// they run on the `node` on `PATH`, if any, with a note in their log.
+    fn node_installed(&mut self, major: &str, result: Result<PathBuf, String>) {
+        let ids = self.node_waiting.remove(major).unwrap_or_default();
+        if let Err(e) = &result {
+            let Some(other) = node::on_path() else {
+                for id in &ids {
+                    self.note(id, &format!("cannot install Node.js {major}: {e}"));
+                    let why = format!("needs Node.js {major}, which could not be installed: {e}");
+                    self.set_status(id, Status::Failed(why));
+                }
+                return;
+            };
+            for id in &ids {
+                let note = format!(
+                    "cannot install Node.js {major} ({e}); using {} instead",
+                    other.display()
+                );
+                self.note(id, &note);
+            }
+            self.node_fallback.insert(major.to_owned(), other);
+        }
+        for id in ids {
+            self.launch(&id);
+        }
     }
 
     fn web_helper(&self) -> Result<PathBuf, String> {
@@ -619,9 +727,8 @@ impl Supervisor {
         if let Some(token) = slot.token.take() {
             self.server.forbid(&token);
         }
-        if let Some(mut child) = slot.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = slot.child.take() {
+            end_child(child);
         }
         slot.registered = false;
         slot.started = None;
@@ -841,9 +948,8 @@ impl Supervisor {
 
     fn close_inspector(&mut self) {
         let open = lock(&self.shared).inspector.take();
-        if let Some(mut child) = self.inspector_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(child) = self.inspector_child.take() {
+            end_child(child);
         }
         if let Some(i) = open {
             self.server.forbid(&i.token);
@@ -878,16 +984,24 @@ fn debug() -> bool {
     *DEBUG.get_or_init(|| std::env::var_os("DECKLY_PLUGIN_DEBUG").is_some())
 }
 
-/// Finds `node` on `PATH`.
-fn find_node() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "node.exe" } else { "node" };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+/// Stops a plugin process. A guard or deckly-web gets its pipe closed so it
+/// can stop what it runs first; it is killed if it does not exit in time.
+fn end_child(mut child: Child) {
+    if child.stdin.take().is_some() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Console programs would open a window each on Windows.
-fn hide_console(command: &mut std::process::Command) {
+pub(crate) fn hide_console(command: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

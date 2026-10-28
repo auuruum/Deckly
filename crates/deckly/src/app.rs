@@ -1947,6 +1947,7 @@ fn status_text(status: &Status) -> (String, Color32) {
         Status::Running => ("Running".into(), TEXT_DIM),
         Status::Starting => ("Starting…".into(), TEXT_DIM),
         Status::Restarting(why) => (format!("Restarting: {why}"), WARNING),
+        Status::Installing(what) => (format!("Installing {what}…"), TEXT_DIM),
         Status::Failed(why) => (format!("Not running: {why}"), WARNING),
     }
 }
@@ -1979,6 +1980,8 @@ fn start_host() -> (
         logs_dir: dir.join("logs").join("plugins"),
         web_helper: helper,
         node: std::env::var_os("DECKLY_NODE").map(PathBuf::from),
+        guard: std::env::current_exe().ok(),
+        runtimes_dir: dir.join("runtimes"),
         app: deckly_plugin_host::AppInfo {
             language: "en".into(),
             platform_version: String::new(),
