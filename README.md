@@ -86,6 +86,12 @@ Keys tab under the plugin's name.
 - Native plugins run only on the system they were built for.
 - Copies installed through the official marketplace are encrypted and
   cannot be used; get the plugin from its author's own download instead.
+- Some plugins refuse to run outside the official app on purpose: they
+  check that the process that started them is the official, signed
+  executable. Deckly does not work around such checks, so these plugins
+  start but stay disabled (BarRaider's plugins, for example, show "Device
+  Not Supported"). Deckly marks the ones it recognizes as "Works only in
+  the official app". Only the plugin's author can change that.
 
 Plugins live in Deckly's config folder under `plugins`, their logs under
 `logs/plugins`. For plugin authors, `DECKLY_PLUGIN_DEBUG=1` writes every

@@ -244,6 +244,13 @@ impl Manifest {
     }
 }
 
+/// Plugins built on BarRaider's helper library check that the signed
+/// official app started them and turn themselves off otherwise
+/// (docs/clean-room/2026-10-28-plugin-host.md).
+pub fn needs_official_app(dir: &Path) -> bool {
+    dir.join("BRUtils.dll").is_file()
+}
+
 fn exists(path: PathBuf) -> Result<PathBuf, String> {
     if path.is_file() {
         Ok(path)
@@ -502,6 +509,9 @@ mod tests {
                 Ok(Entry::Native(dir.join("com.example.tool.exe")))
             );
         }
+        assert!(!needs_official_app(&dir));
+        std::fs::write(dir.join("BRUtils.dll"), "").unwrap();
+        assert!(needs_official_app(&dir));
         // A Windows program is refused elsewhere.
         m.code_path = "tool.exe".into();
         assert_eq!(m.entry(&dir).is_ok(), cfg!(windows));

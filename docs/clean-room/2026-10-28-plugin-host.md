@@ -268,3 +268,28 @@ webview APIs but have not been runtime-tested here. No hardware or firmware
 behaviour was tested. No proprietary plugin sources or assets were copied
 into the repository. HTML plugins continue to need their background webview
 while enabled; the configuration popup's lifetime is separate.
+
+## BarRaider plugins refuse non-official hosts (2026-10-28)
+
+Sources: the owner's screenshots, the plugin's own `pluginlog.log`, and
+static REA inspection (metadata and `#US` strings only, nothing executed) of
+`BRUtils.dll` 2.1.0.0 shipped in Advanced Launcher 2.0
+(`com.barraider.advancedlauncher.sdPlugin`), Windows 10 22H2, MK.2.
+
+- Artifact SHA-256: `a6ab2615ac60cc95501667ea4b2977432b590b6b683e431824d859f9d2ccc899`.
+- REA parent Evidence: `ev_d0d691780d4e8bd6e8755771277849fea525c7d6426eb585f0e68baa1c0dd1c2`.
+- Observed: its `CodePath` is `com.barraider.advancedlauncher`. Deckly took
+  `.advancedlauncher` for an extension and never tried `.exe`. Fixed;
+  checked by `manifest::tests::entries_follow_the_code_path`.
+- Observed: once started, the plugin registers, logs the `-info` Deckly sent,
+  and about ten seconds later logs "Unidentified Elgato Stream Deck device"
+  and "Critical update needed", then draws a "Device Not Supported" image.
+- Observed (static): the library reads its parent process's module name,
+  compares it with `streamdeck.exe`, reads a certificate subject (`CN=`)
+  and calls `Verify`. Inferred: it accepts only a parent signed as the
+  official app.
+- Deckly decision: this is an access check, so Deckly does not imitate the
+  official executable or its signature. Plugins built on this library do
+  not work with Deckly. A plugin folder holding `BRUtils.dll` is marked
+  "Works only in the official app" in the plugin list, the install notice
+  and the key editor; checked by `manifest::tests::entries_follow_the_code_path`.

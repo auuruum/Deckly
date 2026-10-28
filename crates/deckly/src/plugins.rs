@@ -101,6 +101,8 @@ pub struct CatalogPlugin {
     pub actions: Vec<CatalogAction>,
     pub status: Status,
     pub dir: PathBuf,
+    /// The plugin refuses to work outside the official app.
+    pub official_only: bool,
     /// Identifies the manifest the images were decoded from.
     source: usize,
 }
@@ -353,6 +355,7 @@ impl Worker {
                     actions: Vec::new(),
                     status: p.status.clone(),
                     dir: p.dir.clone(),
+                    official_only: false,
                     source: 0,
                 }));
                 continue;
@@ -403,6 +406,7 @@ impl Worker {
                 actions,
                 status: p.status.clone(),
                 dir: p.dir.clone(),
+                official_only: deckly_plugin_host::manifest::needs_official_app(&p.dir),
                 source,
             }));
         }

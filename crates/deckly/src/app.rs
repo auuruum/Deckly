@@ -704,7 +704,12 @@ impl App {
             bold(13.0),
             TEXT,
         );
-        let (status, color) = status_text(&p.status);
+        let official_only = p.official_only && !matches!(p.status, Status::Failed(_));
+        let (status, color) = if official_only {
+            (OFFICIAL_ONLY.to_owned(), WARNING)
+        } else {
+            status_text(&p.status)
+        };
         ui.painter().text(
             pos2(x, rect.top() + 35.0),
             Align2::LEFT_CENTER,
@@ -713,6 +718,7 @@ impl App {
             color,
         );
         let resp = resp.on_hover_text(match &p.status {
+            _ if official_only => OFFICIAL_ONLY_WHY.to_owned(),
             Status::Failed(why) | Status::Restarting(why) => why.clone(),
             _ if p.author.is_empty() => p.id.clone(),
             _ => format!("{}\nby {}", p.id, p.author),
@@ -767,13 +773,18 @@ impl App {
             for path in paths {
                 let text = match host.install(&path) {
                     Ok(id) => {
-                        let name = host
-                            .plugins()
-                            .into_iter()
-                            .find(|p| p.id == id)
+                        let found = host.plugins().into_iter().find(|p| p.id == id);
+                        let official_only = found.as_ref().is_some_and(|p| {
+                            deckly_plugin_host::manifest::needs_official_app(&p.dir)
+                        });
+                        let name = found
                             .and_then(|p| p.manifest.map(|m| m.name.clone()))
                             .unwrap_or(id);
-                        format!("{name} was installed")
+                        if official_only {
+                            format!("{name} was installed, but it works only in the official app")
+                        } else {
+                            format!("{name} was installed")
+                        }
                     }
                     Err(e) => format!("Cannot install {}: {e}", path.display()),
                 };
@@ -1394,6 +1405,7 @@ impl App {
                 tooltip: a.tooltip.clone(),
                 icon: a.icon.clone(),
                 status: p.status.clone(),
+                official_only: p.official_only,
                 has_inspector: a.has_inspector,
                 instance: s.instance(&context, key),
             });
@@ -1540,7 +1552,10 @@ impl App {
                 ui.label(RichText::new("This action has no settings.").color(TEXT_DIM));
             }
             let (status, color) = status_text(&p.status);
-            if p.status != Status::Running {
+            if p.official_only && !matches!(p.status, Status::Failed(_)) {
+                ui.label(RichText::new(OFFICIAL_ONLY).color(WARNING))
+                    .on_hover_text(OFFICIAL_ONLY_WHY);
+            } else if p.status != Status::Running {
                 ui.label(RichText::new(status).color(color));
             }
         });
@@ -2370,9 +2385,15 @@ struct PluginView {
     tooltip: String,
     icon: Option<plugins::Image>,
     status: Status,
+    official_only: bool,
     has_inspector: bool,
     instance: deckly_plugin_host::Instance,
 }
+
+const OFFICIAL_ONLY: &str = "Works only in the official app";
+const OFFICIAL_ONLY_WHY: &str = "This plugin checks that the official, signed Stream Deck \
+    app started it, and turns itself off otherwise. Deckly does not work around that \
+    check; only the plugin's author can change it.";
 
 fn status_text(status: &Status) -> (String, Color32) {
     match status {
