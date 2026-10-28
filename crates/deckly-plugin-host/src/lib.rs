@@ -115,6 +115,8 @@ struct Shared {
     live: HashMap<String, String>,
     devices: Vec<DeviceInfo>,
     inspector: Option<OpenInspector>,
+    /// The editor window property inspectors belong to (a Windows HWND).
+    owner: Option<i64>,
 }
 
 enum Ctl {
@@ -126,6 +128,7 @@ enum Ctl {
     OpenInspector(Instance),
     CloseInspector,
     Shutdown(Sender<()>),
+    PlaceInspector(Option<[i32; 4]>),
     NodeInstalled(String, Result<PathBuf, String>),
 }
 
@@ -166,6 +169,7 @@ impl Host {
         };
         let mut supervisor = Supervisor {
             ctl: host.ctl.clone(),
+            inspector_place: None,
             node_waiting: HashMap::new(),
             node_fallback: HashMap::new(),
             config,
@@ -242,6 +246,19 @@ impl Host {
 
     pub fn close_inspector(&self) {
         let _ = self.ctl.send(Ctl::CloseInspector);
+    }
+
+    /// Makes property inspectors child windows of the editor (a Windows HWND),
+    /// so they are clipped to its client area, move with it and hide with it.
+    pub fn set_owner_window(&self, handle: i64) {
+        lock(&self.shared).owner = Some(handle);
+    }
+
+    /// Where the open property inspector is drawn, as a client rectangle in
+    /// physical pixels (x, y, width, height) inside the editor's inspector
+    /// panel; `None` hides it. Only with an owner window.
+    pub fn place_inspector(&self, place: Option<[i32; 4]>) {
+        let _ = self.ctl.send(Ctl::PlaceInspector(place));
     }
 
     /// The key whose property inspector is open.
@@ -321,6 +338,8 @@ struct Supervisor {
     events: Sender<HostEvent>,
     slots: HashMap<String, Slot>,
     inspector_child: Option<Child>,
+    /// Where the editor wants the property inspector drawn.
+    inspector_place: Option<[i32; 4]>,
     /// Plugins waiting for a Node.js major being installed.
     node_waiting: HashMap<String, Vec<String>>,
     /// A Node.js of another major used when a major could not be installed.
@@ -372,6 +391,10 @@ impl Supervisor {
                 }
                 Some(Ctl::OpenInspector(instance)) => self.open_inspector(instance),
                 Some(Ctl::CloseInspector) => self.close_inspector(),
+                Some(Ctl::PlaceInspector(place)) => {
+                    self.inspector_place = place;
+                    self.send_place();
+                }
                 Some(Ctl::NodeInstalled(major, result)) => self.node_installed(&major, result),
                 Some(Ctl::Shutdown(reply)) => {
                     self.close_inspector();
@@ -924,6 +947,7 @@ impl Supervisor {
             .arg(&info)
             .arg(instance.action_info())
             .arg(title)
+            .args(lock(&self.shared).owner.map(|o| o.to_string()))
             .current_dir(&dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -933,6 +957,7 @@ impl Supervisor {
         match command.spawn() {
             Ok(child) => {
                 self.inspector_child = Some(child);
+                self.send_place();
                 lock(&self.shared).inspector = Some(OpenInspector {
                     plugin: id,
                     instance,
@@ -957,6 +982,23 @@ impl Supervisor {
                 &i.plugin,
                 i.instance.inspector_event("propertyInspectorDidDisappear"),
             );
+        }
+    }
+
+    /// Tells the property inspector helper where to draw itself, through
+    /// its standard input (one line per change).
+    fn send_place(&mut self) {
+        // Standalone inspectors must stay visible on platforms without an owner.
+        if lock(&self.shared).owner.is_none() {
+            return;
+        }
+        let line = match self.inspector_place {
+            Some([x, y, w, h]) => format!("place {x} {y} {w} {h}\n"),
+            None => "hide\n".to_owned(),
+        };
+        if let Some(stdin) = self.inspector_child.as_mut().and_then(|c| c.stdin.as_mut()) {
+            let _ = stdin.write_all(line.as_bytes());
+            let _ = stdin.flush();
         }
     }
 

@@ -148,6 +148,15 @@ pub struct App {
     host: Option<Host>,
     /// Textures of plugin images, by image id.
     images: HashMap<u64, TextureHandle>,
+    /// Where this frame's inspector panel shows a plugin's settings page.
+    plugin_page_area: Option<Rect>,
+    /// The key whose settings page was last asked for, so it is asked once.
+    plugin_page_requested: Option<(String, String)>,
+    /// The placement last sent to the settings page (None: not yet sent).
+    plugin_page_placed: Option<Option<[i32; 4]>>,
+    /// The editor window was handed to the plugin host as the owner of
+    /// settings pages.
+    owner_set: bool,
     recording_hotkey: bool,
     clipboard: Option<KeyConfig>,
     dirty: HashSet<String>,
@@ -210,6 +219,10 @@ impl App {
             expanded: HashSet::from([Category::System.label().to_owned()]),
             host,
             images: HashMap::new(),
+            plugin_page_area: None,
+            plugin_page_requested: None,
+            plugin_page_placed: None,
+            owner_set: false,
             recording_hotkey: false,
             clipboard: None,
             dirty: HashSet::new(),
@@ -1253,6 +1266,7 @@ impl App {
     // ----- property inspector --------------------------------------------
 
     fn inspector(&mut self, ui: &mut Ui, profile: &mut Profile, view: &View) {
+        let panel = ui.max_rect();
         let page_id = view
             .path
             .last()
@@ -1318,6 +1332,7 @@ impl App {
         ui.separator();
         ui.add_space(8.0);
         let ppp = ui.ctx().pixels_per_point();
+        let mut form = Rect::NOTHING;
         ui.horizontal_top(|ui| {
             ui.add_space(16.0);
             // Key preview and image controls.
@@ -1348,39 +1363,66 @@ impl App {
                 }
             });
             ui.add_space(16.0);
-            ui.vertical(|ui| {
-                egui::Grid::new("key-form")
-                    .num_columns(2)
-                    .spacing(vec2(14.0, 10.0))
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("Title").color(TEXT_DIM));
-                        ui.horizontal_top(|ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut key.title)
-                                    .desired_rows(1)
-                                    .desired_width(260.0),
-                            );
-                            title_style_button(ui, &mut key.title_style, defaults);
+            form = ui
+                .vertical(|ui| {
+                    egui::Grid::new("key-form")
+                        .num_columns(2)
+                        .spacing(vec2(14.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Title").color(TEXT_DIM));
+                            ui.horizontal_top(|ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut key.title)
+                                        .desired_rows(1)
+                                        .desired_width(260.0),
+                                );
+                                title_style_button(ui, &mut key.title_style, defaults);
+                            });
+                            ui.end_row();
+                            match &plugin {
+                                Some(p) => self.plugin_form(ui, p),
+                                None => self.action_form(ui, key, &profiles, page_count),
+                            }
                         });
-                        ui.end_row();
-                        match &plugin {
-                            Some(p) => self.plugin_form(ui, p),
-                            None => self.action_form(ui, key, &profiles, page_count),
-                        }
-                    });
-            });
+                })
+                .response
+                .rect;
         });
+        // A plugin's settings page fills the rest of the panel, framed and
+        // labelled so it is clear this part is the plugin's own web page.
+        if let Some(p) = plugin
+            .as_ref()
+            .filter(|p| p.has_inspector && INLINE_PLUGIN_PAGES)
+        {
+            let area = Rect::from_min_max(
+                pos2(form.left(), form.bottom() + 30.0),
+                pos2(panel.right() - 16.0, panel.bottom() - 12.0),
+            );
+            self.plugin_page(ui, area, p);
+        }
         if *key != before {
             self.mark_dirty(&profile.id);
         }
     }
 
-    /// Settings of a plugin action: its property inspector opens in a window
-    /// of its own (the `deckly-web` helper).
+    /// The inspector row of a plugin action. Its settings page, a web page
+    /// of the plugin's, shows below the form where the editor can place it
+    /// (`plugin_page`); elsewhere it opens in a window of its own.
     fn plugin_form(&mut self, ui: &mut Ui, p: &PluginView) {
         ui.label(RichText::new("Settings").color(TEXT_DIM));
         ui.vertical(|ui| {
-            if p.has_inspector {
+            if p.has_inspector && INLINE_PLUGIN_PAGES {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::PUZZLE_PIECE).color(TEXT_DIM));
+                    ui.label(
+                        RichText::new(format!(
+                            "Web page from the {} plugin, not part of Deckly",
+                            p.name
+                        ))
+                        .color(TEXT_DIM),
+                    );
+                });
+            } else if p.has_inspector {
                 let open = self
                     .host
                     .as_ref()
@@ -1409,6 +1451,68 @@ impl App {
             }
         });
         ui.end_row();
+    }
+
+    /// Frames the area where a plugin's settings page is drawn and opens the
+    /// page for this key. The page runs in `deckly-web`; its window is placed
+    /// over this area after the frame (`place_plugin_page`).
+    fn plugin_page(&mut self, ui: &mut Ui, area: Rect, p: &PluginView) {
+        let area = area.intersect(ui.clip_rect());
+        if !area.is_positive() {
+            return;
+        }
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let requested = (p.instance.context.clone(), p.instance.action.clone());
+        let open = host
+            .inspector()
+            .is_some_and(|i| i.context == p.instance.context && i.action == p.instance.action);
+        if !open && self.plugin_page_requested.as_ref() != Some(&requested) {
+            host.open_inspector(p.instance.clone());
+            self.plugin_page_requested = Some(requested);
+        }
+        let painter = ui.painter();
+        painter.rect_filled(area.expand(1.0), CornerRadius::same(4), KEY_BORDER);
+        painter.rect_filled(area, CornerRadius::same(3), CANVAS);
+        if open {
+            self.plugin_page_area = Some(area);
+        } else {
+            painter.text(
+                area.center(),
+                Align2::CENTER_CENTER,
+                "Loading the plugin's settings page…",
+                font(12.0),
+                TEXT_DIM,
+            );
+            let retry = Rect::from_center_size(area.center() + vec2(0.0, 26.0), vec2(120.0, 24.0));
+            if area.contains_rect(retry)
+                && ui.put(retry, egui::Button::new("Retry settings")).clicked()
+            {
+                host.open_inspector(p.instance.clone());
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+    }
+
+    /// Puts the plugin settings page window over its area of the panel, or
+    /// hides it while something of Deckly's own would be under it.
+    fn place_plugin_page(&mut self, ctx: &egui::Context) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let covered = egui::Popup::is_any_open(ctx) || self.rename.is_some();
+        let (inner, minimized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().minimized));
+        let place = self
+            .plugin_page_area
+            .take()
+            .filter(|_| !covered && minimized != Some(true))
+            .zip(inner)
+            .and_then(|(area, inner)| plugin_page_placement(area, inner, ctx.pixels_per_point()));
+        if self.plugin_page_placed != Some(place) {
+            host.place_inspector(place);
+            self.plugin_page_placed = Some(place);
+        }
     }
 
     fn action_form(
@@ -1704,8 +1808,17 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.plugin_page_area = None;
+        // Set the owner before a selected key can request its settings page.
+        if !self.owner_set
+            && let Some(host) = &self.host
+            && let Some(handle) = window_handle(frame)
+        {
+            host.set_owner_window(handle);
+            self.owner_set = true;
+        }
         let (title_style, key_press) = {
             let s = runtime::lock(&self.state);
             (s.settings.title_style, s.settings.key_press)
@@ -1836,19 +1949,33 @@ impl eframe::App for App {
             self.install(dropped);
         }
         // The settings window follows the selected key.
-        if let Some(host) = &self.host
-            && let Some(open) = host.inspector()
-        {
+        if let Some(host) = &self.host {
             let page_id = view
                 .path
                 .last()
                 .cloned()
                 .or_else(|| profile.pages.get(view.page).map(|p| p.id.clone()))
                 .unwrap_or_default();
-            let selected = self.selected_key.map(|k| plugins::context(&page_id, k));
-            if selected.as_deref() != Some(open.context.as_str()) {
+            let selected = self.selected_key.and_then(|k| {
+                let key = view.keys(&mut profile)?.get(&k)?;
+                Some((plugins::context(&page_id, k), key.action.clone()))
+            });
+            let stale_request = self
+                .plugin_page_requested
+                .as_ref()
+                .is_some_and(|requested| Some(requested) != selected.as_ref());
+            let stale_open = host.inspector().is_some_and(|open| {
+                Some((open.context, open.action)) != selected
+                    && (!INLINE_PLUGIN_PAGES || self.plugin_page_requested != selected)
+            });
+            if stale_request || stale_open {
                 host.close_inspector();
+                self.plugin_page_requested = None;
+                self.plugin_page_area = None;
             }
+        }
+        if INLINE_PLUGIN_PAGES {
+            self.place_plugin_page(&ctx);
         }
         self.save_pending(false);
         if !self.dirty.is_empty() {
@@ -1928,6 +2055,34 @@ fn draw_list_icon(p: &egui::Painter, rect: Rect, tex: Option<egui::TextureId>, t
                 tint,
             );
         }
+    }
+}
+
+/// Plugin settings pages sit inside the inspector panel where the system
+/// lets one process's window belong to another's (Windows).
+// shortcut: macOS and Linux open them in a window of their own; embed them
+// there too once the helper can follow the editor window on those systems.
+const INLINE_PLUGIN_PAGES: bool = cfg!(windows);
+
+/// Convert both edges to physical pixels so fractional scaling leaves no gap.
+fn plugin_page_placement(area: Rect, inner: Rect, ppp: f32) -> Option<[i32; 4]> {
+    let area = area.intersect(Rect::from_min_size(egui::Pos2::ZERO, inner.size()));
+    if !area.is_positive() || !ppp.is_finite() || ppp <= 0.0 {
+        return None;
+    }
+    let min = area.min * ppp;
+    let max = area.max * ppp;
+    let (x, y) = (min.x.round() as i32, min.y.round() as i32);
+    let (w, h) = (max.x.round() as i32 - x, max.y.round() as i32 - y);
+    (w > 0 && h > 0).then_some([x, y, w, h])
+}
+
+/// The editor window's native handle (a Windows HWND).
+fn window_handle(frame: &eframe::Frame) -> Option<i64> {
+    use eframe::egui_wgpu::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
+    match frame.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as i64),
+        _ => None,
     }
 }
 
@@ -2110,4 +2265,43 @@ fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
             _ => None,
         })
     })
+}
+
+#[cfg(test)]
+mod plugin_page_tests {
+    use super::*;
+
+    #[test]
+    fn placement_uses_client_coordinates_and_scales_panel_edges() {
+        let inner = Rect::from_min_size(pos2(38.0, 37.0), vec2(960.0, 800.0));
+        let area = Rect::from_min_max(pos2(146.0, 622.0), pos2(534.0, 750.0));
+        assert_eq!(
+            plugin_page_placement(area, inner, 1.0),
+            Some([146, 622, 388, 128])
+        );
+
+        let inner = Rect::from_min_size(pos2(-1000.0, 80.0), vec2(960.0, 640.0));
+        let area = Rect::from_min_max(pos2(10.5, 20.5), pos2(111.5, 121.5));
+        assert_eq!(
+            plugin_page_placement(area, inner, 1.25),
+            Some([13, 26, 126, 126])
+        );
+        let oversized = Rect::from_min_max(pos2(-20.0, -20.0), pos2(1200.0, 1000.0));
+        assert_eq!(
+            plugin_page_placement(oversized, inner, 1.0),
+            Some([0, 0, 960, 640])
+        );
+    }
+
+    #[test]
+    fn collapsed_or_offscreen_panels_are_hidden() {
+        let inner = Rect::from_min_size(pos2(0.0, 0.0), vec2(960.0, 640.0));
+        for area in [
+            Rect::NOTHING,
+            Rect::from_min_max(pos2(100.0, 200.0), pos2(100.0, 200.0)),
+            Rect::from_min_max(pos2(10.0, 700.0), pos2(100.0, 800.0)),
+        ] {
+            assert_eq!(plugin_page_placement(area, inner, 1.0), None);
+        }
+    }
 }

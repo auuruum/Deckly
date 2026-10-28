@@ -151,3 +151,46 @@
 - Not checked yet: opening the property inspector from the editor and its
   settings round trip, key presses on the device reaching a plugin, HTML
   plugins, macOS and Linux.
+
+## Inspector follow-up (2026-10-28)
+
+Source: the owner's Windows screenshots and independently written Deckly
+source. The screenshots show the ai-limits settings page loading, a visible
+strip at its left edge, and the plugin attribution sitting above the centre
+of its Settings row. No new device or firmware observations were made.
+
+Implementation:
+
+- Plugin pages are served from a custom origin rooted at the plugin folder,
+  with JavaScript MIME types, so ES modules can load. Canonical path checks
+  reject traversal and links pointing outside that folder.
+- On Windows the optional helper creates a borderless child of the editor's
+  native window. Placement uses physical client coordinates; the child is
+  clipped by its parent and follows it when it moves. This removes the
+  separate top-level frame instead of compensating for its eight-pixel inset.
+- The attribution icon and label share a horizontally arranged, vertically
+  centred row. The host distinguishes both the action and the key when
+  switching inspectors, and ignores stale close decisions while the new
+  inspector is being requested. Collapsed panels are hidden.
+- Standalone settings windows on Linux and macOS receive no placement/hide
+  commands. The helper also ignores those commands without a Windows parent.
+- Removed the temporary inspector-placement stderr trace. Existing opt-in
+  plugin protocol logging remains available.
+- The GNU loader-copy step compares DLL bytes before reusing a locked copy.
+
+Validation on Windows: `cargo test --workspace` (111 tests),
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
+and `cargo build --release --workspace` passed. The placement tests in
+`app::plugin_page_tests` cover client coordinates, fractional scaling,
+clipping, and collapsed panels. `deckly-web::tests` covers file serving,
+encoded traversal, command parsing, and safe argument quoting; its symlink
+case is Unix-only and was not executed on Windows.
+
+Manual verification of the updated frame and label appearance, settings
+round trips, resizing and popup interactions was handed to the owner.
+These visual changes have not yet been verified in the updated running app.
+Cross-target checks of `deckly` and `deckly-plugin-host` passed for
+`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`. The helper was
+not cross-checked: its GTK/WebKitGTK and Apple SDK requirements are not
+available in this Windows environment. Linux and macOS runtime behaviour
+and their system webviews remain untested.

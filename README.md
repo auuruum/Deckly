@@ -31,11 +31,15 @@ Keys tab under the plugin's name.
   matching `node` on `PATH`, else Deckly downloads the official build from
   nodejs.org once (checked against its SHA-256 list) into `runtimes`.
   `DECKLY_NODE` forces one `node` for every plugin.
-- HTML plugins and action settings ("Open Settings") run in `deckly-web`,
+- HTML plugins and action settings run in `deckly-web`,
   a helper next to the Deckly program that uses the system web view
   (WebView2 on Windows, WebKitGTK on Linux, WKWebView on macOS). Windows
   builds made with the GNU toolchain also need `WebView2Loader.dll` next to
   it; the build copies it there.
+- On Windows, selecting a plugin key opens its settings page in the lower
+  panel, with a label identifying the plugin. On Linux and macOS, use
+  "Open Settings" to open a separate window. The web engine stays in the
+  helper process on every platform.
 - Native plugins run only on the system they were built for.
 - Copies installed through the official marketplace are encrypted and
   cannot be used; get the plugin from its author's own download instead.

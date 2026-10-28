@@ -48,7 +48,12 @@ fn copy_loader() -> Result<(), String> {
     // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out.
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").map_err(|e| e.to_string())?);
     let profile = out_dir.ancestors().nth(3).ok_or("unexpected OUT_DIR")?;
-    std::fs::copy(&dll, profile.join("WebView2Loader.dll"))
-        .map_err(|e| format!("{}: {e}", dll.display()))?;
+    let target = profile.join("WebView2Loader.dll");
+    // A running deckly-web keeps the copy locked; an equal one can stay.
+    let source = std::fs::read(&dll).map_err(|e| format!("{}: {e}", dll.display()))?;
+    if std::fs::read(&target).is_ok_and(|bytes| bytes == source) {
+        return Ok(());
+    }
+    std::fs::copy(&dll, &target).map_err(|e| format!("{}: {e}", dll.display()))?;
     Ok(())
 }
