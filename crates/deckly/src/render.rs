@@ -19,17 +19,25 @@ const ICON_BACKGROUND: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_COLOR: [u8; 3] = [0xE6, 0xE7, 0xEA];
 const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;
+/// How large a held key's picture is drawn, as a fraction of the key. The
+/// device has no press effect of its own; the host sends a smaller picture.
+const PRESSED_SCALE: f32 = 0.85;
 
 /// What a key shows that is not in its configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Live {
     /// The current page number, counted from 1.
     pub page: usize,
+    /// The key is held down.
+    pub pressed: bool,
 }
 
 impl Default for Live {
     fn default() -> Self {
-        Self { page: 1 }
+        Self {
+            page: 1,
+            pressed: false,
+        }
     }
 }
 
@@ -92,6 +100,9 @@ impl Renderer {
         {
             draw_title(&mut img, font, &key.title, &style, size);
         }
+        if live.pressed {
+            img = shrink(&img);
+        }
         img
     }
 
@@ -113,8 +124,9 @@ impl Renderer {
                 actions::str_setting(&key.settings, "media").hash(&mut h);
             }
             if key.action == actions::PAGE_INDICATOR {
-                live.hash(&mut h);
+                live.page.hash(&mut h);
             }
+            live.pressed.hash(&mut h);
         }
         h.finish()
     }
@@ -160,6 +172,18 @@ fn fit_image(src: &RgbaImage, size: u32) -> RgbaImage {
     }
     // Lanczos keeps fine edges sharp when a large picture shrinks to a key.
     imageops::resize(&flat, size, size, imageops::FilterType::Lanczos3)
+}
+
+/// A held key: the whole picture, title included, smaller and centred on
+/// black.
+fn shrink(img: &RgbaImage) -> RgbaImage {
+    let size = img.width();
+    let small = ((size as f32 * PRESSED_SCALE).round() as u32).clamp(1, size);
+    let scaled = imageops::resize(img, small, small, imageops::FilterType::Triangle);
+    let mut out = RgbaImage::from_pixel(size, size, EMPTY);
+    let offset = i64::from((size - small) / 2);
+    imageops::overlay(&mut out, &scaled, offset, offset);
+    out
 }
 
 fn has_title(key: &KeyConfig, style: &TitleStyle) -> bool {
@@ -645,14 +669,45 @@ mod tests {
     fn page_indicator_shows_the_live_page() {
         let mut r = Renderer::new();
         let key = KeyConfig::new(actions::PAGE_INDICATOR, json!({}));
-        let (one, two) = (Live { page: 1 }, Live { page: 2 });
+        let one = Live::default();
+        let two = Live { page: 2, ..one };
         assert_ne!(r.key_hash(Some(&key), one), r.key_hash(Some(&key), two));
         assert_ne!(r.render(Some(&key), 72, one), r.render(Some(&key), 72, two));
         // A three-digit page still fits.
-        assert_eq!(r.render(Some(&key), 72, Live { page: 100 }).width(), 72);
+        assert_eq!(
+            r.render(Some(&key), 72, Live { page: 100, ..one }).width(),
+            72
+        );
         // Other keys do not depend on the page.
         let other = KeyConfig::new(actions::HOTKEY, json!({}));
         assert_eq!(r.key_hash(Some(&other), one), r.key_hash(Some(&other), two));
+    }
+
+    #[test]
+    fn held_keys_are_drawn_smaller() {
+        let mut r = Renderer::new();
+        let path = std::env::temp_dir().join(format!("deckly-pressed-{}.png", std::process::id()));
+        RgbaImage::from_pixel(80, 80, Rgba([255, 255, 255, 255]))
+            .save(&path)
+            .unwrap();
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.image = Some(path.clone());
+        let up = Live::default();
+        let down = Live {
+            pressed: true,
+            ..up
+        };
+        assert_ne!(r.key_hash(Some(&key), up), r.key_hash(Some(&key), down));
+        let normal = r.render(Some(&key), 72, up);
+        let held = r.render(Some(&key), 72, down);
+        assert_eq!(held.dimensions(), (72, 72));
+        // The picture fills the key normally and leaves a black frame held.
+        assert_eq!(normal.get_pixel(1, 1).0, [255, 255, 255, 255]);
+        assert_eq!(held.get_pixel(1, 1), &EMPTY);
+        assert_eq!(held.get_pixel(36, 36).0, [255, 255, 255, 255]);
+        // An empty key looks the same either way, so nothing is resent.
+        assert_eq!(r.key_hash(None, up), r.key_hash(None, down));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

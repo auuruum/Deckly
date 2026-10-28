@@ -107,6 +107,7 @@ impl State {
     pub fn live(&self, profile: &Profile) -> Live {
         Live {
             page: self.page(profile) + 1,
+            pressed: false,
         }
     }
 
@@ -323,14 +324,13 @@ pub fn start(state: Shared, repaint: Repaint) -> Sender<Msg> {
                     key,
                     pressed,
                 }) => {
-                    let covered = links.get(&handle).is_some_and(|l| l.screensaver);
                     let run = key_event(&state, &devices, &mut links, handle, key, pressed);
                     if let Some(config) = run {
                         let _ = actions.send((handle, config));
                     }
-                    if covered {
-                        refresh(&state, &devices, &mut renderer, &mut links);
-                    }
+                    // Shows the held key smaller (or normal again), and the
+                    // keys a screensaver covered.
+                    refresh(&state, &devices, &mut renderer, &mut links);
                     repaint();
                 }
                 Msg::Standby { serial, image } => {
@@ -436,13 +436,15 @@ fn key_event(
     pressed: bool,
 ) -> Option<KeyConfig> {
     let link = links.get_mut(&handle)?;
-    if !link.enabled {
-        return None;
-    }
     let key = link.orientation.map_key(physical, link.model.key_count());
     let mut s = lock(state);
+    // A release always counts, so no key stays held after the device was
+    // disabled with a key down.
     if !pressed {
         s.pressed.remove(&(handle, key));
+        return None;
+    }
+    if !link.enabled {
         return None;
     }
     link.active_at = Instant::now();
@@ -646,9 +648,12 @@ fn apply_outcome(
     }
 }
 
+/// A key's configuration and what it shows besides, as sent to a device.
+type KeyView = (Option<KeyConfig>, Live);
+
 fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, links: &mut Links) {
     // Collect the work under the lock, render without it.
-    let mut work: Vec<(Handle, Vec<Option<KeyConfig>>, Live)> = Vec::new();
+    let mut work: Vec<(Handle, Vec<KeyView>)> = Vec::new();
     {
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style;
@@ -667,17 +672,21 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
                 .unwrap_or_default();
             let live = profile.map(|p| s.live(p)).unwrap_or_default();
             let keys = (0..d.model.key_count())
-                .map(|k| page.keys.get(&k).cloned())
+                .map(|k| {
+                    let pressed = s.pressed.contains(&(d.handle, k));
+                    (page.keys.get(&k).cloned(), Live { pressed, ..live })
+                })
                 .collect();
-            work.push((d.handle, keys, live));
+            work.push((d.handle, keys));
         }
     }
-    for (handle, keys, live) in work {
+    for (handle, keys) in work {
         let Some(link) = links.get_mut(&handle) else {
             continue;
         };
         let count = link.model.key_count();
-        for (index, key) in keys.iter().enumerate() {
+        for (index, (key, live)) in keys.iter().enumerate() {
+            let live = *live;
             let hash = renderer.key_hash(key.as_ref(), live);
             let Some(slot) = link.sent.get_mut(index) else {
                 continue;
