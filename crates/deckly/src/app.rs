@@ -13,7 +13,7 @@ use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
 use deckly_core::profile::MAX_FOLDER_DEPTH;
-use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleAlign, TitleStyle};
+use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleStyle};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
     TextureOptions, Ui, Vec2, pos2, vec2,
@@ -34,7 +34,6 @@ const MIN_INSPECTOR: f32 = 150.0;
 const MAX_LIST_WIDTH: f32 = 560.0;
 /// The canvas keeps at least this width when the action list is widened.
 const MIN_CANVAS_WIDTH: f32 = 554.0;
-const TITLE_SIZES: [u8; 12] = [7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ListTab {
@@ -1019,13 +1018,13 @@ impl App {
                     .spacing(vec2(14.0, 10.0))
                     .show(ui, |ui| {
                         ui.label(RichText::new("Title").color(TEXT_DIM));
-                        ui.vertical(|ui| {
+                        ui.horizontal_top(|ui| {
                             ui.add(
                                 egui::TextEdit::multiline(&mut key.title)
-                                    .desired_rows(2)
+                                    .desired_rows(1)
                                     .desired_width(260.0),
                             );
-                            title_style_row(ui, &mut key.title_style, defaults);
+                            title_style_button(ui, &mut key.title_style, defaults);
                         });
                         ui.end_row();
                         self.action_form(ui, key, &profiles, page_count);
@@ -1489,37 +1488,80 @@ fn action_row(ui: &mut Ui, action: &'static actions::ActionDef) {
     .on_hover_text(action.tooltip);
 }
 
-/// Title show, colour, size and position. Editing makes the key keep its
-/// own style; the reset button makes it follow the global style again.
-fn title_style_row(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: TitleStyle) {
+/// The "T" button beside the title field. It opens the title's show,
+/// position, size and colour, like the official app's. Editing makes the key
+/// keep its own style; the reset button makes it follow the global style
+/// again.
+fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: TitleStyle) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 24.0), Sense::click());
+    let resp = resp.on_hover_text("Title style");
+    let popup = egui::Popup::from_toggle_button_response(&resp)
+        // Clicks in the colour picker's own popup must not close this one.
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(4.0)
+        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)));
+    let popup_id = popup.get_id();
+    let lit = popup.is_open() || resp.hovered();
+    let p = ui.painter();
+    if lit {
+        p.rect_filled(rect, CornerRadius::same(3), FIELD);
+    }
+    let color = if lit { TEXT } else { TEXT_DIM };
+    let y = rect.center().y;
+    p.text(
+        pos2(rect.left() + 13.0, y),
+        Align2::CENTER_CENTER,
+        icon::TEXT_T,
+        font(17.0),
+        color,
+    );
+    p.text(
+        pos2(rect.right() - 9.0, y),
+        Align2::CENTER_CENTER,
+        icon::CARET_DOWN,
+        font(11.0),
+        color,
+    );
+
     let mut s = style.unwrap_or(defaults);
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut s.show, "Show");
-        ui.color_edit_button_srgb(&mut s.color);
-        egui::ComboBox::from_id_salt("title-size")
-            .selected_text(format!("{} pt", s.size))
-            .width(70.0)
-            .show_ui(ui, |ui| {
-                for size in TITLE_SIZES {
-                    ui.selectable_value(&mut s.size, size, format!("{size} pt"));
-                }
-            });
-        for align in TitleAlign::ALL {
-            ui.selectable_value(&mut s.align, align, align.label());
-        }
-        if style.is_some()
-            && ui
-                .button(icon::ARROW_COUNTER_CLOCKWISE)
-                .on_hover_text("Use the global title style from Preferences")
-                .clicked()
-        {
-            *style = None;
-            return;
-        }
-        if s != style.unwrap_or(defaults) {
-            *style = Some(s);
-        }
+    let mut reset = false;
+    let shown = popup.show(|ui| {
+        let (area, _) = ui.allocate_exact_size(vec2(252.0, 61.0), Sense::hover());
+        prefs::title_style_controls(ui, area.min, &mut s);
+        let r = Rect::from_min_size(area.min + vec2(228.0, 0.0), Vec2::splat(24.0));
+        ui.painter().rect_stroke(
+            r,
+            CornerRadius::same(3),
+            Stroke::new(1.0, PREF_SEGMENT),
+            egui::StrokeKind::Inside,
+        );
+        reset = prefs::icon_button(ui, r, icon::ARROW_COUNTER_CLOCKWISE, style.is_some())
+            .on_hover_text("Use the global title style from Preferences")
+            .clicked();
     });
+    // Close on a click in the window itself, not in this or another popup.
+    if shown.is_some()
+        && !resp.clicked()
+        && let Some(pos) = ui.input(|i| {
+            i.pointer
+                .any_click()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        })
+        && ui
+            .ctx()
+            .layer_id_at(pos)
+            .is_none_or(|l| matches!(l.order, egui::Order::Background | egui::Order::Middle))
+    {
+        egui::Popup::close_id(ui.ctx(), popup_id);
+    }
+
+    if reset {
+        *style = None;
+    } else if s != style.unwrap_or(defaults) {
+        *style = Some(s);
+    }
 }
 
 fn hint(ui: &mut Ui, text: &str) {

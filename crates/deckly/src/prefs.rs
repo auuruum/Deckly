@@ -818,82 +818,7 @@ impl Preferences {
         let mut style = self.style.unwrap_or(saved);
         label(ui, o, 61.0, 20.0, "Global Title Style:");
         label(ui, o, 95.0, 86.0, "Keys:");
-        let painter = ui.painter().clone();
-
-        checkbox(
-            ui,
-            at(o, 219.0, 97.0, 90.0, 20.0),
-            &mut style.show,
-            "Show Title",
-        );
-
-        // Title position: bottom, middle, top.
-        let positions = [
-            (TitleAlign::Bottom, icon::ALIGN_BOTTOM_SIMPLE),
-            (TitleAlign::Middle, icon::ALIGN_CENTER_VERTICAL_SIMPLE),
-            (TitleAlign::Top, icon::ALIGN_TOP_SIMPLE),
-        ];
-        let group = at(o, 343.0, 95.0, 90.0, 24.0);
-        painter.rect_filled(group, CornerRadius::same(3), PREF_SEGMENT);
-        for (i, (align, glyph)) in positions.into_iter().enumerate() {
-            let r = at(o, 343.0 + 30.0 * i as f32, 95.0, 30.0, 24.0);
-            let resp = ui
-                .interact(r, ui.id().with(("title-align", i)), Sense::click())
-                .on_hover_text(align.label());
-            if style.align == align {
-                painter.rect_filled(r.shrink(1.0), CornerRadius::same(3), PREF_CHECK);
-            }
-            let color = if style.align == align || resp.hovered() {
-                TEXT
-            } else {
-                TEXT_DIM
-            };
-            painter.text(r.center(), Align2::CENTER_CENTER, glyph, font(16.0), color);
-            if resp.clicked() {
-                style.align = align;
-            }
-        }
-
-        // Size in px with up/down buttons.
-        let size = at(o, 219.0, 132.0, 48.0, 24.0);
-        painter.rect(
-            size,
-            CornerRadius::same(3),
-            PREF_FIELD,
-            Stroke::new(1.0, PREF_SEGMENT),
-            egui::StrokeKind::Inside,
-        );
-        painter.text(
-            size.center(),
-            Align2::CENTER_CENTER,
-            format!("{} px", style.size),
-            font(13.0),
-            TEXT,
-        );
-        let up = at(o, 275.0, 132.0, 14.0, 12.0);
-        let down = at(o, 275.0, 144.0, 14.0, 12.0);
-        if small_icon_button(ui, up, icon::CARET_UP, style.size < TitleStyle::MAX_SIZE).clicked() {
-            style.size += 1;
-        }
-        if small_icon_button(
-            ui,
-            down,
-            icon::CARET_DOWN,
-            style.size > TitleStyle::MIN_SIZE,
-        )
-        .clicked()
-        {
-            style.size -= 1;
-        }
-
-        // Colour.
-        ui.scope_builder(
-            egui::UiBuilder::new().max_rect(at(o, 301.0, 134.0, 30.0, 20.0)),
-            |ui| {
-                ui.spacing_mut().interact_size = vec2(30.0, 20.0);
-                egui::color_picker::color_edit_button_srgb(ui, &mut style.color);
-            },
-        );
+        title_style_controls(ui, o + vec2(219.0, 95.0), &mut style);
 
         // Preview.
         let preview = at(o, 443.0, 86.0, 78.0, 78.0);
@@ -1072,6 +997,90 @@ fn rename_profile(env: &mut Env<'_>, id: &str, text: &str) {
     let _ = env.runtime.send(Msg::Refresh);
 }
 
+/// Show, position, size and colour controls for a title style, laid out
+/// like the official app's: the check box and position buttons on top, the
+/// size and colour under them. `o` is the top left of a 214 x 61 area.
+pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle) {
+    let painter = ui.painter().clone();
+    checkbox(
+        ui,
+        at(o, 0.0, 2.0, 90.0, 20.0),
+        &mut style.show,
+        "Show Title",
+    );
+
+    // Title position: bottom, middle, top.
+    let positions = [
+        (TitleAlign::Bottom, icon::ALIGN_BOTTOM_SIMPLE),
+        (TitleAlign::Middle, icon::ALIGN_CENTER_VERTICAL_SIMPLE),
+        (TitleAlign::Top, icon::ALIGN_TOP_SIMPLE),
+    ];
+    painter.rect_filled(
+        at(o, 124.0, 0.0, 90.0, 24.0),
+        CornerRadius::same(3),
+        PREF_SEGMENT,
+    );
+    for (i, (align, glyph)) in positions.into_iter().enumerate() {
+        let r = at(o, 124.0 + 30.0 * i as f32, 0.0, 30.0, 24.0);
+        let resp = ui
+            .interact(r, ui.id().with(("title-align", i)), Sense::click())
+            .on_hover_text(align.label());
+        if style.align == align {
+            painter.rect_filled(r.shrink(1.0), CornerRadius::same(3), PREF_CHECK);
+        }
+        let color = if style.align == align || resp.hovered() {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        painter.text(r.center(), Align2::CENTER_CENTER, glyph, font(16.0), color);
+        if resp.clicked() {
+            style.align = align;
+        }
+    }
+
+    // Size in px with up/down buttons.
+    let size = at(o, 0.0, 37.0, 48.0, 24.0);
+    painter.rect(
+        size,
+        CornerRadius::same(3),
+        PREF_FIELD,
+        Stroke::new(1.0, PREF_SEGMENT),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        size.center(),
+        Align2::CENTER_CENTER,
+        format!("{} px", style.size),
+        font(13.0),
+        TEXT,
+    );
+    let up = at(o, 56.0, 37.0, 14.0, 12.0);
+    let down = at(o, 56.0, 49.0, 14.0, 12.0);
+    if small_icon_button(ui, up, icon::CARET_UP, style.size < TitleStyle::MAX_SIZE).clicked() {
+        style.size += 1;
+    }
+    if small_icon_button(
+        ui,
+        down,
+        icon::CARET_DOWN,
+        style.size > TitleStyle::MIN_SIZE,
+    )
+    .clicked()
+    {
+        style.size -= 1;
+    }
+
+    // Colour.
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(at(o, 82.0, 39.0, 30.0, 20.0)),
+        |ui| {
+            ui.spacing_mut().interact_size = vec2(30.0, 20.0);
+            egui::color_picker::color_edit_button_srgb(ui, &mut style.color);
+        },
+    );
+}
+
 fn at(o: Pos2, x: f32, y: f32, w: f32, h: f32) -> Rect {
     Rect::from_min_size(o + vec2(x, y), vec2(w, h))
 }
@@ -1138,7 +1147,7 @@ pub(crate) fn button(ui: &mut Ui, rect: Rect, text: &str) -> egui::Response {
     )
 }
 
-fn icon_button(ui: &mut Ui, rect: Rect, glyph: &str, enabled: bool) -> egui::Response {
+pub(crate) fn icon_button(ui: &mut Ui, rect: Rect, glyph: &str, enabled: bool) -> egui::Response {
     let sense = if enabled {
         Sense::click()
     } else {
