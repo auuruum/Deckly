@@ -63,7 +63,7 @@ impl Renderer {
         };
         let style = self.title_style(key);
         let mut img = match key.image.as_deref().and_then(|p| self.custom_image(p)) {
-            Some(src) => imageops::resize(src, size, size, imageops::FilterType::Triangle),
+            Some(src) => fit_image(src, size),
             None => {
                 let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
                 let lift = if has_title(key, &style) && style.align == TitleAlign::Bottom {
@@ -144,6 +144,22 @@ impl Renderer {
             })
             .as_ref()
     }
+}
+
+/// Scales a custom image to a key. Transparent pixels are flattened onto the
+/// key's black first: the device has no alpha, and scaling the colour of
+/// transparent pixels (often white or gray) would leave halos on the edges.
+fn fit_image(src: &RgbaImage, size: u32) -> RgbaImage {
+    let mut flat = src.clone();
+    for px in flat.pixels_mut() {
+        let a = u32::from(px.0[3]);
+        for c in &mut px.0[..3] {
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+        px.0[3] = 255;
+    }
+    // Lanczos keeps fine edges sharp when a large picture shrinks to a key.
+    imageops::resize(&flat, size, size, imageops::FilterType::Lanczos3)
 }
 
 fn has_title(key: &KeyConfig, style: &TitleStyle) -> bool {
@@ -453,6 +469,19 @@ fn draw_title(img: &mut RgbaImage, font: &FontArc, title: &str, style: &TitleSty
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn transparent_pixels_become_black() {
+        let mut src = RgbaImage::from_pixel(64, 64, Rgba([255, 255, 255, 0]));
+        for y in 24..40 {
+            for x in 24..40 {
+                src.put_pixel(x, y, Rgba([0, 200, 0, 255]));
+            }
+        }
+        let out = fit_image(&src, 32);
+        assert_eq!(out.get_pixel(1, 1).0, [0, 0, 0, 255]);
+        assert_eq!(out.get_pixel(16, 16).0, [0, 200, 0, 255]);
+    }
 
     #[test]
     fn renders_requested_sizes() {
