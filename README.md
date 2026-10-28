@@ -10,9 +10,20 @@ An independent, open-source app for Stream Deck hardware, written in pure Rust.
 
 ## Build
 
+Run from the repository root:
+
 ```sh
-cargo run --release
+cargo dev
 ```
+
+This builds the whole workspace, including the separate `deckly-web` helper,
+then starts the editor. A failed build stops the launch. For an optimized
+build, use `cargo dev --release`. Plain `cargo run` and `cargo run --release`
+from the repository root use the same launcher.
+
+Close existing Deckly instances before rebuilding, especially on Windows,
+where a running executable cannot be replaced. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for development switches and checks.
 
 Close the official Stream Deck app first: both apps cannot drive the same device at once.
 

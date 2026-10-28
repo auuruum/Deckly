@@ -14,23 +14,50 @@ before your first change.
 Development build (fast to compile, not optimized):
 
 ```sh
-cargo run
+cargo dev
 ```
 
 Release build (slower to compile, runs like the shipped app; use it to check
 speed, since egui can feel slow in a debug build):
 
 ```sh
-cargo run --release
+cargo dev --release
 ```
+
+Run these commands from the repository root. The Rust `xtask` launcher first
+builds the whole workspace, including `deckly` and its separate `deckly-web`
+helper, and starts the editor only if the build succeeds. Plain `cargo run`
+and `cargo run --release` from the root use the same launcher.
+
+Close existing Deckly instances before rebuilding. Windows locks running
+executables, so an old editor or helper can prevent a successful build.
+
+`cargo run -p deckly` is a direct editor launch: Cargo builds only that
+package and its dependencies, so it can leave `deckly-web` out of date.
+Use the developer launcher for normal development. To build everything
+without opening windows or starting plugins:
+
+```sh
+cargo dev --no-run
+```
+
+The launcher does not run the test suite automatically; use the checks below
+before pushing. The web engine stays in the helper process; the launcher
+adds no web dependencies to the editor.
 
 Development switches:
 
 - `DECKLY_NO_DEVICES=1`: open the editor without touching any device.
 - `DECKLY_DEBUG=1`: print device events and action results.
 
-Set them per shell. PowerShell: `$env:DECKLY_NO_DEVICES=1; cargo run`.
-Bash: `DECKLY_NO_DEVICES=1 cargo run`.
+Set them per shell. PowerShell:
+
+```powershell
+$env:DECKLY_NO_DEVICES = '1'
+cargo dev
+```
+
+Bash: `DECKLY_NO_DEVICES=1 cargo dev`.
 
 ## Check before you push
 
