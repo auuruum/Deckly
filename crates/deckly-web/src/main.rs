@@ -137,7 +137,11 @@ fn run() -> Result<(), String> {
     let builder = match page.owner.filter(|_| placed) {
         Some(owner) => {
             use tao::platform::windows::WindowBuilderExtWindows;
-            builder.with_parent_window(owner).with_skip_taskbar(true)
+            // Tao enables a shadow by default, reserving an 8 px non-client inset.
+            builder
+                .with_parent_window(owner)
+                .with_undecorated_shadow(false)
+                .with_skip_taskbar(true)
         }
         None => builder,
     };

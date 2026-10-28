@@ -194,3 +194,33 @@ Cross-target checks of `deckly` and `deckly-plugin-host` passed for
 not cross-checked: its GTK/WebKitGTK and Apple SDK requirements are not
 available in this Windows environment. Linux and macOS runtime behaviour
 and their system webviews remain untested.
+
+## Inspector frame regression (2026-10-28)
+
+Observed from the owner's screenshots: the settings page retained side and
+bottom strips after rebuilding both programs, including at the minimum
+editor window size. The earlier child-window change did not remove them.
+
+Reproduced without Computer Use or user input by
+`crates/deckly-web/tests/inspector_geometry.rs`. It creates its own hidden
+Tao parent, starts the real `deckly-web` executable with an independently
+written HTML fixture, sends placement commands, and reads Win32 outer,
+client and WebView container rectangles. No camera is used.
+
+Before the fix, `place 150 600 400 140` produced an outer rectangle of
+`[150, 600, 416, 148]` and a client rectangle of `[158, 600, 400, 140]`.
+The regression test failed. The owning Tao source initializes undecorated
+shadows to true and reserves non-client insets for that shadow.
+
+Fix: explicitly disable the undecorated shadow for the Windows inspector
+child. This uses Tao's existing builder option, with no production FFI or
+new dependency. The test now confirms identical outer, client and WebView
+rectangles at `[150, 600, 400, 140]`, `[25, 30, 720, 300]` and
+`[150, 600, 320, 120]` in one helper process, covering repeated resizing.
+
+Validation: 113 workspace tests and clippy passed on Windows; the developer
+launcher rebuilt the debug artifacts. This verifies live native geometry,
+not a captured image of the owner's updated window. The owner subsequently
+ran the updated app and confirmed that the fix works (2026-10-28).
+Computer Use was discontinued at the owner's request. No new Linux/macOS
+runtime or hardware claim is made.
