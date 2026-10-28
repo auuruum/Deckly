@@ -1010,17 +1010,13 @@ pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle)
     );
 
     // Title position: bottom, middle, top.
-    let positions = [
-        (TitleAlign::Bottom, icon::ALIGN_BOTTOM_SIMPLE),
-        (TitleAlign::Middle, icon::ALIGN_CENTER_VERTICAL_SIMPLE),
-        (TitleAlign::Top, icon::ALIGN_TOP_SIMPLE),
-    ];
+    let positions = [TitleAlign::Bottom, TitleAlign::Middle, TitleAlign::Top];
     painter.rect_filled(
         at(o, 124.0, 0.0, 90.0, 24.0),
         CornerRadius::same(3),
         PREF_SEGMENT,
     );
-    for (i, (align, glyph)) in positions.into_iter().enumerate() {
+    for (i, align) in positions.into_iter().enumerate() {
         let r = at(o, 124.0 + 30.0 * i as f32, 0.0, 30.0, 24.0);
         let resp = ui
             .interact(r, ui.id().with(("title-align", i)), Sense::click())
@@ -1033,7 +1029,7 @@ pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle)
         } else {
             TEXT_DIM
         };
-        painter.text(r.center(), Align2::CENTER_CENTER, glyph, font(16.0), color);
+        title_position_icon(&painter, r.center(), align, color);
         if resp.clicked() {
             style.align = align;
         }
@@ -1078,6 +1074,26 @@ pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle)
             ui.spacing_mut().interact_size = vec2(30.0, 20.0);
             egui::color_picker::color_edit_button_srgb(ui, &mut style.color);
         },
+    );
+}
+
+/// A key outline with a line where the title sits.
+fn title_position_icon(painter: &egui::Painter, center: Pos2, align: TitleAlign, color: Color32) {
+    let key = Rect::from_center_size(center, Vec2::splat(14.0));
+    painter.rect_stroke(
+        key,
+        CornerRadius::same(2),
+        Stroke::new(1.5, color),
+        egui::StrokeKind::Inside,
+    );
+    let y = match align {
+        TitleAlign::Top => key.top() + 3.5,
+        TitleAlign::Middle => key.center().y,
+        TitleAlign::Bottom => key.bottom() - 3.5,
+    };
+    painter.line_segment(
+        [pos2(key.left() + 3.5, y), pos2(key.right() - 3.5, y)],
+        Stroke::new(2.0, color),
     );
 }
 
