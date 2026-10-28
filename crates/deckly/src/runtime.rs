@@ -657,6 +657,7 @@ fn refresh(state: &Shared, devices: &DeviceManager, renderer: &mut Renderer, lin
     {
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style;
+        renderer.key_press = s.settings.key_press;
         for d in &s.devices {
             // A screensaver keeps its keys until the device wakes.
             if !links

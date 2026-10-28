@@ -9,7 +9,8 @@
   2. The HID protocol notes in [2026-10-25-mk2-hid.md](2026-10-25-mk2-hid.md)
      and [2026-10-26-elgato-hid-docs.md](2026-10-26-elgato-hid-docs.md).
 - **Implemented in:** `crates/deckly/src/render.rs` (`Live::pressed`,
-  `shrink`), `crates/deckly/src/runtime.rs` (`refresh` after every key event)
+  `shrink`), `crates/deckly/src/runtime.rs` (`refresh` after every key event),
+  `crates/deckly-core/src/settings.rs` (`KeyPress`), Preferences > Style
 
 ## Observed
 
@@ -28,10 +29,13 @@
 
 ## Unknown and next steps
 
-1. The exact scale. Deckly draws the held picture at 85% of the key, centred
-   on black (`PRESSED_SCALE`); compare side by side with the official app, or
-   capture the uploaded image over USB, and adjust.
-2. Whether the official app shrinks empty keys (Deckly leaves them as they
+1. The exact scale. Deckly draws the held picture at 85% of the key by
+   default, centred on black; compare side by side with the official app, or
+   capture the uploaded image over USB, and adjust the default.
+2. Whether the official app lets the user turn the effect off or change its
+   size. Deckly does (Preferences > Style > Key Press, 50% to 95%); this is
+   Deckly's own addition until observed otherwise.
+3. Whether the official app shrinks empty keys (Deckly leaves them as they
    are, since black shrinks to black) and keys whose action changes the page
    on press.
-3. Whether the title shrinks with the picture (Deckly shrinks both).
+4. Whether the title shrinks with the picture (Deckly shrinks both).

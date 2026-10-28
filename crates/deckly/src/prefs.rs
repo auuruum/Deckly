@@ -14,7 +14,9 @@ use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
-use deckly_core::{DeviceKind, DeviceModel, KeyConfig, Orientation, TitleAlign, TitleStyle};
+use deckly_core::{
+    DeviceKind, DeviceModel, KeyConfig, KeyPress, Orientation, TitleAlign, TitleStyle,
+};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Pos2, Rect, RichText, Sense, Stroke,
     TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
@@ -930,6 +932,55 @@ impl Preferences {
             .clicked()
         {
             self.style = None;
+        }
+
+        self.key_press(ui, o, env);
+    }
+
+    /// The press effect, saved as soon as it changes.
+    fn key_press(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        let mut s = runtime::lock(env.state);
+        let before = s.settings.key_press;
+        let mut press = before;
+        label(ui, o, 275.0, 22.0, "Key Press:");
+        toggle(
+            ui,
+            at(o, 219.0, 278.0, 220.0, 18.0),
+            &mut press.shrink,
+            "Shrink keys while held",
+        );
+        let slider = at(o, 219.0, 310.0, 300.0, 20.0);
+        let resp = ui
+            .add_enabled_ui(press.shrink, |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(slider), |ui| {
+                    ui.spacing_mut().slider_width = slider.width();
+                    ui.add(
+                        egui::Slider::new(&mut press.size, KeyPress::MIN_SIZE..=KeyPress::MAX_SIZE)
+                            .show_value(false),
+                    )
+                })
+                .inner
+            })
+            .inner;
+        value(ui, o, 531.0, 309.0, 22.0, &format!("{}%", press.size));
+        value_dim(
+            ui,
+            o,
+            219.0,
+            340.0,
+            480.0,
+            "Size of a held key's picture on the device.",
+        );
+        if press != before {
+            s.settings.key_press = press;
+            // A dragged slider is saved once it is let go.
+            if !resp.dragged() {
+                s.save_settings();
+            }
+            drop(s);
+            let _ = env.runtime.send(Msg::Settings);
+        } else if resp.drag_stopped() {
+            s.save_settings();
         }
     }
 

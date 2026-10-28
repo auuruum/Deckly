@@ -31,6 +31,8 @@ pub struct Settings {
     pub devices: BTreeMap<String, DeviceSettings>,
     /// Title style of keys that do not set their own.
     pub title_style: TitleStyle,
+    /// How a held key looks on the device.
+    pub key_press: KeyPress,
 }
 
 impl Default for Settings {
@@ -40,6 +42,35 @@ impl Default for Settings {
             assignments: BTreeMap::new(),
             devices: BTreeMap::new(),
             title_style: TitleStyle::default(),
+            key_press: KeyPress::default(),
+        }
+    }
+}
+
+/// The press effect: a held key's picture drawn smaller
+/// (docs/clean-room/2026-10-28-key-press-feedback.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyPress {
+    pub shrink: bool,
+    /// Size of the held picture in percent of the key.
+    pub size: u8,
+}
+
+impl KeyPress {
+    pub const MIN_SIZE: u8 = 50;
+    pub const MAX_SIZE: u8 = 95;
+
+    pub fn sanitize(&mut self) {
+        self.size = self.size.clamp(Self::MIN_SIZE, Self::MAX_SIZE);
+    }
+}
+
+impl Default for KeyPress {
+    fn default() -> Self {
+        Self {
+            shrink: true,
+            size: 85,
         }
     }
 }
@@ -215,6 +246,7 @@ impl Settings {
             }
         }
         self.title_style.sanitize();
+        self.key_press.sanitize();
     }
 }
 
@@ -241,6 +273,10 @@ mod tests {
         d.sleep_minutes = 30;
         d.screensaver = Some(PathBuf::from("screensavers/SER.png"));
         s.title_style.size = 16;
+        s.key_press = KeyPress {
+            shrink: false,
+            size: 70,
+        };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
     }
@@ -250,7 +286,7 @@ mod tests {
         let long = "x".repeat(500);
         let text = format!(
             r#"{{"brightness":250,"devices":{{"S":{{"name":"{long}","brightness":200,"sleep_minutes":7}}}},
-            "title_style":{{"size":255}}}}"#
+            "title_style":{{"size":255}},"key_press":{{"size":5}}}}"#
         );
         let s = Settings::from_json(&text).unwrap();
         assert_eq!(s.brightness, 100);
@@ -259,6 +295,7 @@ mod tests {
         assert_eq!(d.brightness, 100);
         assert_eq!(d.sleep_minutes, 0);
         assert_eq!(s.title_style.size, 40);
+        assert_eq!(s.key_press.size, KeyPress::MIN_SIZE);
     }
 
     #[test]

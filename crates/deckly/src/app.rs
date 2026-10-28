@@ -634,8 +634,10 @@ impl App {
             if config.is_some() {
                 response.dnd_set_drag_payload(DragPayload::Key(index));
             }
-            if pressed.contains(&index) {
-                rect = rect.shrink(key_size * 0.04);
+            // The live view shrinks a held key like the device does.
+            let press = self.renderer.key_press;
+            if press.shrink && pressed.contains(&index) {
+                rect = rect.shrink(key_size * f32::from(100 - press.size) / 200.0);
             }
             let hovered_drop = response.dnd_hover_payload::<DragPayload>().is_some();
             let border_color = if hovered_drop {
@@ -1330,7 +1332,12 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.renderer.title_defaults = runtime::lock(&self.state).settings.title_style;
+        let (title_style, key_press) = {
+            let s = runtime::lock(&self.state);
+            (s.settings.title_style, s.settings.key_press)
+        };
+        self.renderer.title_defaults = title_style;
+        self.renderer.key_press = key_press;
         let (device, profile_id) = self.resolve();
         let (mut profile, mut view) = {
             let s = runtime::lock(&self.state);

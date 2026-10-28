@@ -7,7 +7,8 @@
 use crate::actions;
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
-    DeviceModel, ImageFormat, KeyConfig, Orientation, Rotation, TitleAlign, TitleStyle, Turn,
+    DeviceModel, ImageFormat, KeyConfig, KeyPress, Orientation, Rotation, TitleAlign, TitleStyle,
+    Turn,
 };
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
@@ -19,9 +20,6 @@ const ICON_BACKGROUND: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_COLOR: [u8; 3] = [0xE6, 0xE7, 0xEA];
 const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;
-/// How large a held key's picture is drawn, as a fraction of the key. The
-/// device has no press effect of its own; the host sends a smaller picture.
-const PRESSED_SCALE: f32 = 0.85;
 
 /// What a key shows that is not in its configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,6 +42,9 @@ impl Default for Live {
 pub struct Renderer {
     /// Title style of keys that do not set their own.
     pub title_defaults: TitleStyle,
+    /// How held keys are drawn. The device has no press effect of its own;
+    /// the host sends a smaller picture.
+    pub key_press: KeyPress,
     title_font: Option<FontArc>,
     icon_font: Option<FontArc>,
     images: HashMap<PathBuf, Option<RgbaImage>>,
@@ -53,6 +54,7 @@ impl Renderer {
     pub fn new() -> Self {
         Self {
             title_defaults: TitleStyle::default(),
+            key_press: KeyPress::default(),
             title_font: load_title_font(),
             icon_font: FontArc::try_from_slice(egui_phosphor::Variant::Regular.font_bytes()).ok(),
             images: HashMap::new(),
@@ -100,8 +102,8 @@ impl Renderer {
         {
             draw_title(&mut img, font, &key.title, &style, size);
         }
-        if live.pressed {
-            img = shrink(&img);
+        if let Some(percent) = self.pressed_size(live) {
+            img = shrink(&img, percent);
         }
         img
     }
@@ -126,9 +128,14 @@ impl Renderer {
             if key.action == actions::PAGE_INDICATOR {
                 live.page.hash(&mut h);
             }
-            live.pressed.hash(&mut h);
+            self.pressed_size(live).hash(&mut h);
         }
         h.finish()
+    }
+
+    /// The size a key is drawn at in percent, when it is drawn smaller.
+    fn pressed_size(&self, live: Live) -> Option<u8> {
+        (live.pressed && self.key_press.shrink).then_some(self.key_press.size)
     }
 
     /// Key image for the device: its size, the model's and the user's
@@ -174,11 +181,11 @@ fn fit_image(src: &RgbaImage, size: u32) -> RgbaImage {
     imageops::resize(&flat, size, size, imageops::FilterType::Lanczos3)
 }
 
-/// A held key: the whole picture, title included, smaller and centred on
-/// black.
-fn shrink(img: &RgbaImage) -> RgbaImage {
+/// A held key: the whole picture, title included, at `percent` of its size
+/// and centred on black.
+fn shrink(img: &RgbaImage, percent: u8) -> RgbaImage {
     let size = img.width();
-    let small = ((size as f32 * PRESSED_SCALE).round() as u32).clamp(1, size);
+    let small = (size * u32::from(percent) / 100).clamp(1, size);
     let scaled = imageops::resize(img, small, small, imageops::FilterType::Triangle);
     let mut out = RgbaImage::from_pixel(size, size, EMPTY);
     let offset = i64::from((size - small) / 2);
@@ -707,6 +714,20 @@ mod tests {
         assert_eq!(held.get_pixel(36, 36).0, [255, 255, 255, 255]);
         // An empty key looks the same either way, so nothing is resent.
         assert_eq!(r.key_hash(None, up), r.key_hash(None, down));
+        // A larger shrink leaves a wider frame.
+        let frame = |img: &RgbaImage| {
+            (0..36)
+                .take_while(|&x| img.get_pixel(x, 36) == &EMPTY)
+                .count()
+        };
+        let before = frame(&held);
+        r.key_press.size = 60;
+        assert_ne!(r.key_hash(Some(&key), down), r.key_hash(Some(&key), up));
+        assert!(frame(&r.render(Some(&key), 72, down)) > before);
+        // With the effect off a held key looks like any other.
+        r.key_press.shrink = false;
+        assert_eq!(r.key_hash(Some(&key), up), r.key_hash(Some(&key), down));
+        assert_eq!(r.render(Some(&key), 72, down), normal);
         let _ = std::fs::remove_file(path);
     }
 
