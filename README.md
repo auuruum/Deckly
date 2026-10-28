@@ -30,6 +30,19 @@ Close the official Stream Deck app first: both apps cannot drive the same device
 Development switches: `DECKLY_NO_DEVICES=1` opens the editor without touching
 any device, `DECKLY_DEBUG=1` prints device events and action results.
 
+## Copy and paste actions
+
+Select a key and press Ctrl+C, then select a destination and press Ctrl+V
+(Cmd+C / Cmd+V on macOS). Empty keys receive the action immediately;
+occupied keys ask for confirmation before being replaced. Cancel or Esc
+keeps the existing action. The key's context menu offers the same commands.
+
+Copies include settings, title, title style, custom image path and a snapshot
+of any nested folders. Pasted folders are independent of the original.
+The Parent Folder key stays protected. Shortcuts in text fields continue
+to copy and paste text, and action shortcuts are disabled during hotkey
+recording and confirmation dialogs.
+
 ## Plugins
 
 Deckly runs plugins written for the Stream Deck SDK unchanged, each as its

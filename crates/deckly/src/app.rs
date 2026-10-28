@@ -6,6 +6,7 @@
 //! of the current profile each frame and writes it back when it changed.
 
 use crate::actions::{self, ACTIONS, Category};
+use crate::clipboard::{self, KeyClipboard};
 use crate::os::{Hotkey, MediaKey};
 use crate::plugins::{self, KeyImage, Overlay};
 use crate::prefs::{self, Preferences};
@@ -132,6 +133,28 @@ enum DragPayload {
     Key(u8),
 }
 
+enum KeyCommand {
+    Copy(u8),
+    Paste(u8, KeyClipboard),
+}
+
+struct PendingPaste {
+    profile: String,
+    page: String,
+    index: u8,
+    original: KeyConfig,
+    clipboard: KeyClipboard,
+}
+
+impl PendingPaste {
+    fn matches(&self, profile: &Profile, page_id: &str) -> bool {
+        self.profile == profile.id
+            && self.page == page_id
+            && clipboard::page(profile, page_id).and_then(|p| p.keys.get(&self.index))
+                == Some(&self.original)
+    }
+}
+
 pub struct App {
     state: Shared,
     runtime: Sender<Msg>,
@@ -158,7 +181,8 @@ pub struct App {
     /// settings pages.
     owner_set: bool,
     recording_hotkey: bool,
-    clipboard: Option<KeyConfig>,
+    clipboard: Option<KeyClipboard>,
+    pending_paste: Option<PendingPaste>,
     dirty: HashSet<String>,
     last_edit: Instant,
     prefs: Preferences,
@@ -225,6 +249,7 @@ impl App {
             owner_set: false,
             recording_hotkey: false,
             clipboard: None,
+            pending_paste: None,
             dirty: HashSet::new(),
             last_edit: Instant::now(),
             prefs: Preferences::new(),
@@ -901,6 +926,7 @@ impl App {
             None => HashSet::new(),
         };
         let mut changed = false;
+        let mut command = None;
         let live = view.live;
         let page_id = view
             .path
@@ -999,6 +1025,7 @@ impl App {
             if response.clicked() {
                 self.selected_key = Some(index);
                 self.recording_hotkey = false;
+                response.request_focus();
             }
             // Double-clicking a folder opens it, as in the official app.
             if response.double_clicked()
@@ -1014,23 +1041,32 @@ impl App {
                 if ui
                     .add_enabled(
                         config.is_some() && !placed,
-                        egui::Button::new(format!("{}  Copy", icon::COPY)),
+                        egui::Button::new(format!("{}  Copy", icon::COPY)).shortcut_text(
+                            ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+                                egui::Modifiers::COMMAND,
+                                egui::Key::C,
+                            )),
+                        ),
                     )
                     .clicked()
                 {
-                    self.clipboard = config.clone();
+                    command = Some(KeyCommand::Copy(index));
                     ui.close();
                 }
                 if ui
                     .add_enabled(
                         self.clipboard.is_some() && !placed,
-                        egui::Button::new(format!("{}  Paste", icon::CLIPBOARD)),
+                        egui::Button::new(format!("{}  Paste", icon::CLIPBOARD)).shortcut_text(
+                            ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+                                egui::Modifiers::COMMAND,
+                                egui::Key::V,
+                            )),
+                        ),
                     )
                     .clicked()
                 {
                     if let Some(c) = self.clipboard.clone() {
-                        keys.insert(index, c);
-                        changed = true;
+                        command = Some(KeyCommand::Paste(index, c));
                     }
                     ui.close();
                 }
@@ -1048,9 +1084,16 @@ impl App {
             });
         }
 
-        // Delete clears the selected key while no text field has focus.
-        let typing = ui.ctx().memory(|m| m.focused().is_some());
-        if !typing
+        // Grid focus is distinct from text fields, buttons and hotkey recording.
+        let grid_focus = self.selected_key.map(|index| ui.id().with(("key", index)));
+        let shortcuts = !self.recording_hotkey
+            && self.rename.is_none()
+            && self.pending_paste.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.ctx().memory(|m| {
+                m.top_modal_layer().is_none() && m.focused().is_none_or(|id| Some(id) == grid_focus)
+            });
+        if shortcuts
             && let Some(index) = self.selected_key
             && ui.input(|i| i.key_pressed(egui::Key::Delete))
             && keys
@@ -1062,6 +1105,37 @@ impl App {
         }
         if changed {
             self.mark_dirty(&profile.id);
+        }
+        if let Some(command) = command {
+            self.key_command(ui.ctx(), profile, &page_id, view.path.len(), command);
+        }
+        // winit maps Ctrl (Windows/Linux) or Cmd (macOS) to these events,
+        // including the physical-key fallback for non-Latin layouts.
+        for event in clipboard_events(ui.ctx(), shortcuts) {
+            let Some(index) = self.selected_key else {
+                continue;
+            };
+            match event {
+                egui::Event::Copy => self.key_command(
+                    ui.ctx(),
+                    profile,
+                    &page_id,
+                    view.path.len(),
+                    KeyCommand::Copy(index),
+                ),
+                egui::Event::Paste(text) => match KeyClipboard::from_text(&text) {
+                    Ok(Some(copy)) => self.key_command(
+                        ui.ctx(),
+                        profile,
+                        &page_id,
+                        view.path.len(),
+                        KeyCommand::Paste(index, copy),
+                    ),
+                    Ok(None) => {}
+                    Err(e) => runtime::lock(&self.state).notify(e),
+                },
+                _ => {}
+            }
         }
 
         if view.path.is_empty() {
@@ -1501,7 +1575,10 @@ impl App {
         let Some(host) = self.host.clone() else {
             return;
         };
-        let covered = egui::Popup::is_any_open(ctx) || self.rename.is_some();
+        let covered = egui::Popup::is_any_open(ctx)
+            || self.rename.is_some()
+            || self.pending_paste.is_some()
+            || ctx.memory(|m| m.top_modal_layer().is_some());
         let (inner, minimized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().minimized));
         let place = self
             .plugin_page_area
@@ -1726,6 +1803,99 @@ impl App {
 
     // ----- windows -------------------------------------------------------
 
+    fn key_command(
+        &mut self,
+        ctx: &egui::Context,
+        profile: &mut Profile,
+        page_id: &str,
+        folder_depth: usize,
+        command: KeyCommand,
+    ) {
+        if self.pending_paste.is_some() {
+            return;
+        }
+        match command {
+            KeyCommand::Copy(index) => {
+                if let Some(copy) = KeyClipboard::copy(profile, page_id, index) {
+                    match copy.text() {
+                        Ok(text) => {
+                            ctx.copy_text(text);
+                            self.clipboard = Some(copy);
+                        }
+                        Err(e) => runtime::lock(&self.state).notify(e),
+                    }
+                }
+            }
+            KeyCommand::Paste(index, copy) => {
+                let original = clipboard::page(profile, page_id).and_then(|p| p.keys.get(&index));
+                if original.is_some_and(|k| k.action == actions::PARENT_FOLDER) {
+                    return;
+                }
+                self.selected_key = Some(index);
+                self.recording_hotkey = false;
+                self.clipboard = Some(copy.clone());
+                if let Some(original) = original {
+                    self.pending_paste = Some(PendingPaste {
+                        profile: profile.id.clone(),
+                        page: page_id.to_owned(),
+                        index,
+                        original: original.clone(),
+                        clipboard: copy,
+                    });
+                    ctx.request_repaint();
+                } else {
+                    match copy.paste(profile, page_id, index, folder_depth) {
+                        Ok(()) => self.mark_dirty(&profile.id),
+                        Err(e) => runtime::lock(&self.state).notify(e),
+                    }
+                }
+            }
+        }
+    }
+
+    fn paste_confirmation(&mut self, ctx: &egui::Context, profile: &mut Profile, view: &View) {
+        let Some(pending) = self.pending_paste.take() else {
+            return;
+        };
+        let page_id = view
+            .path
+            .last()
+            .map(String::as_str)
+            .or_else(|| profile.pages.get(view.page).map(|p| p.id.as_str()))
+            .unwrap_or_default();
+        if !pending.matches(profile, page_id) {
+            runtime::lock(&self.state).notify("Paste cancelled: the destination changed");
+            return;
+        }
+        let mut replace = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::new("replace-action")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.heading("Replace action?");
+            ui.add_space(8.0);
+            ui.label(format!(
+                "Key {} already has an action. Are you sure you want to replace it?",
+                usize::from(pending.index) + 1,
+            ));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                cancel = ui.button("Cancel").clicked();
+                replace = ui.button("Replace").clicked();
+            });
+        });
+        if replace {
+            match pending
+                .clipboard
+                .paste(profile, &pending.page, pending.index, view.path.len())
+            {
+                Ok(()) => self.mark_dirty(&profile.id),
+                Err(e) => runtime::lock(&self.state).notify(e),
+            }
+        } else if !cancel && !modal.should_close() {
+            self.pending_paste = Some(pending);
+        }
+    }
+
     fn preferences(&mut self, ctx: &egui::Context, device: Option<&str>, kind: DeviceKind) {
         let mut env = prefs::Env {
             state: &self.state,
@@ -1907,6 +2077,8 @@ impl eframe::App for App {
             self.selected_key = None;
             self.recording_hotkey = false;
         }
+
+        self.paste_confirmation(&ctx, &mut profile, &view);
 
         // Write the edited copy back. Profile switches made this frame
         // already changed which profile is current; only write if it still
@@ -2239,6 +2411,24 @@ fn hint(ui: &mut Ui, text: &str) {
     });
 }
 
+fn clipboard_events(ctx: &egui::Context, enabled: bool) -> Vec<egui::Event> {
+    if !enabled {
+        return Vec::new();
+    }
+    ctx.input_mut(|i| {
+        let mut events = Vec::new();
+        i.events.retain(|event| {
+            if matches!(event, egui::Event::Copy | egui::Event::Paste(_)) {
+                events.push(event.clone());
+                false
+            } else {
+                true
+            }
+        });
+        events
+    })
+}
+
 /// Returns `Some(Some(hotkey))` when a combination was pressed,
 /// `Some(None)` when recording was cancelled with Esc, `None` otherwise.
 fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
@@ -2265,6 +2455,230 @@ fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
             _ => None,
         })
     })
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    fn editor() -> App {
+        let (runtime, _) = std::sync::mpsc::channel();
+        App {
+            state: Arc::new(std::sync::Mutex::new(runtime::State::new(
+                Vec::new(),
+                Default::default(),
+            ))),
+            runtime,
+            renderer: Renderer::new(),
+            textures: HashMap::new(),
+            selected_device: None,
+            offline_profile: None,
+            selected_key: Some(0),
+            search: String::new(),
+            tab: ListTab::Keys,
+            expanded: HashSet::new(),
+            host: None,
+            images: HashMap::new(),
+            plugin_page_area: None,
+            plugin_page_requested: None,
+            plugin_page_placed: None,
+            owner_set: false,
+            recording_hotkey: false,
+            clipboard: None,
+            pending_paste: None,
+            dirty: HashSet::new(),
+            last_edit: Instant::now(),
+            prefs: Preferences::new(),
+            rename: None,
+            folder_nav: None,
+            split: DEFAULT_SPLIT,
+            list_width: LIST_WIDTH,
+        }
+    }
+
+    fn frame(
+        ctx: &egui::Context,
+        app: &mut App,
+        profile: &mut Profile,
+        events: Vec<egui::Event>,
+        text_focus: bool,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let mut view = View {
+            page: 0,
+            path: Vec::new(),
+            live: Live::default(),
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(852.0, 742.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            if text_focus {
+                ui.text_edit_singleline(&mut app.search).request_focus();
+            }
+            app.canvas(ui, None, profile, &mut view);
+            app.paste_confirmation(ctx, profile, &view);
+        });
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    #[test]
+    fn keyboard_copy_pastes_empty_keys_and_cancel_preserves_occupied_keys() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let key = KeyConfig::new(actions::WEBSITE, json!({"url": "https://example.com"}));
+        profile.pages[0].keys.insert(0, key.clone());
+        frame(&ctx, &mut app, &mut profile, vec![egui::Event::Copy], false);
+        let text = app.clipboard.as_ref().unwrap().text().unwrap();
+        app.selected_key = Some(1);
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![egui::Event::Paste(text.clone())],
+            false,
+        );
+        assert_eq!(profile.pages[0].keys[&1], key);
+        assert!(app.pending_paste.is_none());
+        app.dirty.clear();
+        let original = profile.clone();
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![egui::Event::Paste(text)],
+            false,
+        );
+        assert!(app.pending_paste.is_some());
+        assert_eq!(profile, original);
+        assert!(app.dirty.is_empty());
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            false,
+        );
+        assert!(app.pending_paste.is_none());
+        assert_eq!(profile, original);
+        assert!(app.dirty.is_empty());
+    }
+
+    #[test]
+    fn text_focus_and_hotkey_recording_do_not_copy_or_paste_actions() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages[0]
+            .keys
+            .insert(0, KeyConfig::new(actions::WEBSITE, json!({})));
+        frame(&ctx, &mut app, &mut profile, vec![egui::Event::Copy], true);
+        assert!(app.clipboard.is_none());
+        app.recording_hotkey = true;
+        frame(&ctx, &mut app, &mut profile, vec![egui::Event::Copy], false);
+        assert!(app.clipboard.is_none());
+        app.recording_hotkey = false;
+        let original = profile.clone();
+        let copy = KeyClipboard::copy(&profile, &profile.pages[0].id, 0).unwrap();
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![egui::Event::Paste(copy.text().unwrap())],
+            true,
+        );
+        assert_eq!(profile, original);
+        assert!(app.pending_paste.is_none());
+    }
+
+    #[test]
+    fn confirmation_is_bound_to_the_original_profile_page_and_action() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let key = KeyConfig::new(actions::WEBSITE, json!({}));
+        profile.pages[0].keys.insert(0, key.clone());
+        let page = profile.pages[0].id.clone();
+        let pending = PendingPaste {
+            profile: profile.id.clone(),
+            page: page.clone(),
+            index: 0,
+            original: key,
+            clipboard: KeyClipboard::copy(&profile, &page, 0).unwrap(),
+        };
+        assert!(pending.matches(&profile, &page));
+        assert!(!pending.matches(&profile, "another-page"));
+        let mut other = profile.clone();
+        other.id = "another-profile".into();
+        assert!(!pending.matches(&other, &page));
+        profile.pages[0].keys.get_mut(&0).unwrap().title = "Changed by plugin".into();
+        assert!(!pending.matches(&profile, &page));
+    }
+
+    #[test]
+    fn clicking_replace_applies_only_the_confirmed_action() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let key = KeyConfig::new(actions::WEBSITE, json!({"url": "https://example.com"}));
+        profile.pages[0].keys.insert(0, key.clone());
+        profile.pages[0]
+            .keys
+            .insert(1, KeyConfig::new(actions::HOTKEY, json!({})));
+        let copy = KeyClipboard::copy(&profile, &profile.pages[0].id, 0).unwrap();
+        app.selected_key = Some(1);
+        frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![egui::Event::Paste(copy.text().unwrap())],
+            false,
+        );
+        let shapes = frame(&ctx, &mut app, &mut profile, Vec::new(), false);
+        let pos = shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.job.text == "Replace"
+                {
+                    Some(text.pos + text.galley.size() / 2.0)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        for pressed in [true, false] {
+            frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                false,
+            );
+        }
+        assert!(app.pending_paste.is_none());
+        assert_eq!(profile.pages[0].keys[&1], key);
+        assert_eq!(profile.pages[0].keys[&0], key);
+        assert!(app.dirty.contains(&profile.id));
+    }
 }
 
 #[cfg(test)]

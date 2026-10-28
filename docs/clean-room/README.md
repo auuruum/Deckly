@@ -29,6 +29,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-26 | [Official app 7.6: Navigation actions](2026-10-26-navigation-actions.md) | Action list order and icons, folders and Parent Folder, Page Indicator |
 | 2026-10-28 | [Key press feedback](2026-10-28-key-press-feedback.md) | Held keys drawn smaller on the device |
 | 2026-10-28 | [Plugin host](2026-10-28-plugin-host.md) | Plugin launch arguments, registration, info object, events and commands, manifests |
+| 2026-10-28 | [Action copy and paste](2026-10-28-action-clipboard.md) | Keyboard shortcuts, replacement confirmation, complete key and folder snapshots |
 
 ## Open questions
 

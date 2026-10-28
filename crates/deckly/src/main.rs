@@ -5,6 +5,7 @@
 
 mod actions;
 mod app;
+mod clipboard;
 mod cropper;
 mod logo;
 mod os;
