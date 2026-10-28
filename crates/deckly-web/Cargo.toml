@@ -13,6 +13,10 @@ serde_json.workspace = true
 wry = { version = "0.57.1", features = ["devtools"] }
 tao = "0.37.2"
 
+[target.'cfg(windows)'.dependencies]
+# Already used by Wry; handles native popup close requests in the helper.
+webview2-com = "0.39.1"
+
 [build-dependencies]
 serde_json.workspace = true
 

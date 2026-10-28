@@ -224,3 +224,47 @@ not a captured image of the owner's updated window. The owner subsequently
 ran the updated app and confirmed that the fix works (2026-10-28).
 Computer Use was discontinued at the owner's request. No new Linux/macOS
 runtime or hardware claim is made.
+
+## Related plugin configuration windows (2026-10-28)
+
+Sources: the owner's comparison screenshots and static REA inspection of
+installed Multi OBS Controller 0.8.1 (`dev.theca11.multiobs.sdPlugin`).
+The selected files were `propertyInspector/inspector.js`,
+`propertyInspector/configuration.js`, and `manifest.json`. REA did not execute
+those sources. Other plugin sources were outside the selected analysis.
+
+- Artifact SHA-256: `773c00b1e35c13fbb1e061b59f0f6da34b4641143eb2582df99e6c947400ec1b`.
+- REA parent Evidence: `ev_0aeeaa8c76d93afbbfc9f9026e0215809d8aef7d957aa1b8b6aee25d2f14adbb`.
+- The inspector opens its local configuration page with `window.open`.
+  That page reads global settings from its opener, submits form changes to
+  the opener, and calls it to reconnect. This is a static observation;
+  the source alone does not establish successful execution.
+- The earlier Deckly handler opened every requested HTTP URL in the default
+  browser, including its synthetic plugin origin. That browser cannot serve
+  the helper's private custom-protocol files.
+
+Implementation: local plugin pages now open as real related webviews in
+`deckly-web`. The platform's opener environment/configuration is reused, so
+`window.opener` is provided by the engine. External HTTP(S) popup links keep
+opening in the browser. Missing or escaping local files and other schemes
+are denied; at most eight popup windows may be open per helper. Closing a
+popup drops its webview and native window; closing the inspector stops the
+helper and its popup windows. A Windows WebView2 close callback also removes
+the native popup shell on `window.close()`. Shared callbacks hold weak
+references to the popup owner, avoiding an ownership cycle.
+
+Validation: the Windows runtime test in `popups::tests` uses independently
+written temporary HTML pages and real WebView2 instances in hidden test
+windows. It opens a page with `window.open`, mutates the opener's settings,
+checks the response, closes it with `window.close()`, and repeats three
+times. Every iteration leaves zero retained popup windows and one owner
+reference. This checks explicit view ownership, not total browser-process
+memory or allocator caches. URL routing and requested window-size bounds
+have unit tests. All 116 workspace tests and clippy passed.
+
+The installed multiobs popup still needs the owner's end-to-end visual and
+settings-persistence check. Linux and macOS adapters use the system related
+webview APIs but have not been runtime-tested here. No hardware or firmware
+behaviour was tested. No proprietary plugin sources or assets were copied
+into the repository. HTML plugins continue to need their background webview
+while enabled; the configuration popup's lifetime is separate.

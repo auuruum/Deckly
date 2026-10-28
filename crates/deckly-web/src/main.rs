@@ -30,9 +30,11 @@ use std::path::{Component, Path, PathBuf};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tao::window::{Theme, WindowBuilder};
+use tao::window::{Theme, Window, WindowBuilder, WindowId};
 use wry::http::{Response, header};
-use wry::{NewWindowResponse, WebViewBuilder};
+use wry::{WebView, WebViewBuilder};
+
+mod popups;
 
 /// Matches the editor's inspector background, which many pages expect.
 const BACKGROUND: (u8, u8, u8, u8) = (0x2D, 0x2D, 0x2D, 0xFF);
@@ -146,31 +148,28 @@ fn run() -> Result<(), String> {
         None => builder,
     };
     let window = builder.build(&event_loop).map_err(|e| e.to_string())?;
-    let root = page.root;
-    let builder = WebViewBuilder::new()
-        .with_custom_protocol("deckly".into(), move |_, request| {
-            serve(&root, request.uri().path())
-        })
+    #[cfg(windows)]
+    let owner = {
+        use tao::platform::windows::WindowExtWindows;
+        page.owner.or(Some(window.hwnd()))
+    };
+    #[cfg(not(windows))]
+    let owner = None;
+    let popups = popups::Popups::new(
+        (*event_loop).clone(),
+        event_loop.create_proxy(),
+        page.root,
+        page.title,
+        debug,
+        owner,
+    );
+    let builder = popups
+        .configure(WebViewBuilder::new())
         .with_url(page.url)
         .with_initialization_script(page.connect)
         .with_background_color(BACKGROUND)
-        .with_devtools(debug)
-        // shortcut: pages cannot open windows of their own (some sign-in
-        // flows use them); web links open in the browser instead. Add real
-        // popup windows when a plugin needs them.
-        .with_new_window_req_handler(|url, _| {
-            open_in_browser(&url);
-            NewWindowResponse::Deny
-        });
-    #[cfg(not(target_os = "linux"))]
-    let webview = builder.build(&window).map_err(|e| e.to_string())?;
-    #[cfg(target_os = "linux")]
-    let webview = {
-        use tao::platform::unix::WindowExtUnix;
-        use wry::WebViewBuilderExtUnix;
-        let vbox = window.default_vbox().ok_or("no GTK container")?;
-        builder.build_gtk(vbox).map_err(|e| e.to_string())?
-    };
+        .with_devtools(debug);
+    let webview = build_webview(builder, &window)?;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         // The web view lives as long as the loop.
@@ -178,8 +177,22 @@ fn run() -> Result<(), String> {
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
+                window_id,
                 ..
-            } => *flow = ControlFlow::Exit,
+            } => {
+                if window_id == window.id() {
+                    *flow = ControlFlow::Exit;
+                } else {
+                    popups.close(window_id);
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Destroyed,
+                window_id,
+                ..
+            } => popups.close(window_id),
+            Event::UserEvent(Command::ClosePopup(id)) => popups.close(id),
+            Event::UserEvent(Command::PopupTitle(id, title)) => popups.title(id, &title),
             Event::UserEvent(Command::Place { x, y, w, h }) if placed => {
                 window.set_inner_size(PhysicalSize::new(w, h));
                 // Child coordinates are relative to the editor's client area.
@@ -193,10 +206,26 @@ fn run() -> Result<(), String> {
 }
 
 /// What Deckly tells the helper on its standard input.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Command {
     Place { x: i32, y: i32, w: u32, h: u32 },
     Hide,
+    ClosePopup(WindowId),
+    PopupTitle(WindowId, String),
+}
+
+fn build_webview(builder: WebViewBuilder<'_>, window: &Window) -> Result<WebView, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        builder.build(window).map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window.default_vbox().ok_or("no GTK container")?;
+        builder.build_gtk(vbox).map_err(|e| e.to_string())
+    }
 }
 
 fn parse_command(line: &str) -> Option<Command> {

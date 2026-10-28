@@ -51,6 +51,11 @@ Keys tab under the plugin's name.
   panel, with a label identifying the plugin. On Linux and macOS, use
   "Open Settings" to open a separate window. The web engine stays in the
   helper process on every platform.
+- Plugin settings pages can open related configuration windows, preserving
+  their connection to the original page. Closing a configuration window
+  releases its web view. These windows close with their inspector.
+- HTML plugins use a background web view while enabled; closing their
+  settings window does not stop the plugin itself.
 - Native plugins run only on the system they were built for.
 - Copies installed through the official marketplace are encrypted and
   cannot be used; get the plugin from its author's own download instead.
