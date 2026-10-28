@@ -775,7 +775,13 @@ impl App {
                             .unwrap_or(id);
                         format!("{name} was installed")
                     }
-                    Err(e) => format!("Cannot install {}: {e}", path.display()),
+                    Err(e) => {
+                        let file = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        format!("Cannot install {file}: {e}")
+                    }
                 };
                 runtime::lock(&state).notify(text);
             }
@@ -2035,6 +2041,7 @@ impl App {
             return;
         }
         drop(s);
+        let width = (ctx.content_rect().width() - 64.0).clamp(120.0, 440.0);
         egui::Area::new(egui::Id::new("notice"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 64.0))
             .order(egui::Order::Foreground)
@@ -2045,9 +2052,12 @@ impl App {
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(14, 8))
                     .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("{}  {text}", icon::WARNING)).color(WARNING),
-                        );
+                        // Without a fixed width the anchored area shrinks to a narrow column.
+                        ui.set_width(width);
+                        ui.horizontal_top(|ui| {
+                            ui.label(RichText::new(icon::WARNING).color(WARNING));
+                            ui.add(egui::Label::new(RichText::new(&text).color(WARNING)).wrap());
+                        });
                     });
             });
         ctx.request_repaint_after(left);
