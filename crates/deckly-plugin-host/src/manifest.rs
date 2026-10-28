@@ -224,9 +224,12 @@ impl Manifest {
             "html" | "htm" => return exists(path).map(Entry::Html),
             _ => {}
         }
-        // Windows plugins may leave out ".exe".
-        let path = if cfg!(windows) && ext.is_empty() && !path.is_file() {
-            path.with_extension("exe")
+        // Windows plugins may leave out ".exe", and their names often contain
+        // dots ("com.example.tool"), so append rather than replace.
+        let path = if cfg!(windows) && !path.is_file() {
+            let mut with_exe = path.into_os_string();
+            with_exe.push(".exe");
+            PathBuf::from(with_exe)
         } else {
             path
         };
@@ -482,6 +485,7 @@ mod tests {
         std::fs::write(dir.join("bin/plugin.js"), "").unwrap();
         std::fs::write(dir.join("page.html"), "").unwrap();
         std::fs::write(dir.join("tool.exe"), b"MZ\x90\x00").unwrap();
+        std::fs::write(dir.join("com.example.tool.exe"), b"MZ\x90\x00").unwrap();
         let mut m = Manifest::parse(SAMPLE.as_bytes(), "com.example.sample").unwrap();
         assert_eq!(m.entry(&dir), Ok(Entry::Node(dir.join("bin/plugin.js"))));
         m.code_path = "page.html".into();
@@ -491,6 +495,12 @@ mod tests {
         m.code_path = "tool".into();
         if cfg!(windows) {
             assert_eq!(m.entry(&dir), Ok(Entry::Native(dir.join("tool.exe"))));
+            // Dots in the name are not an extension.
+            m.code_path = "com.example.tool".into();
+            assert_eq!(
+                m.entry(&dir),
+                Ok(Entry::Native(dir.join("com.example.tool.exe")))
+            );
         }
         // A Windows program is refused elsewhere.
         m.code_path = "tool.exe".into();
