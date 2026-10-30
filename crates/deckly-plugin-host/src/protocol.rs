@@ -222,18 +222,32 @@ pub struct Instance {
     pub row: u8,
     /// Only for actions with more than one state.
     pub state: Option<usize>,
+    /// Inside a Multi Action, where an action has no place on the device.
+    pub in_multi_action: bool,
+    /// The state the user picked for this action in its Multi Action.
+    pub desired_state: Option<usize>,
 }
 
 impl Instance {
     fn payload(&self) -> Value {
         let mut p = json!({
             "settings": if self.settings.is_object() { self.settings.clone() } else { json!({}) },
-            "coordinates": { "column": self.column, "row": self.row },
             "controller": "Keypad",
-            "isInMultiAction": false,
+            "isInMultiAction": self.in_multi_action,
         });
-        if let (Some(state), Some(map)) = (self.state, p.as_object_mut()) {
-            map.insert("state".into(), state.into());
+        if let Some(map) = p.as_object_mut() {
+            if !self.in_multi_action {
+                map.insert(
+                    "coordinates".into(),
+                    json!({ "column": self.column, "row": self.row }),
+                );
+            }
+            if let Some(state) = self.state {
+                map.insert("state".into(), state.into());
+            }
+            if let Some(state) = self.desired_state {
+                map.insert("userDesiredState".into(), state.into());
+            }
         }
         p
     }
@@ -422,6 +436,8 @@ mod tests {
             column: 2,
             row: 1,
             state: Some(1),
+            in_multi_action: false,
+            desired_state: None,
         };
         let v: Value = serde_json::from_str(&i.event("keyDown")).unwrap();
         assert_eq!(v["event"], "keyDown");
@@ -429,6 +445,16 @@ mod tests {
         assert_eq!(v["payload"]["coordinates"]["column"], 2);
         assert_eq!(v["payload"]["state"], 1);
         assert_eq!(v["payload"]["isInMultiAction"], false);
+        assert!(v["payload"].get("userDesiredState").is_none());
+        let member = Instance {
+            in_multi_action: true,
+            desired_state: Some(0),
+            ..i.clone()
+        };
+        let v: Value = serde_json::from_str(&member.event("keyDown")).unwrap();
+        assert_eq!(v["payload"]["isInMultiAction"], true);
+        assert_eq!(v["payload"]["userDesiredState"], 0);
+        assert!(v["payload"].get("coordinates").is_none());
         let single = Instance {
             state: None,
             settings: Value::Null,

@@ -15,6 +15,7 @@ mod plugins;
 mod prefs;
 mod render;
 mod runtime;
+mod sequence;
 mod store;
 mod theme;
 

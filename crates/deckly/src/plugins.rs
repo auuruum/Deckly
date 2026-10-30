@@ -7,6 +7,7 @@
 //! plugin action is identified to the plugin by a context made of its page id
 //! and key index.
 
+use crate::actions;
 use crate::os;
 use crate::render;
 use crate::runtime::{self, Msg, Repaint, Shared, State};
@@ -87,6 +88,8 @@ pub struct CatalogAction {
     pub automatic_states: bool,
     pub has_inspector: bool,
     pub visible: bool,
+    pub in_multi_actions: bool,
+    pub in_key_logic: bool,
 }
 
 #[derive(Clone)]
@@ -135,9 +138,38 @@ pub fn context(page: &str, key: u8) -> String {
     format!("{page}.{key}")
 }
 
-fn parse_context(context: &str) -> Option<(&str, u8)> {
+/// The id a plugin knows an action inside a group key by.
+pub fn member_context(page: &str, key: u8, list: usize, member: usize) -> String {
+    member_context_of(&context(page, key), list, member)
+}
+
+/// The id of an action inside the group key with this context.
+pub fn member_context_of(key_context: &str, list: usize, member: usize) -> String {
+    format!("{key_context}.{list}.{member}")
+}
+
+/// Where a context points: a page, a key, and for an action inside a group
+/// key its list and place in that list.
+type Place<'a> = (&'a str, u8, Option<(usize, usize)>);
+
+fn parse_context(context: &str) -> Option<Place<'_>> {
+    let mut parts = context.rsplitn(4, '.');
+    if let (Some(member), Some(list), Some(key), Some(page)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+        && let (Ok(member), Ok(list), Ok(key)) = (member.parse(), list.parse(), key.parse())
+    {
+        return Some((page, key, Some((list, member))));
+    }
     let (page, key) = context.rsplit_once('.')?;
-    Some((page, key.parse().ok()?))
+    Some((page, key.parse().ok()?, None))
+}
+
+/// The action a context points to on a key: the key or one of its members.
+fn at_place(key: &KeyConfig, member: Option<(usize, usize)>) -> Option<&KeyConfig> {
+    match member {
+        Some((list, i)) => key.groups.get(list)?.get(i),
+        None => Some(key),
+    }
 }
 
 /// The SDK's device type for a model (docs/clean-room/2026-10-28-plugin-host.md).
@@ -166,8 +198,19 @@ pub fn device_info(state: &State, d: &ConnectedDevice) -> protocol::DeviceInfo {
 impl State {
     /// What a plugin key shows from its plugin; `None` for other keys.
     pub fn overlay(&self, context: &str, key: &KeyConfig) -> Option<Overlay> {
-        let (_, action) = self.catalog.action(&key.action)?;
         let live = self.plugin_keys.get(context);
+        let mark = live
+            .and_then(|l| l.mark)
+            .filter(|(_, until)| *until > Instant::now())
+            .map(|(m, _)| m);
+        // Multi Action keys show how their run ended.
+        if !key.groups.is_empty() {
+            return mark.map(|mark| Overlay {
+                mark: Some(mark),
+                ..Overlay::default()
+            });
+        }
+        let (_, action) = self.catalog.action(&key.action)?;
         let state = live
             .map_or(0, |l| l.state)
             .min(action.states.len().saturating_sub(1));
@@ -179,11 +222,44 @@ impl State {
         let title = live
             .and_then(|l| l.titles.get(state).cloned().flatten())
             .or_else(|| def.map(|d| d.title.clone()).filter(|t| !t.is_empty()));
-        let mark = live
-            .and_then(|l| l.mark)
-            .filter(|(_, until)| *until > Instant::now())
-            .map(|(m, _)| m);
         Some(Overlay { image, title, mark })
+    }
+
+    /// Shows a short mark on a key.
+    pub fn mark_key(&mut self, context: &str, mark: Mark) {
+        self.plugin_key(context, 1).mark = Some((mark, Instant::now() + MARK_TIME));
+    }
+
+    /// Ends a Multi Action run on the key at `context`: a finished run shows
+    /// OK and moves a switch to its other side, and a cancelled one does
+    /// neither.
+    pub fn finish_run(&mut self, context: &str, cancelled: bool) {
+        let Some(key) = self
+            .key_at(context)
+            .filter(|k| k.action != actions::KEY_LOGIC)
+        else {
+            return;
+        };
+        if cancelled {
+            return;
+        }
+        self.mark_key(context, Mark::Ok);
+        if key.action != actions::MULTI_ACTION_SWITCH {
+            return;
+        }
+        let Some((page_id, index, None)) = parse_context(context) else {
+            return;
+        };
+        let Some((profile_id, page)) = self.page_mut(page_id) else {
+            return;
+        };
+        if let Some(key) = page.keys.get_mut(&index) {
+            let side = actions::switch_side(key);
+            actions::set_switch_side(key, 1 - side);
+        }
+        if let Some(Err(e)) = self.profile(&profile_id).map(store::save_profile) {
+            self.notify(format!("Cannot save profile: {e}"));
+        }
     }
 
     /// When the next Alert/OK mark should disappear.
@@ -209,15 +285,14 @@ impl State {
     }
 
     fn key_at(&self, context: &str) -> Option<KeyConfig> {
-        let (page_id, key) = parse_context(context)?;
+        let (page_id, key, member) = parse_context(context)?;
         self.profiles.iter().find_map(|p| {
-            p.pages
+            let page = p
+                .pages
                 .iter()
                 .chain(&p.folders)
-                .find(|page| page.id == page_id)?
-                .keys
-                .get(&key)
-                .cloned()
+                .find(|page| page.id == page_id)?;
+            at_place(page.keys.get(&key)?, member).cloned()
         })
     }
 
@@ -231,7 +306,7 @@ impl State {
 
     /// Describes a placed key to its plugin.
     pub fn instance(&self, context: &str, key: &KeyConfig) -> Instance {
-        let (page_id, index) = parse_context(context).unwrap_or(("", 0));
+        let (page_id, index, member) = parse_context(context).unwrap_or(("", 0, None));
         // The device showing the key, else the first of its model.
         let profile = self
             .profiles
@@ -250,6 +325,18 @@ impl State {
             .catalog
             .action(&key.action)
             .map_or(0, |(_, a)| a.states.len());
+        // Key Logic actions stay on their key; Multi Action ones have no place.
+        let in_multi_action = member.is_some()
+            && profile
+                .and_then(|p| p.pages.iter().chain(&p.folders).find(|pg| pg.id == page_id))
+                .and_then(|pg| pg.keys.get(&index))
+                .is_none_or(|k| k.action != actions::KEY_LOGIC);
+        let desired = usize::from(key.desired_state.unwrap_or(0)).min(states.saturating_sub(1));
+        let state = if in_multi_action {
+            desired
+        } else {
+            self.plugin_keys.get(context).map_or(0, |k| k.state)
+        };
         Instance {
             action: key.action.clone(),
             context: context.to_owned(),
@@ -257,7 +344,9 @@ impl State {
             settings: key.settings.clone(),
             column: index % columns,
             row: index / columns,
-            state: (states > 1).then(|| self.plugin_keys.get(context).map_or(0, |k| k.state)),
+            state: (states > 1).then_some(state),
+            in_multi_action,
+            desired_state: (in_multi_action && states > 1).then_some(desired),
         }
     }
 
@@ -393,6 +482,8 @@ impl Worker {
                     has_inspector: !a.property_inspector.is_empty()
                         || !m.property_inspector.is_empty(),
                     visible: a.visible,
+                    in_multi_actions: a.in_multi_actions,
+                    in_key_logic: a.in_key_logic,
                 })
                 .collect();
             plugins.push(Arc::new(CatalogPlugin {
@@ -580,9 +671,13 @@ impl Worker {
     fn store_settings(&self, plugin: &str, context: &str, settings: Value) -> Option<Instance> {
         let mut s = runtime::lock(&self.state);
         s.own_key(plugin, context)?;
-        let (page_id, index) = parse_context(context)?;
+        let (page_id, index, member) = parse_context(context)?;
         let (profile_id, page) = s.page_mut(page_id)?;
         let key = page.keys.get_mut(&index)?;
+        let key = match member {
+            Some((list, i)) => key.groups.get_mut(list)?.get_mut(i)?,
+            None => key,
+        };
         key.settings = settings;
         let key = key.clone();
         if let Some(Err(e)) = s.profile(&profile_id).map(store::save_profile) {
@@ -795,9 +890,73 @@ mod tests {
     #[test]
     fn contexts_round_trip() {
         let c = context("5f0c-11", 14);
-        assert_eq!(parse_context(&c), Some(("5f0c-11", 14)));
+        assert_eq!(parse_context(&c), Some(("5f0c-11", 14, None)));
         assert_eq!(parse_context("nodot"), None);
         assert_eq!(parse_context("a.999"), None);
+        let c = member_context("5f0c-11", 14, 1, 3);
+        assert_eq!(parse_context(&c), Some(("5f0c-11", 14, Some((1, 3)))));
+        assert_eq!(parse_context("p.1.2"), Some(("p.1", 2, None)));
+        assert_eq!(parse_context("p.1.2.x"), None);
+    }
+
+    fn state_with(key: KeyConfig) -> (State, String) {
+        let mut profile = deckly_core::Profile::new("Test", DeviceKind::Mk2);
+        let page = profile.pages[0].id.clone();
+        profile.pages[0].keys.insert(3, key);
+        (State::new(vec![profile], Default::default()), page)
+    }
+
+    #[test]
+    fn contexts_reach_the_actions_inside_a_key() {
+        let mut key = KeyConfig::new(actions::MULTI_ACTION, json!({}));
+        key.groups[0].push(KeyConfig::new("com.example.a", json!({"n": 1})));
+        let (s, page) = state_with(key);
+        let member = member_context(&page, 3, 0, 0);
+        assert_eq!(
+            s.key_at(&member).map(|k| k.action),
+            Some("com.example.a".to_owned())
+        );
+        assert!(s.key_at(&member_context(&page, 3, 0, 1)).is_none());
+        assert!(s.key_at(&member_context(&page, 3, 7, 0)).is_none());
+        let instance = s.instance(&member, &s.key_at(&member).unwrap());
+        assert!(instance.in_multi_action);
+        let holder = context(&page, 3);
+        assert!(
+            !s.instance(&holder, &s.key_at(&holder).unwrap())
+                .in_multi_action
+        );
+    }
+
+    #[test]
+    fn key_logic_actions_keep_their_place_on_the_key() {
+        let mut key = KeyConfig::new(actions::KEY_LOGIC, json!({}));
+        key.groups[1].push(KeyConfig::new("com.example.a", json!({})));
+        let (s, page) = state_with(key);
+        let member = member_context(&page, 3, 1, 0);
+        let instance = s.instance(&member, &s.key_at(&member).unwrap());
+        assert!(!instance.in_multi_action);
+        assert_eq!((instance.column, instance.row), (3, 0));
+    }
+
+    #[test]
+    fn a_finished_run_turns_a_switch_and_a_cancelled_one_does_not() {
+        let (mut s, page) = state_with(KeyConfig::new(actions::MULTI_ACTION_SWITCH, json!({})));
+        let key = context(&page, 3);
+        let side = |s: &State| actions::switch_side(&s.key_at(&key).unwrap());
+        s.finish_run(&key, true);
+        assert_eq!(side(&s), 0);
+        assert!(s.plugin_keys.is_empty());
+        s.finish_run(&key, false);
+        assert_eq!(side(&s), 1);
+        assert_eq!(
+            s.overlay(&key, &s.key_at(&key).unwrap())
+                .and_then(|o| o.mark),
+            Some(Mark::Ok)
+        );
+        s.finish_run(&key, false);
+        assert_eq!(side(&s), 0);
+        // A key removed during its run is no reason to stop.
+        s.finish_run("gone.1", false);
     }
 
     #[test]

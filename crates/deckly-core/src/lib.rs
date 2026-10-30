@@ -10,5 +10,5 @@ pub mod settings;
 pub use device::{
     DeviceKind, DeviceModel, ELGATO_VENDOR_ID, ImageFormat, KeyRect, Protocol, Rotation, Screen,
 };
-pub use profile::{KeyConfig, Page, Profile, ProfileError, TitleAlign, TitleStyle};
+pub use profile::{ActionDelays, KeyConfig, Page, Profile, ProfileError, TitleAlign, TitleStyle};
 pub use settings::{DeviceSettings, KeyPress, Orientation, Settings, Turn};

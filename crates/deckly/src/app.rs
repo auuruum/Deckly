@@ -17,8 +17,8 @@ use crate::render::{Live, Renderer};
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
-use deckly_core::profile::MAX_FOLDER_DEPTH;
-use deckly_core::{DeviceKind, KeyConfig, Page, Profile, TitleStyle};
+use deckly_core::profile::{self, MAX_FOLDER_DEPTH, MAX_GROUP_ACTIONS};
+use deckly_core::{ActionDelays, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
 use deckly_plugin_host::{Host, Status};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
@@ -139,11 +139,23 @@ impl View {
     }
 }
 
+/// The Multi Action or Key Logic key open in the canvas, in place of the key
+/// grid. The key itself is `App::selected_key`.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct GroupEdit {
+    /// The side of a Multi Action Switch, the press of a Key Logic key.
+    list: usize,
+    /// The action selected in the list; `None` edits the key itself.
+    member: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 enum DragPayload {
     /// A built-in or plugin action, by UUID.
     Action(String),
     Key(u8),
+    /// An action in the open Multi Action, by position.
+    Member(usize),
 }
 
 enum KeyCommand {
@@ -176,6 +188,10 @@ pub struct App {
     selected_device: Option<String>,
     offline_profile: Option<String>,
     selected_key: Option<u8>,
+    /// Open while `selected_key` holds actions and is being edited.
+    group: Option<GroupEdit>,
+    /// The action of the open group key; the list shows what fits in it.
+    group_holder: Option<String>,
     search: String,
     tab: ListTab,
     /// Open categories in the action list, by name.
@@ -226,9 +242,14 @@ impl App {
             selected_device: None,
             offline_profile: None,
             selected_key: None,
+            group: None,
+            group_holder: None,
             search: String::new(),
             tab: ListTab::Keys,
-            expanded: HashSet::from([Category::System.label().to_owned()]),
+            expanded: HashSet::from([
+                Category::MultiAction.label().to_owned(),
+                Category::System.label().to_owned(),
+            ]),
             host: background.host.clone(),
             images: HashMap::new(),
             plugin_page_area: None,
@@ -845,6 +866,7 @@ impl App {
 
     fn key_actions(&mut self, ui: &mut Ui) {
         let query = self.search.trim().to_lowercase();
+        let holder = self.group_holder.clone();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -853,6 +875,7 @@ impl App {
                     let items: Vec<&'static actions::ActionDef> = ACTIONS
                         .iter()
                         .filter(|a| a.category == category)
+                        .filter(|a| actions::listed(a.uuid, holder.as_deref()))
                         .filter(|a| query.is_empty() || a.name.to_lowercase().contains(&query))
                         .collect();
                     if items.is_empty() {
@@ -890,6 +913,11 @@ impl App {
                         .actions
                         .iter()
                         .filter(|a| a.visible)
+                        .filter(|a| match holder.as_deref() {
+                            Some(actions::KEY_LOGIC) => a.in_key_logic,
+                            Some(_) => a.in_multi_actions,
+                            None => true,
+                        })
                         .filter(|a| query.is_empty() || a.name.to_lowercase().contains(&query))
                         .collect();
                     if items.is_empty() {
@@ -999,6 +1027,7 @@ impl App {
             None => HashSet::new(),
         };
         let mut changed = false;
+        let mut open_group = false;
         let mut command = None;
         let live = view.live;
         let page_id = view
@@ -1071,14 +1100,13 @@ impl App {
             if let Some(payload) = response.dnd_release_payload::<DragPayload>() {
                 match &*payload {
                     DragPayload::Action(_) if placed => {}
-                    DragPayload::Action(uuid) => match actions::find(uuid) {
-                        Some(def) => {
-                            keys.insert(index, actions::new_key(def));
+                    DragPayload::Action(uuid) => {
+                        keys.insert(index, new_key(uuid));
+                        // The official app opens these when they land on a key.
+                        if profile::group_count(uuid) > 0 {
+                            open_group = true;
                         }
-                        None => {
-                            keys.insert(index, KeyConfig::new(uuid.as_str(), json!({})));
-                        }
-                    },
+                    }
                     &DragPayload::Key(from) if from != index => {
                         let a = keys.remove(&from);
                         let b = keys.remove(&index);
@@ -1089,11 +1117,17 @@ impl App {
                             keys.insert(from, b);
                         }
                     }
-                    DragPayload::Key(_) => {}
+                    DragPayload::Key(_) | DragPayload::Member(_) => {}
                 }
                 self.selected_key = Some(index);
                 self.recording_hotkey = false;
                 changed = true;
+                if std::mem::take(&mut open_group) {
+                    self.group = Some(GroupEdit {
+                        list: 0,
+                        member: None,
+                    });
+                }
             }
             if response.clicked() {
                 self.selected_key = Some(index);
@@ -1108,9 +1142,34 @@ impl App {
                     self.folder_nav = Some(FolderNav::Up);
                 } else if let Some(id) = key.folder().filter(|id| !id.is_empty()) {
                     self.folder_nav = Some(FolderNav::Open(id.to_owned()));
+                } else if !key.groups.is_empty() {
+                    self.group = Some(GroupEdit {
+                        list: 0,
+                        member: None,
+                    });
                 }
             }
             response.context_menu(|ui| {
+                // A blank key can become a Multi Action or Key Logic key.
+                if config.is_none() {
+                    for (uuid, text) in [
+                        (actions::MULTI_ACTION, "Create Multi Action"),
+                        (actions::KEY_LOGIC, "Create Key Logic Action"),
+                    ] {
+                        let glyph = actions::find(uuid).map_or(icon::STACK, |d| d.icon);
+                        if ui.button(format!("{glyph}  {text}")).clicked() {
+                            keys.insert(index, new_key(uuid));
+                            self.selected_key = Some(index);
+                            self.group = Some(GroupEdit {
+                                list: 0,
+                                member: None,
+                            });
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                }
                 if ui
                     .add_enabled(
                         config.is_some() && !placed,
@@ -1224,23 +1283,7 @@ impl App {
             self.folder_strip(ui, &geo, profile, view);
         }
 
-        // Preview of what is being dragged.
-        if let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(ui.ctx())
-            && let Some(pos) = ui.ctx().pointer_interact_pos()
-        {
-            let glyph = match &*payload {
-                DragPayload::Action(uuid) => {
-                    actions::find(uuid).map_or(icon::PUZZLE_PIECE, |a| a.icon)
-                }
-                DragPayload::Key(_) => icon::SQUARE,
-            };
-            let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-preview"));
-            let p = ui.ctx().layer_painter(layer);
-            let r = Rect::from_center_size(pos + vec2(20.0, 20.0), Vec2::splat(40.0));
-            p.rect_filled(r, CornerRadius::same(8), KEY_BORDER);
-            p.rect_filled(r.shrink(2.0), CornerRadius::same(6), Color32::BLACK);
-            p.text(r.center(), Align2::CENTER_CENTER, glyph, font(20.0), TEXT);
-        }
+        drag_preview(ui.ctx());
     }
 
     /// Page chips under the grid: one rounded strip with the page numbers
@@ -1417,6 +1460,478 @@ impl App {
         }
     }
 
+    // ----- Multi Action and Key Logic editor -------------------------------
+
+    /// Keeps the open group valid and tells the action list what fits in it:
+    /// undo, the device or another window may have changed the key meanwhile.
+    fn check_group(&mut self, profile: &mut Profile, view: &View) {
+        let holder = self
+            .selected_key
+            .and_then(|k| view.keys(profile)?.get(&k))
+            .filter(|k| !k.groups.is_empty());
+        match (holder, &mut self.group) {
+            (Some(key), Some(group)) => {
+                group.list = group.list.min(key.groups.len() - 1);
+                let size = key.groups.get(group.list).map_or(0, Vec::len);
+                if key.action != actions::KEY_LOGIC {
+                    group.member = group.member.filter(|m| *m < size);
+                }
+                self.group_holder = Some(key.action.clone());
+            }
+            _ => {
+                self.group = None;
+                self.group_holder = None;
+            }
+        }
+    }
+
+    /// Removes the selected action from its group, or the whole key when no
+    /// action is selected.
+    fn remove_edited(&mut self, profile: &mut Profile, view: &View) {
+        let (Some(index), Some(group)) = (self.selected_key, self.group) else {
+            return;
+        };
+        let Some(keys) = view.keys(profile) else {
+            return;
+        };
+        match group.member {
+            Some(member) => {
+                if let Some(list) = keys
+                    .get_mut(&index)
+                    .and_then(|k| k.groups.get_mut(group.list))
+                    && member < list.len()
+                {
+                    list.remove(member);
+                }
+            }
+            None => {
+                keys.remove(&index);
+                self.group = None;
+            }
+        }
+        if let Some(g) = &mut self.group {
+            g.member = None;
+        }
+        self.mark_dirty(&profile.id);
+    }
+
+    /// What a Multi Action or Key Logic key holds, in place of the key grid.
+    fn group_canvas(&mut self, ui: &mut Ui, profile: &mut Profile, view: &View) {
+        let (Some(index), Some(mut group)) = (self.selected_key, self.group) else {
+            return;
+        };
+        let page_id = view
+            .path
+            .last()
+            .cloned()
+            .or_else(|| profile.pages.get(view.page).map(|p| p.id.clone()))
+            .unwrap_or_default();
+        let live = view.live;
+        let area = ui.max_rect();
+        let mut remove = false;
+        let device = profile.device;
+        let Some(key) = view.keys(profile).and_then(|k| k.get_mut(&index)) else {
+            return;
+        };
+        let before = key.clone();
+        let name = actions::find(&key.action).map_or("Multi Action", |d| d.name);
+
+        // Back arrow and title.
+        let painter = ui.painter().clone();
+        let title_y = area.top() + 48.0;
+        let galley = painter.layout_no_wrap(name.to_owned(), bold(17.0), TEXT);
+        let back = Rect::from_min_size(
+            pos2(area.left() + 52.0, title_y - 14.0),
+            vec2(galley.size().x + 32.0, 28.0),
+        );
+        let resp = ui
+            .interact(back, ui.id().with("group-back"), Sense::click())
+            .on_hover_text("Back to the keys");
+        let color = if resp.hovered() { Color32::WHITE } else { TEXT };
+        painter.text(
+            pos2(back.left() + 12.0, title_y),
+            Align2::CENTER_CENTER,
+            icon::ARROW_ELBOW_LEFT_UP,
+            font(16.0),
+            color,
+        );
+        painter.galley_with_override_text_color(
+            pos2(back.left() + 26.0, title_y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        let close = resp.clicked();
+
+        // The two sides of a Multi Action Switch.
+        if key.groups.len() == 2 {
+            for side in 0..2 {
+                let r = Rect::from_min_size(
+                    pos2(back.right() + 8.0 + side as f32 * 30.0, title_y - 11.0),
+                    vec2(30.0, 22.0),
+                );
+                let resp = ui.interact(r, ui.id().with(("side", side)), Sense::click());
+                let on = group.list == side;
+                let corners = if side == 0 {
+                    CornerRadius {
+                        nw: 3,
+                        sw: 3,
+                        ..CornerRadius::ZERO
+                    }
+                } else {
+                    CornerRadius {
+                        ne: 3,
+                        se: 3,
+                        ..CornerRadius::ZERO
+                    }
+                };
+                painter.rect_filled(
+                    r,
+                    corners,
+                    if on { PREF_ROW_SELECTED } else { PREF_SEGMENT },
+                );
+                painter.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    (side + 1).to_string(),
+                    font(13.0),
+                    if on { Color32::WHITE } else { TEXT },
+                );
+                if resp.clicked() && !on {
+                    group = GroupEdit {
+                        list: side,
+                        member: None,
+                    };
+                }
+            }
+        }
+
+        let body = Rect::from_min_max(
+            pos2(area.left() + 56.0, area.top() + 95.0),
+            pos2(area.right() - 36.0, area.bottom() - 8.0),
+        );
+        if key.action == actions::KEY_LOGIC {
+            self.key_logic_slots(ui, area, key, &mut group, &page_id, index, live);
+        } else if body.is_positive() {
+            remove = self.member_rows(ui, body, key, &mut group);
+        }
+
+        let shortcuts = self.pending_paste.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.ctx().memory(|m| m.focused().is_none());
+        if shortcuts && group.member.is_some() && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+            remove = true;
+        }
+        for event in clipboard_events(ui.ctx(), shortcuts) {
+            match event {
+                egui::Event::Copy => {
+                    if let Some(member) = group
+                        .member
+                        .and_then(|m| key.groups.get(group.list)?.get(m))
+                    {
+                        let copy = KeyClipboard::of_key(device, member);
+                        match copy.text() {
+                            Ok(text) => {
+                                ui.ctx().copy_text(text);
+                                self.clipboard = Some(copy);
+                            }
+                            Err(e) => runtime::lock(&self.state).notify(e),
+                        }
+                    }
+                }
+                egui::Event::Paste(text) => match KeyClipboard::from_text(&text) {
+                    Ok(Some(copy)) => paste_member(key, &mut group, &copy),
+                    Ok(None) => {}
+                    Err(e) => runtime::lock(&self.state).notify(e),
+                },
+                _ => {}
+            }
+        }
+
+        if let Some(direction) = history_shortcut(
+            ui.ctx(),
+            self.pending_paste.is_none() && !ui.ctx().text_edit_focused(),
+        ) {
+            self.history_shortcut = Some(direction);
+        }
+        drag_preview(ui.ctx());
+        let changed = *key != before;
+        self.group = (!close).then_some(group);
+        if changed {
+            self.mark_dirty(&profile.id);
+        }
+        if remove && group.member.is_some() {
+            self.remove_edited(profile, view);
+        }
+    }
+
+    /// The rows of a Multi Action, in running order. Actions are dropped
+    /// between rows and rows are dragged by themselves. Returns whether the
+    /// selected row should be removed.
+    fn member_rows(
+        &mut self,
+        ui: &mut Ui,
+        body: Rect,
+        key: &mut KeyConfig,
+        group: &mut GroupEdit,
+    ) -> bool {
+        const ROW: f32 = 40.0;
+        let mut remove = false;
+        let Some(list) = key.groups.get(group.list) else {
+            return false;
+        };
+        let names: Vec<(String, String, Option<egui::TextureId>, &'static str)> = list
+            .iter()
+            .map(|m| self.member_label(ui.ctx(), m))
+            .collect();
+        let count = names.len();
+        let painter = ui.painter().clone();
+        let mut target = None;
+        let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
+        let pointer = ui.ctx().pointer_interact_pos();
+        let mut scroll_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
+        let scrolled = egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(&mut scroll_ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                for (i, (category, name, tex, glyph)) in names.iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), ROW),
+                        Sense::click_and_drag(),
+                    );
+                    resp.dnd_set_drag_payload(DragPayload::Member(i));
+                    let on = group.member == Some(i);
+                    let fill = if on {
+                        PREF_ROW_SELECTED
+                    } else if resp.hovered() {
+                        LIST_HOVER
+                    } else {
+                        MEMBER_ROW
+                    };
+                    let p = ui.painter();
+                    p.rect_filled(rect, CornerRadius::ZERO, fill);
+                    let tint = if on { Color32::WHITE } else { ITEM_ICON };
+                    let icon_rect = Rect::from_center_size(
+                        pos2(rect.left() + 21.0, rect.center().y),
+                        Vec2::splat(22.0),
+                    );
+                    match tex {
+                        Some(_) => draw_list_icon(p, icon_rect, *tex, tint),
+                        None => {
+                            p.text(
+                                icon_rect.center(),
+                                Align2::CENTER_CENTER,
+                                *glyph,
+                                font(18.0),
+                                tint,
+                            );
+                        }
+                    }
+                    p.text(
+                        pos2(rect.left() + 45.0, rect.center().y),
+                        Align2::LEFT_CENTER,
+                        format!("{category}: {name}"),
+                        font(13.0),
+                        if on { Color32::WHITE } else { TEXT },
+                    );
+                    p.text(
+                        pos2(rect.right() - 29.0, rect.center().y),
+                        Align2::CENTER_CENTER,
+                        icon::LIST,
+                        font(15.0),
+                        if on { Color32::WHITE } else { TEXT_DIM },
+                    );
+                    if resp.clicked() {
+                        group.member = Some(i);
+                        self.recording_hotkey = false;
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button(format!("{}  Remove", icon::TRASH)).clicked() {
+                            group.member = Some(i);
+                            remove = true;
+                            ui.close();
+                        }
+                    });
+                    if dragging
+                        && let Some(pos) = pointer
+                        && rect.contains(pos)
+                    {
+                        let below = pos.y > rect.center().y;
+                        target = Some(i + usize::from(below));
+                    }
+                }
+            });
+        // Below the last row means at the end.
+        if dragging && target.is_none() && pointer.is_some_and(|pos| body.contains(pos)) {
+            target = Some(count);
+        }
+        if let Some(at) = target {
+            let y = (body.top() + at as f32 * ROW - scrolled.state.offset.y)
+                .clamp(body.top(), body.bottom());
+            painter.hline(body.x_range(), y, Stroke::new(2.0, KEY_DROP));
+        }
+        if ui.input(|i| i.pointer.any_released())
+            && let Some(at) = target
+            && let Some(payload) = egui::DragAndDrop::take_payload::<DragPayload>(ui.ctx())
+        {
+            match &*payload {
+                DragPayload::Action(uuid) if key.can_hold(uuid) => {
+                    if let Some(list) = key.groups.get_mut(group.list)
+                        && list.len() < MAX_GROUP_ACTIONS
+                    {
+                        let at = at.min(list.len());
+                        list.insert(at, new_key(uuid));
+                        group.member = Some(at);
+                    }
+                }
+                &DragPayload::Member(from) => {
+                    if let Some(list) = key.groups.get_mut(group.list)
+                        && from < list.len()
+                    {
+                        let member = list.remove(from);
+                        let to = if at > from { at - 1 } else { at }.min(list.len());
+                        list.insert(to, member);
+                        group.member = Some(to);
+                    }
+                }
+                _ => {}
+            }
+        }
+        remove
+    }
+
+    /// The three presses of a Key Logic key, each a slot for one action.
+    #[allow(clippy::too_many_arguments)]
+    fn key_logic_slots(
+        &mut self,
+        ui: &mut Ui,
+        area: Rect,
+        key: &mut KeyConfig,
+        group: &mut GroupEdit,
+        page_id: &str,
+        index: u8,
+        live: Live,
+    ) {
+        const SLOT: f32 = 78.0;
+        const PITCH: f32 = 98.0;
+        const LABELS: [&[&str]; 3] = [&["Single", "Press"], &["Double", "Press"], &["Hold"]];
+        let center = pos2(area.center().x, area.top() + area.height() * 0.42);
+        let px = (SLOT * ui.ctx().pixels_per_point()) as u32;
+        let painter = ui.painter().clone();
+        for (slot, lines) in LABELS.into_iter().enumerate() {
+            let rect = Rect::from_center_size(
+                center + vec2((slot as f32 - 1.0) * PITCH, 0.0),
+                Vec2::splat(SLOT),
+            );
+            let resp = ui.interact(rect, ui.id().with(("slot", slot)), Sense::click());
+            let on = group.list == slot && group.member == Some(0);
+            let drop = resp.dnd_hover_payload::<DragPayload>().is_some();
+            let border = if drop {
+                KEY_DROP
+            } else if on {
+                KEY_SELECTED
+            } else if resp.hovered() {
+                TEXT_DIM
+            } else {
+                KEY_BORDER
+            };
+            painter.rect_filled(rect, CornerRadius::same(12), border);
+            let inner = rect.shrink(3.0);
+            match key.groups.get(slot).and_then(|l| l.first()) {
+                Some(member) => {
+                    let context = plugins::member_context(page_id, index, slot, 0);
+                    let overlay = runtime::lock(&self.state).overlay(&context, member);
+                    let tex = self.texture(ui.ctx(), Some(member), px, live, overlay.as_ref());
+                    painter.add(
+                        egui::epaint::RectShape::filled(
+                            inner,
+                            CornerRadius::same(9),
+                            Color32::WHITE,
+                        )
+                        .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
+                    );
+                }
+                None => {
+                    painter.rect_filled(inner, CornerRadius::same(9), KEY_EMPTY);
+                }
+            }
+            for (i, line) in lines.iter().enumerate() {
+                painter.text(
+                    pos2(rect.center().x, rect.bottom() + 12.0 + i as f32 * 16.0),
+                    Align2::CENTER_TOP,
+                    line,
+                    font(12.0),
+                    TEXT_DIM,
+                );
+            }
+            if resp.clicked() {
+                *group = GroupEdit {
+                    list: slot,
+                    member: Some(0),
+                };
+                self.recording_hotkey = false;
+            }
+            if let Some(payload) = resp.dnd_release_payload::<DragPayload>()
+                && let DragPayload::Action(uuid) = &*payload
+                && key.can_hold(uuid)
+                && let Some(list) = key.groups.get_mut(slot)
+            {
+                *list = vec![new_key(uuid)];
+                *group = GroupEdit {
+                    list: slot,
+                    member: Some(0),
+                };
+            }
+            resp.context_menu(|ui| {
+                let full = key.groups.get(slot).is_some_and(|l| !l.is_empty());
+                if ui
+                    .add_enabled(full, egui::Button::new(format!("{}  Clear", icon::TRASH)))
+                    .clicked()
+                {
+                    if let Some(list) = key.groups.get_mut(slot) {
+                        list.clear();
+                    }
+                    ui.close();
+                }
+            });
+        }
+    }
+
+    /// How a row names an action, with its plugin icon or built-in glyph.
+    fn member_label(
+        &mut self,
+        ctx: &egui::Context,
+        member: &KeyConfig,
+    ) -> (String, String, Option<egui::TextureId>, &'static str) {
+        if let Some(def) = actions::find(&member.action) {
+            return (
+                def.category.label().to_owned(),
+                def.name.to_owned(),
+                None,
+                actions::key_icon(member),
+            );
+        }
+        let plugin = {
+            let s = runtime::lock(&self.state);
+            s.catalog
+                .action(&member.action)
+                .map(|(p, a)| (p.category.clone(), a.name.clone(), a.icon.clone()))
+        };
+        match plugin {
+            Some((category, name, image)) => (
+                category,
+                name,
+                image.map(|img| self.image_texture(ctx, &img)),
+                icon::PUZZLE_PIECE,
+            ),
+            None => (
+                "Plugin not installed".to_owned(),
+                member.action.clone(),
+                None,
+                icon::PUZZLE_PIECE,
+            ),
+        }
+    }
+
     // ----- property inspector --------------------------------------------
 
     fn inspector(&mut self, ui: &mut Ui, profile: &mut Profile, view: &View) {
@@ -1438,14 +1953,22 @@ impl App {
             hint(ui, "Select a key to edit its action.");
             return;
         };
-        let Some(key) = view.keys(profile).and_then(|k| k.get_mut(&index)) else {
-            hint(ui, "Drag an action from the list onto this key.");
+        let group = self.group;
+        let in_sequence = group.is_some_and(|g| g.member.is_some())
+            && self.group_holder.as_deref() != Some(actions::KEY_LOGIC);
+        let Some(key) = edited_key(profile, view, index, group) else {
+            let text = if group.is_some() {
+                "Drag an action from the list onto this slot."
+            } else {
+                "Drag an action from the list onto this key."
+            };
+            hint(ui, text);
             return;
         };
         let before = key.clone();
         let defaults = self.renderer.title_defaults;
         let def = actions::find(&key.action);
-        let context = plugins::context(&page_id, index);
+        let context = edited_context(&page_id, index, group);
         let (overlay, plugin) = {
             let s = runtime::lock(&self.state);
             let plugin = s.catalog.action(&key.action).map(|(p, a)| PluginView {
@@ -1456,10 +1979,12 @@ impl App {
                 status: p.status.clone(),
                 official_only: p.official_only,
                 has_inspector: a.has_inspector,
+                states: a.states.len(),
                 instance: s.instance(&context, key),
             });
             (s.overlay(&context, key), plugin)
         };
+        let mut remove = false;
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -1481,6 +2006,16 @@ impl App {
                         None => ui.label(RichText::new("Plugin not installed").color(WARNING)),
                     };
                 }
+            }
+            if group.is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(16.0);
+                    remove = icon_button(ui, icon::TRASH, "Remove").clicked();
+                    if in_sequence && key.action != actions::DELAY {
+                        ui.add_space(4.0);
+                        delays_button(ui, &mut key.delays);
+                    }
+                });
             }
         });
         ui.add_space(8.0);
@@ -1535,7 +2070,12 @@ impl App {
                             });
                             ui.end_row();
                             match &plugin {
-                                Some(p) => self.plugin_form(ui, p),
+                                Some(p) => {
+                                    self.plugin_form(ui, p);
+                                    if in_sequence {
+                                        desired_state_row(ui, key, p.states);
+                                    }
+                                }
                                 None => self.action_form(ui, key, &profiles, page_count),
                             }
                         });
@@ -1555,7 +2095,10 @@ impl App {
             );
             self.plugin_page(ui, area, p);
         }
-        if *key != before {
+        let changed = *key != before;
+        if remove {
+            self.remove_edited(profile, view);
+        } else if changed {
             self.mark_dirty(&profile.id);
         }
     }
@@ -1863,6 +2406,21 @@ impl App {
                 }
                 ui.end_row();
             }
+            actions::DELAY => {
+                label(ui, "Delay");
+                let mut ms = actions::int_setting(s, "delay", 1000).clamp(1, actions::MAX_DELAY_MS);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut ms)
+                            .range(1..=actions::MAX_DELAY_MS)
+                            .suffix(" ms"),
+                    )
+                    .changed()
+                {
+                    actions::set_setting(s, "delay", json!(ms));
+                }
+                ui.end_row();
+            }
             actions::SLEEP => {
                 ui.label("");
                 ui.vertical(|ui| {
@@ -2165,6 +2723,7 @@ impl eframe::App for App {
                 None => return,
             }
         };
+        self.check_group(&mut profile, &view);
         let original = profile.clone();
         let original_location = view.location(self.selected_key);
         let (original_page, original_path) = (view.page, view.path.clone());
@@ -2205,15 +2764,26 @@ impl eframe::App for App {
             .flatten()
             .map(|focus| {
                 (
-                    egui::Id::new((&profile.id, view.page, &view.path, self.selected_key, focus))
-                        .value(),
+                    egui::Id::new((
+                        &profile.id,
+                        view.page,
+                        &view.path,
+                        self.selected_key,
+                        self.group,
+                        focus,
+                    ))
+                    .value(),
                     profile.clone(),
                 )
             });
         egui::CentralPanel::no_frame().show(ui, |ui| {
             ui.painter()
                 .rect_filled(ui.max_rect(), CornerRadius::ZERO, CANVAS);
-            self.canvas(ui, device.as_ref(), &mut profile, &mut view);
+            if self.group.is_some() {
+                self.group_canvas(ui, &mut profile, &view);
+            } else {
+                self.canvas(ui, device.as_ref(), &mut profile, &mut view);
+            }
         });
         let divider_y = column.bottom() - inspector_h;
         let handle = Rect::from_x_y_ranges(column.x_range(), divider_y - 4.0..=divider_y + 4.0);
@@ -2251,6 +2821,7 @@ impl eframe::App for App {
                 FolderNav::Keep(n) => view.path.truncate(n),
             }
             self.selected_key = None;
+            self.group = None;
             self.recording_hotkey = false;
         }
 
@@ -2314,8 +2885,8 @@ impl eframe::App for App {
                 .or_else(|| profile.pages.get(view.page).map(|p| p.id.clone()))
                 .unwrap_or_default();
             let selected = self.selected_key.and_then(|k| {
-                let key = view.keys(&mut profile)?.get(&k)?;
-                Some((plugins::context(&page_id, k), key.action.clone()))
+                let key = edited_key(&mut profile, &view, k, self.group)?;
+                Some((edited_context(&page_id, k, self.group), key.action.clone()))
             });
             let stale_request = self
                 .plugin_page_requested
@@ -2445,6 +3016,7 @@ fn window_handle(frame: &eframe::Frame) -> Option<i64> {
 
 /// What the inspector shows for a plugin key.
 struct PluginView {
+    states: usize,
     name: String,
     action: String,
     tooltip: String,
@@ -2550,6 +3122,178 @@ fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: Tit
     } else if s != style.unwrap_or(defaults) {
         *style = Some(s);
     }
+}
+
+/// Preview of what is being dragged.
+fn drag_preview(ctx: &egui::Context) {
+    let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(ctx) else {
+        return;
+    };
+    let Some(pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+    let glyph = match &*payload {
+        DragPayload::Action(uuid) => actions::find(uuid).map_or(icon::PUZZLE_PIECE, |a| a.icon),
+        DragPayload::Key(_) | DragPayload::Member(_) => icon::SQUARE,
+    };
+    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-preview"));
+    let p = ctx.layer_painter(layer);
+    let r = Rect::from_center_size(pos + vec2(20.0, 20.0), Vec2::splat(40.0));
+    p.rect_filled(r, CornerRadius::same(8), KEY_BORDER);
+    p.rect_filled(r.shrink(2.0), CornerRadius::same(6), Color32::BLACK);
+    p.text(r.center(), Align2::CENTER_CENTER, glyph, font(20.0), TEXT);
+}
+
+/// Puts a copied action in the open group: after the selected row, or in
+/// the selected Key Logic slot in place of what it holds.
+fn paste_member(key: &mut KeyConfig, group: &mut GroupEdit, copy: &KeyClipboard) {
+    let Some(member) = copy.key().filter(|m| key.can_hold(&m.action)).cloned() else {
+        return;
+    };
+    let logic = key.action == actions::KEY_LOGIC;
+    let Some(list) = key.groups.get_mut(group.list) else {
+        return;
+    };
+    if logic {
+        if group.member.is_some() {
+            *list = vec![member];
+        }
+    } else if list.len() < MAX_GROUP_ACTIONS {
+        let at = group.member.map_or(list.len(), |m| m + 1).min(list.len());
+        list.insert(at, member);
+        group.member = Some(at);
+    }
+}
+
+/// A new key or group member with an action's default settings.
+fn new_key(uuid: &str) -> KeyConfig {
+    match actions::find(uuid) {
+        Some(def) => actions::new_key(def),
+        None => KeyConfig::new(uuid, json!({})),
+    }
+}
+
+/// What the inspector edits: the action selected in the open group, else the
+/// key itself. `None` for an empty Key Logic slot.
+fn edited_key<'a>(
+    profile: &'a mut Profile,
+    view: &View,
+    index: u8,
+    group: Option<GroupEdit>,
+) -> Option<&'a mut KeyConfig> {
+    let key = view.keys(profile)?.get_mut(&index)?;
+    match group {
+        Some(GroupEdit {
+            list,
+            member: Some(member),
+        }) => key.groups.get_mut(list)?.get_mut(member),
+        _ => Some(key),
+    }
+}
+
+fn edited_context(page: &str, index: u8, group: Option<GroupEdit>) -> String {
+    match group {
+        Some(GroupEdit {
+            list,
+            member: Some(member),
+        }) => plugins::member_context(page, index, list, member),
+        _ => plugins::context(page, index),
+    }
+}
+
+fn icon_button(ui: &mut Ui, glyph: &str, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+    let color = if resp.hovered() { TEXT } else { TEXT_DIM };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        glyph,
+        font(17.0),
+        color,
+    );
+    resp.on_hover_text(tip)
+}
+
+/// The clock button of an action in a Multi Action and its popup.
+fn delays_button(ui: &mut Ui, delays: &mut Option<ActionDelays>) {
+    let resp = icon_button(ui, icon::CLOCK_COUNTDOWN, "Customize delays");
+    let popup = egui::Popup::from_toggle_button_response(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(4.0)
+        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(14)));
+    let mut d = delays.unwrap_or_default();
+    let mut reset = false;
+    popup.show(|ui| {
+        ui.set_width(270.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Custom action delays").font(bold(13.0)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                reset = icon_button(
+                    ui,
+                    icon::ARROW_COUNTER_CLOCKWISE,
+                    "Revert delays to defaults",
+                )
+                .clicked();
+            });
+        });
+        ui.separator();
+        ui.add_space(4.0);
+        let row = |ui: &mut Ui, left: &str, right: &str, tip: &str, value: &mut u32| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{left} {} {right}", icon::DOTS_THREE)).color(TEXT_DIM),
+                )
+                .on_hover_text(tip);
+                ui.spacing_mut().slider_width = 120.0;
+                ui.add(
+                    egui::Slider::new(value, ActionDelays::MIN..=ActionDelays::MAX)
+                        .show_value(false),
+                );
+                ui.add(
+                    egui::DragValue::new(value)
+                        .range(ActionDelays::MIN..=ActionDelays::MAX)
+                        .suffix(" ms"),
+                );
+            });
+        };
+        row(
+            ui,
+            icon::ARROW_LINE_DOWN,
+            icon::ARROW_LINE_UP,
+            "From the virtual key press to its release",
+            &mut d.press,
+        );
+        row(
+            ui,
+            icon::NUMBER_SQUARE_ONE,
+            icon::NUMBER_SQUARE_TWO,
+            "From this action to the next one",
+            &mut d.next,
+        );
+    });
+    if reset {
+        *delays = None;
+    } else if d != delays.unwrap_or_default() {
+        *delays = Some(d);
+    }
+}
+
+/// Picks the state a many-state plugin action asks for in its Multi Action.
+fn desired_state_row(ui: &mut Ui, key: &mut KeyConfig, states: usize) {
+    if states < 2 {
+        return;
+    }
+    ui.label(RichText::new("State").color(TEXT_DIM));
+    ui.horizontal(|ui| {
+        for state in 0..states.min(usize::from(u8::MAX)) as u8 {
+            let on = key.desired_state.unwrap_or(0) == state;
+            if ui.selectable_label(on, (state + 1).to_string()).clicked() {
+                key.desired_state = Some(state);
+            }
+        }
+    });
+    ui.end_row();
 }
 
 fn hint(ui: &mut Ui, text: &str) {
@@ -2788,6 +3532,8 @@ mod clipboard_tests {
             selected_device: None,
             offline_profile: None,
             selected_key: Some(0),
+            group: None,
+            group_holder: None,
             search: String::new(),
             tab: ListTab::Keys,
             expanded: HashSet::new(),

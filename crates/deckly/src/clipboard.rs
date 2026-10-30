@@ -1,7 +1,7 @@
 //! A copied key, including a snapshot of the folders it opens.
 
 use deckly_core::profile::{MAX_FILE_BYTES, MAX_FOLDER_DEPTH, MAX_FOLDERS, new_id};
-use deckly_core::{KeyConfig, Page, Profile};
+use deckly_core::{DeviceKind, KeyConfig, Page, Profile};
 use std::collections::HashMap;
 
 const PREFIX: &str = "Deckly action\n";
@@ -40,6 +40,20 @@ impl KeyClipboard {
             snapshot.normalize_folders();
         }
         Some(Self { profile: snapshot })
+    }
+
+    /// A copy of an action inside a Multi Action or Key Logic key.
+    pub fn of_key(device: DeviceKind, key: &KeyConfig) -> Self {
+        let mut snapshot = Profile::new("Copied action", device);
+        if let Some(page) = snapshot.pages.first_mut() {
+            page.keys.insert(0, key.clone());
+        }
+        Self { profile: snapshot }
+    }
+
+    /// The copied action.
+    pub fn key(&self) -> Option<&KeyConfig> {
+        self.profile.pages.first()?.keys.get(&0)
     }
 
     pub fn text(&self) -> Result<String, String> {
@@ -88,6 +102,12 @@ impl KeyClipboard {
             .is_some_and(|k| k.action == deckly_core::profile::PARENT_FOLDER_ACTION)
         {
             return Err("The Parent Folder key cannot be replaced".into());
+        }
+        if self
+            .key()
+            .is_some_and(|k| k.action == deckly_core::profile::DELAY_ACTION)
+        {
+            return Err("A Delay only works inside a Multi Action".into());
         }
         let mut copy = self.profile.clone();
         // Normalize using the destination model's key count as well.
@@ -157,9 +177,35 @@ fn depth(profile: &Profile, key: &KeyConfig) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deckly_core::profile::{FOLDER_ACTION, PARENT_FOLDER_ACTION};
-    use deckly_core::{DeviceKind, TitleAlign, TitleStyle};
+    use deckly_core::profile::{DELAY_ACTION, FOLDER_ACTION, MULTI_ACTION, PARENT_FOLDER_ACTION};
+    use deckly_core::{TitleAlign, TitleStyle};
     use serde_json::json;
+
+    #[test]
+    fn group_keys_are_copied_with_their_actions() {
+        let mut source = Profile::new("Source", DeviceKind::Mk2);
+        let mut key = KeyConfig::new(MULTI_ACTION, json!({}));
+        key.groups[0].push(KeyConfig::new("org.example.action", json!({"n": 1})));
+        let page = source.pages[0].id.clone();
+        source.pages[0].keys.insert(0, key.clone());
+        let copy = KeyClipboard::copy(&source, &page, 0).unwrap();
+        let copy = KeyClipboard::from_text(&copy.text().unwrap())
+            .unwrap()
+            .unwrap();
+        copy.paste(&mut source, &page, 1, 0).unwrap();
+        assert_eq!(source.pages[0].keys[&1], key);
+    }
+
+    #[test]
+    fn a_delay_stays_inside_its_multi_action() {
+        let mut profile = Profile::new("Target", DeviceKind::Mk2);
+        let page = profile.pages[0].id.clone();
+        let delay = KeyConfig::new(DELAY_ACTION, json!({"delay": 500}));
+        let copy = KeyClipboard::of_key(DeviceKind::Mk2, &delay);
+        assert_eq!(copy.key(), Some(&delay));
+        assert!(copy.paste(&mut profile, &page, 0, 0).is_err());
+        assert!(profile.pages[0].keys.is_empty());
+    }
 
     fn source() -> Profile {
         let mut profile = Profile::new("Source", DeviceKind::Mk2);

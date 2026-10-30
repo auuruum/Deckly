@@ -10,6 +10,7 @@ use crate::actions::{self, Outcome};
 use crate::os::tray;
 use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
+use crate::sequence::{self, Press, Step};
 use crate::store;
 use deckly_core::profile::MAX_FOLDER_DEPTH;
 use deckly_core::{
@@ -215,7 +216,7 @@ impl State {
     }
 
     /// The context of a key on what a device shows now.
-    fn context(&self, serial: &str, key: u8) -> Option<String> {
+    pub(crate) fn context(&self, serial: &str, key: u8) -> Option<String> {
         let page = self.shown(self.assigned(serial)?)?;
         Some(plugins::context(&page.id, key))
     }
@@ -238,6 +239,17 @@ pub enum Msg {
     /// Device preferences or the global title style changed.
     Settings,
     Outcome(Handle, Result<Outcome, String>),
+    /// A sequence pressed or released a plugin action.
+    PluginStep {
+        handle: Handle,
+        step: Step,
+        pressed: bool,
+    },
+    /// A sequence ended or was cancelled.
+    RunDone {
+        context: String,
+        cancelled: bool,
+    },
     /// Store a standby picture (panel-sized) on the device with this serial.
     Standby {
         serial: String,
@@ -266,6 +278,8 @@ struct Link {
     active_at: Instant,
     /// The plugin key shown on each key, as its plugin was told.
     shown: Vec<Option<Shown>>,
+    /// Plugin actions inside the keys shown, by context.
+    members: HashMap<String, Shown>,
 }
 
 /// A plugin key as its plugin last heard of it.
@@ -289,6 +303,7 @@ impl Link {
             screensaver: false,
             active_at: Instant::now(),
             shown: vec![None; usize::from(info.model.key_count())],
+            members: HashMap::new(),
         }
     }
 
@@ -308,10 +323,28 @@ impl Link {
 
 type Links = HashMap<Handle, Link>;
 
+/// A Key Logic key between its press and what it turns out to be.
+struct Pending {
+    press: Press,
+    handle: Handle,
+    key: KeyConfig,
+}
+
+/// What Multi Action and Key Logic keys are doing, by context.
+#[derive(Default)]
+struct Groups {
+    /// Running sequences and what cancels each.
+    runs: HashMap<String, Sender<()>>,
+    /// Pressed to cancel a run; the release must not start another.
+    cancelling: HashSet<String>,
+    presses: HashMap<String, Pending>,
+}
+
 pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg> {
     let (tx, rx) = channel::<Msg>();
     let device_tx = tx.clone();
     let action_tx = tx.clone();
+    let step_tx = tx.clone();
     let run = move || {
         // DECKLY_NO_DEVICES=1 runs the editor without opening any device,
         // e.g. while the official app owns it.
@@ -325,13 +358,30 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
         let actions = start_action_worker(action_tx);
         let mut renderer = Renderer::new();
         let mut links: Links = HashMap::new();
+        let mut groups = Groups::default();
         // DECKLY_DEBUG=1 prints device events and action results to stderr.
         let debug = std::env::var_os("DECKLY_DEBUG").is_some();
         loop {
-            // Wait for the next message, until a device should sleep, or
-            // until a plugin's Alert/OK mark ends.
+            let tools = Tools {
+                state: &state,
+                actions: &actions,
+                host: host.as_ref(),
+                links: &links,
+                results: &step_tx,
+            };
+            if press_timers(&tools, &mut groups) {
+                refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                repaint();
+            }
+            // Wait for the next message, until a device should sleep, until
+            // a plugin's Alert/OK mark ends, or until a Key Logic press is
+            // decided.
             let mark_end = lock(&state).next_mark_end();
-            let wake = next_sleep(&state, &links).into_iter().chain(mark_end).min();
+            let wake = next_sleep(&state, &links)
+                .into_iter()
+                .chain(mark_end)
+                .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
+                .min();
             let msg = match wake {
                 Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(msg) => msg,
@@ -389,9 +439,10 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                         .map(|d| plugins::device_info(&s, d))
                         .collect();
                     drop(s);
+                    groups.presses.retain(|_, p| p.handle != handle);
                     let link = links.remove(&handle);
                     if let (Some(host), Some(link)) = (&host, link) {
-                        for shown in link.shown.iter().flatten() {
+                        for shown in link.shown.iter().flatten().chain(link.members.values()) {
                             host.send(&shown.plugin, shown.instance.event("willDisappear"));
                         }
                         host.set_devices(all);
@@ -406,6 +457,16 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     pressed,
                 }) => {
                     match key_event(&state, &devices, &mut links, handle, key, pressed) {
+                        Some(hit) if !hit.config.groups.is_empty() => {
+                            let tools = Tools {
+                                state: &state,
+                                actions: &actions,
+                                host: host.as_ref(),
+                                links: &links,
+                                results: &step_tx,
+                            };
+                            group_key(&tools, &mut groups, handle, hit, pressed);
+                        }
                         Some(hit) if hit.plugin => {
                             plugin_key(&state, host.as_ref(), &links, handle, &hit, pressed);
                         }
@@ -447,6 +508,17 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 }
                 Msg::Outcome(handle, result) => {
                     apply_outcome(&state, &devices, handle, result);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                    repaint();
+                }
+                Msg::PluginStep {
+                    handle,
+                    step,
+                    pressed,
+                } => plugin_step(&state, host.as_ref(), &links, handle, &step, pressed),
+                Msg::RunDone { context, cancelled } => {
+                    groups.runs.remove(&context);
+                    lock(&state).finish_run(&context, cancelled);
                     refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
@@ -527,6 +599,7 @@ struct KeyHit {
     index: u8,
     /// A plugin action, which hears releases too.
     plugin: bool,
+    context: String,
 }
 
 /// Handles a key change; returns the key whose action should hear of it.
@@ -543,12 +616,13 @@ fn key_event(
     let mut s = lock(state);
     let hit = |s: &State, config: KeyConfig| KeyHit {
         plugin: s.catalog.action(&config.action).is_some(),
+        context: s.context(&link.serial, key).unwrap_or_default(),
         config,
         index: key,
     };
     // A release always counts, so no key stays held after the device was
     // disabled with a key down. Plugins hear the release of a press they
-    // heard.
+    // heard, and Multi Actions run on it.
     if !pressed {
         if !s.pressed.remove(&(handle, key)) {
             return None;
@@ -556,7 +630,7 @@ fn key_event(
         return s
             .key(&link.serial, key)
             .map(|c| hit(&s, c))
-            .filter(|h| h.plugin);
+            .filter(|h| h.plugin || !h.config.groups.is_empty());
     }
     if !link.enabled {
         return None;
@@ -609,6 +683,189 @@ fn plugin_key(
     }
 }
 
+/// Presses or releases a plugin action on behalf of its Multi Action or Key
+/// Logic key.
+fn plugin_step(
+    state: &Shared,
+    host: Option<&Host>,
+    links: &Links,
+    handle: Handle,
+    step: &Step,
+    pressed: bool,
+) {
+    let (Some(host), Some(link)) = (host, links.get(&handle)) else {
+        return;
+    };
+    let mut s = lock(state);
+    let Some((plugin, states, automatic)) = s
+        .catalog
+        .action(&step.key.action)
+        .map(|(p, a)| (p.id.clone(), a.states.len(), a.automatic_states))
+    else {
+        return;
+    };
+    let mut instance = s.instance(&step.context, &step.key);
+    instance.device = protocol::device_id(&link.serial);
+    host.send(
+        &plugin,
+        instance.event(if pressed { "keyDown" } else { "keyUp" }),
+    );
+    if !pressed && automatic && states > 1 && !instance.in_multi_action {
+        let key = s.plugin_key(&step.context, states);
+        key.state = (key.state + 1) % states;
+    }
+}
+
+/// What a Multi Action or Key Logic key needs from the runtime.
+struct Tools<'a> {
+    state: &'a Shared,
+    actions: &'a Sender<(Handle, KeyConfig)>,
+    host: Option<&'a Host>,
+    links: &'a Links,
+    results: &'a Sender<Msg>,
+}
+
+/// A press of a Multi Action key cancels its run; a release starts one. Key
+/// Logic keys work out which press this was.
+fn group_key(tools: &Tools, groups: &mut Groups, handle: Handle, hit: KeyHit, pressed: bool) {
+    let context = hit.context.clone();
+    if hit.config.action == actions::KEY_LOGIC {
+        key_logic(tools, groups, handle, hit, pressed);
+    } else if pressed {
+        if let Some(run) = groups.runs.get(&context) {
+            let _ = run.send(());
+            groups.cancelling.insert(context);
+        }
+    } else if !groups.cancelling.remove(&context) && !groups.runs.contains_key(&context) {
+        start_run(tools, groups, handle, &hit);
+    }
+}
+
+fn start_run(tools: &Tools, groups: &mut Groups, handle: Handle, hit: &KeyHit) {
+    let Some((list, members)) = sequence::chosen(&hit.config) else {
+        lock(tools.state).mark_key(&hit.context, plugins::Mark::Alert);
+        return;
+    };
+    let s = lock(tools.state);
+    let steps = members
+        .into_iter()
+        .filter_map(|i| {
+            let key = hit.config.groups.get(list)?.get(i)?.clone();
+            Some(Step {
+                plugin: s.catalog.action(&key.action).is_some(),
+                context: format!("{}.{list}.{i}", hit.context),
+                key,
+            })
+        })
+        .collect();
+    drop(s);
+    if let Some(run) = sequence::start(steps, handle, hit.context.clone(), tools.results.clone()) {
+        groups.runs.insert(hit.context.clone(), run);
+    }
+}
+
+fn key_logic(tools: &Tools, groups: &mut Groups, handle: Handle, hit: KeyHit, pressed: bool) {
+    let now = Instant::now();
+    let pending = groups
+        .presses
+        .entry(hit.context.clone())
+        .or_insert_with(|| Pending {
+            press: Press::default(),
+            handle,
+            key: hit.config,
+        });
+    let slot = if pressed {
+        pending.press.down(now)
+    } else {
+        let held = pending.press.take_down();
+        if let Some(slot) = held {
+            release_slot(tools, handle, &pending.key, &hit.context, slot);
+        }
+        pending.press.up(now)
+    };
+    if let Some(slot) = slot {
+        let key = pending.key.clone();
+        trigger(tools, groups, handle, &key, &hit.context, slot);
+    }
+    if groups
+        .presses
+        .get(&hit.context)
+        .is_some_and(|p| p.press.idle())
+    {
+        groups.presses.remove(&hit.context);
+    }
+}
+
+fn member_step(state: &Shared, key: &KeyConfig, context: &str, slot: usize) -> Option<Step> {
+    let member = key.groups.get(slot)?.first()?.clone();
+    Some(Step {
+        plugin: lock(state).catalog.action(&member.action).is_some(),
+        context: plugins::member_context_of(context, slot, 0),
+        key: member,
+    })
+}
+
+/// Runs a Key Logic slot. A single press taps its action; the others hold it
+/// until the key comes up. An empty slot shows an alert.
+fn trigger(
+    tools: &Tools,
+    groups: &mut Groups,
+    handle: Handle,
+    key: &KeyConfig,
+    context: &str,
+    slot: usize,
+) {
+    let Some(mut step) = member_step(tools.state, key, context, slot) else {
+        lock(tools.state).mark_key(context, plugins::Mark::Alert);
+        return;
+    };
+    if slot == sequence::SINGLE {
+        step.key.delays = Some(deckly_core::ActionDelays {
+            press: sequence::TAP,
+            next: deckly_core::ActionDelays::MIN,
+        });
+        if let Some(run) = sequence::start(
+            vec![step],
+            handle,
+            context.to_owned(),
+            tools.results.clone(),
+        ) {
+            groups.runs.insert(context.to_owned(), run);
+        }
+    } else if step.plugin {
+        plugin_step(tools.state, tools.host, tools.links, handle, &step, true);
+    } else {
+        let _ = tools.actions.send((handle, step.key));
+    }
+}
+
+fn release_slot(tools: &Tools, handle: Handle, key: &KeyConfig, context: &str, slot: usize) {
+    if let Some(step) = member_step(tools.state, key, context, slot)
+        && step.plugin
+    {
+        plugin_step(tools.state, tools.host, tools.links, handle, &step, false);
+    }
+}
+
+/// Decides Key Logic presses whose time ran out; returns whether any was.
+fn press_timers(tools: &Tools, groups: &mut Groups) -> bool {
+    let now = Instant::now();
+    let due: Vec<(String, Handle, KeyConfig, usize)> = groups
+        .presses
+        .iter_mut()
+        .filter_map(|(context, p)| {
+            let slot = p.press.tick(now)?;
+            Some((context.clone(), p.handle, p.key.clone(), slot))
+        })
+        .collect();
+    groups.presses.retain(|_, p| !p.press.idle());
+    let fired = !due.is_empty();
+    for (context, handle, key, slot) in due {
+        trigger(tools, groups, handle, &key, &context, slot);
+    }
+    fired
+}
+
 /// Tells a plugin that just registered about the devices and its keys.
 fn plugin_started(state: &Shared, host: &Host, links: &Links, plugin: &str) {
     let s = lock(state);
@@ -619,11 +876,35 @@ fn plugin_started(state: &Shared, host: &Host, links: &Links, plugin: &str) {
         );
     }
     drop(s);
-    for shown in links.values().flat_map(|l| l.shown.iter().flatten()) {
+    let keys = links.values().flat_map(|l| l.shown.iter().flatten());
+    let members = links.values().flat_map(|l| l.members.values());
+    for shown in keys.chain(members) {
         if shown.plugin == plugin {
             host.send(plugin, shown.instance.event("willAppear"));
         }
     }
+}
+
+/// Tells plugins when actions inside shown keys appear and disappear; they
+/// expect that before a Multi Action presses them.
+fn update_members(host: Option<&Host>, link: &mut Link, new: HashMap<String, Shown>) {
+    if let Some(host) = host {
+        for (context, old) in &link.members {
+            if new.get(context).is_none_or(|n| n.plugin != old.plugin) {
+                host.send(&old.plugin, old.instance.event("willDisappear"));
+            }
+        }
+        for (context, n) in &new {
+            if link
+                .members
+                .get(context)
+                .is_none_or(|o| o.plugin != n.plugin)
+            {
+                host.send(&n.plugin, n.instance.event("willAppear"));
+            }
+        }
+    }
+    link.members = new;
 }
 
 /// Tells plugins when their keys appear, disappear or get a new title.
@@ -858,6 +1139,37 @@ struct KeyView {
     shown: Option<Shown>,
 }
 
+/// The plugin actions inside a key.
+fn member_views(
+    s: &State,
+    page: &str,
+    index: u8,
+    key: &KeyConfig,
+    device: &str,
+) -> Vec<(String, Shown)> {
+    let mut views = Vec::new();
+    for (l, list) in key.groups.iter().enumerate() {
+        for (i, member) in list.iter().enumerate() {
+            let Some((plugin, _)) = s.catalog.action(&member.action) else {
+                continue;
+            };
+            let context = plugins::member_context(page, index, l, i);
+            let mut instance = s.instance(&context, member);
+            instance.device = device.to_owned();
+            views.push((
+                context,
+                Shown {
+                    plugin: plugin.id.clone(),
+                    instance,
+                    title: member.title.clone(),
+                    style: TitleStyle::default(),
+                },
+            ));
+        }
+    }
+    views
+}
+
 fn refresh(
     state: &Shared,
     devices: &DeviceManager,
@@ -866,7 +1178,7 @@ fn refresh(
     host: Option<&Host>,
 ) {
     // Collect the work under the lock, render without it.
-    let mut work: Vec<(Handle, Vec<KeyView>)> = Vec::new();
+    let mut work: Vec<(Handle, Vec<KeyView>, HashMap<String, Shown>)> = Vec::new();
     {
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style;
@@ -886,6 +1198,11 @@ fn refresh(
                 .unwrap_or_default();
             let live = profile.map(|p| s.live(p)).unwrap_or_default();
             let device_id = protocol::device_id(&d.serial);
+            let members = page
+                .keys
+                .iter()
+                .flat_map(|(&k, key)| member_views(&s, &page.id, k, key, &device_id))
+                .collect();
             let keys = (0..d.model.key_count())
                 .map(|k| {
                     let pressed = s.pressed.contains(&(d.handle, k));
@@ -911,13 +1228,14 @@ fn refresh(
                     }
                 })
                 .collect();
-            work.push((d.handle, keys));
+            work.push((d.handle, keys, members));
         }
     }
-    for (handle, keys) in work {
+    for (handle, keys, members) in work {
         let Some(link) = links.get_mut(&handle) else {
             continue;
         };
+        update_members(host, link, members);
         let count = link.model.key_count();
         for (index, view) in keys.into_iter().enumerate() {
             if let Some(slot) = link.shown.get_mut(index) {
@@ -985,6 +1303,100 @@ mod tests {
             ]
         );
         assert_eq!(devices[0].active, Some(second_id));
+    }
+
+    struct Bench {
+        state: Shared,
+        actions: Sender<(Handle, KeyConfig)>,
+        actions_rx: std::sync::mpsc::Receiver<(Handle, KeyConfig)>,
+        results: Sender<Msg>,
+        results_rx: std::sync::mpsc::Receiver<Msg>,
+        links: Links,
+        groups: Groups,
+    }
+
+    impl Bench {
+        fn new() -> Self {
+            let (actions, actions_rx) = channel();
+            let (results, results_rx) = channel();
+            Self {
+                state: Arc::new(Mutex::new(State::new(Vec::new(), Settings::default()))),
+                actions,
+                actions_rx,
+                results,
+                results_rx,
+                links: Links::new(),
+                groups: Groups::default(),
+            }
+        }
+
+        fn key(&mut self, config: &KeyConfig, pressed: bool) {
+            let tools = Tools {
+                state: &self.state,
+                actions: &self.actions,
+                host: None,
+                links: &self.links,
+                results: &self.results,
+            };
+            let hit = KeyHit {
+                config: config.clone(),
+                index: 0,
+                plugin: false,
+                context: "p.0".into(),
+            };
+            group_key(&tools, &mut self.groups, 1, hit, pressed);
+        }
+    }
+
+    #[test]
+    fn a_release_starts_a_run_and_a_press_cancels_it() {
+        let mut bench = Bench::new();
+        let mut key = KeyConfig::new(actions::MULTI_ACTION, json!({}));
+        key.groups[0].push(KeyConfig::new(actions::DELAY, json!({"delay": 60_000})));
+        bench.key(&key, true);
+        assert!(bench.groups.runs.is_empty());
+        bench.key(&key, false);
+        assert!(bench.groups.runs.contains_key("p.0"));
+        bench.key(&key, true);
+        // The release of the cancelling press starts nothing.
+        bench.key(&key, false);
+        assert!(bench.groups.cancelling.is_empty());
+        assert!(matches!(
+            bench.results_rx.recv(),
+            Ok(Msg::RunDone {
+                cancelled: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_empty_multi_action_shows_an_alert() {
+        let mut bench = Bench::new();
+        let key = KeyConfig::new(actions::MULTI_ACTION, json!({}));
+        bench.key(&key, true);
+        bench.key(&key, false);
+        assert!(bench.groups.runs.is_empty());
+        let s = lock(&bench.state);
+        assert_eq!(
+            s.overlay("p.0", &key).and_then(|o| o.mark),
+            Some(plugins::Mark::Alert)
+        );
+    }
+
+    #[test]
+    fn key_logic_runs_the_action_of_a_double_press() {
+        let mut bench = Bench::new();
+        let mut key = KeyConfig::new(actions::KEY_LOGIC, json!({}));
+        key.groups[sequence::DOUBLE].push(KeyConfig::new(actions::NEXT_PAGE, json!({})));
+        for pressed in [true, false, true] {
+            bench.key(&key, pressed);
+        }
+        let (_, member) = bench.actions_rx.try_recv().unwrap();
+        assert_eq!(member.action, actions::NEXT_PAGE);
+        bench.key(&key, false);
+        assert!(bench.groups.presses.is_empty());
+        assert!(bench.groups.runs.is_empty());
     }
 
     #[test]

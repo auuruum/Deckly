@@ -18,6 +18,7 @@ pub const KEY_DROP: Color32 = Color32::from_rgb(0x3E, 0x7A, 0xC0);
 pub const PAGER: Color32 = Color32::from_rgb(0x37, 0x37, 0x37);
 pub const PAGER_CHIP: Color32 = Color32::from_rgb(0xC8, 0xC8, 0xC8);
 pub const PAGER_CHIP_TEXT: Color32 = Color32::from_rgb(0x2D, 0x2D, 0x2D);
+pub const MEMBER_ROW: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 
 // Right column: action list.
 pub const LIST: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
