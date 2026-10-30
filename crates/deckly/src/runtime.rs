@@ -7,6 +7,7 @@
 //! the runtime re-renders only keys whose image changed.
 
 use crate::actions::{self, Outcome};
+use crate::os::tray;
 use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
 use crate::store;
@@ -178,6 +179,24 @@ impl State {
         } else {
             name
         }
+    }
+
+    /// The connected devices as the tray menu lists them.
+    pub fn tray_devices(&self) -> Vec<tray::Device> {
+        self.devices
+            .iter()
+            .map(|d| tray::Device {
+                serial: d.serial.clone(),
+                name: self.device_name(d),
+                profiles: self
+                    .profiles
+                    .iter()
+                    .filter(|p| p.device == d.model.kind)
+                    .map(|p| (p.id.clone(), p.name.clone()))
+                    .collect(),
+                active: self.assigned(&d.serial).map(|p| p.id.clone()),
+            })
+            .collect()
     }
 
     pub fn save_settings(&mut self) {
@@ -934,6 +953,39 @@ pub const NOTICE_TIME: Duration = Duration::from_secs(6);
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tray_lists_the_profiles_of_each_device() {
+        let first = Profile::new("First", DeviceKind::Mk2);
+        let second = Profile::new("Second", DeviceKind::Mk2);
+        let other_model = Profile::new("Mini", DeviceKind::Mini);
+        let (first_id, second_id) = (first.id.clone(), second.id.clone());
+        let model = first.model();
+        let mut state = State::new(vec![first, second, other_model], Settings::default());
+        assert!(state.tray_devices().is_empty());
+        state.devices.push(ConnectedDevice {
+            handle: 1,
+            model,
+            serial: "S1".into(),
+            firmware: None,
+        });
+        state
+            .settings
+            .assignments
+            .insert("S1".into(), second_id.clone());
+        let devices = state.tray_devices();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].serial, "S1");
+        assert_eq!(devices[0].name, model.name);
+        assert_eq!(
+            devices[0].profiles,
+            vec![
+                (first_id, "First".to_owned()),
+                (second_id.clone(), "Second".to_owned())
+            ]
+        );
+        assert_eq!(devices[0].active, Some(second_id));
+    }
 
     #[test]
     fn open_folders_are_shown_and_close_when_deleted() {

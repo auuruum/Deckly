@@ -5,6 +5,7 @@
 
 mod actions;
 mod app;
+mod background;
 mod clipboard;
 mod cropper;
 mod history;
@@ -26,6 +27,34 @@ fn main() -> eframe::Result {
     {
         std::process::exit(deckly_plugin_host::run_guard(&args[1..]));
     }
+    let instance = match store::config_dir().map(|dir| os::instance::claim(&dir)) {
+        Some(Ok(Some(instance))) => Some(instance),
+        Some(Ok(None)) => return Ok(()),
+        Some(Err(e)) => {
+            eprintln!("deckly: cannot check for a running Deckly: {e}");
+            None
+        }
+        None => None,
+    };
+    let background = background::Background::start(instance);
+    loop {
+        let window = background.clone();
+        let result = eframe::run_native(
+            "Deckly",
+            options(),
+            Box::new(|cc| Ok(Box::new(app::App::new(cc, window)))),
+        );
+        if let Err(e) = result {
+            background.shutdown();
+            return Err(e);
+        }
+        if !background.wait_for_window() {
+            return Ok(());
+        }
+    }
+}
+
+fn options() -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deckly")
@@ -36,11 +65,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     lean_wgpu(&mut options.wgpu_options.wgpu_setup);
-    eframe::run_native(
-        "Deckly",
-        options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
-    )
+    options
 }
 
 /// The editor draws a few small textures, so wgpu's default memory blocks

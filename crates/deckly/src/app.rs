@@ -6,8 +6,10 @@
 //! of the current profile each frame and writes it back when it changed.
 
 use crate::actions::{self, ACTIONS, Category};
+use crate::background::Background;
 use crate::clipboard::{self, KeyClipboard};
 use crate::history::{Direction, History, Location};
+use crate::os::tray::Command;
 use crate::os::{Hotkey, MediaKey};
 use crate::plugins::{self, KeyImage, Overlay};
 use crate::prefs::{self, Preferences};
@@ -27,7 +29,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -203,47 +207,20 @@ pub struct App {
     split: f32,
     /// Width of the action list; dragging its left edge changes it.
     list_width: f32,
+    background: Rc<Background>,
+    /// The tray asked for Preferences; they open with the next pass.
+    prefs_after_show: bool,
+    /// Closing the window keeps Deckly running. Off without a tray, and once
+    /// the user chose to quit.
+    close_to_tray: bool,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, background: Rc<Background>) -> Self {
         apply(&cc.egui_ctx);
-        let (profiles, errors) = store::load_profiles();
-        let (settings, settings_error) = store::load_settings();
-        let mut state = runtime::State::new(profiles, settings);
-        if let Some(e) = settings_error {
-            eprintln!("deckly: {e}");
-            state.notify("Settings could not be loaded; using defaults");
-        }
-        if !errors.is_empty() {
-            for e in &errors {
-                eprintln!("deckly: {e}");
-            }
-            state.notify(format!(
-                "{} profile file(s) could not be loaded",
-                errors.len()
-            ));
-        }
-        let state: Shared = Arc::new(std::sync::Mutex::new(state));
-        let ctx = cc.egui_ctx.clone();
-        let repaint: runtime::Repaint = Arc::new(move || ctx.request_repaint());
-        let (host, host_events) = start_host();
-        if host.is_none() {
-            runtime::lock(&state).notify("Plugins could not be started");
-        }
-        let runtime = runtime::start(state.clone(), repaint.clone(), host.clone());
-        if let (Some(host), Some(events)) = (&host, host_events) {
-            plugins::start(
-                state.clone(),
-                runtime.clone(),
-                host.clone(),
-                events,
-                repaint,
-            );
-        }
         Self {
-            state,
-            runtime,
+            state: background.state.clone(),
+            runtime: background.runtime.clone(),
             renderer: Renderer::new(),
             textures: HashMap::new(),
             selected_device: None,
@@ -252,7 +229,7 @@ impl App {
             search: String::new(),
             tab: ListTab::Keys,
             expanded: HashSet::from([Category::System.label().to_owned()]),
-            host,
+            host: background.host.clone(),
             images: HashMap::new(),
             plugin_page_area: None,
             plugin_page_requested: None,
@@ -270,7 +247,71 @@ impl App {
             folder_nav: None,
             split: DEFAULT_SPLIT,
             list_width: LIST_WIDTH,
+            close_to_tray: background.attach(&cc.egui_ctx),
+            background,
+            prefs_after_show: false,
         }
+    }
+
+    /// Handles closing the window and what the tray and later starts ask.
+    fn tick(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.prefs_after_show) {
+            self.prefs.open(ctx, self.selected_device.as_deref());
+        }
+        if self.close_to_tray && ctx.input(|i| i.viewport().close_requested()) {
+            if self.background.reopens_window() {
+                self.background.set_closing_to_tray(true);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.hide(ctx);
+            }
+        }
+        while let Some(command) = self.background.next_command() {
+            match command {
+                Command::Show => self.show(ctx),
+                Command::Preferences => {
+                    self.show(ctx);
+                    // A hidden window's pass cannot create windows: egui
+                    // panics. By the next pass this window is shown.
+                    self.prefs_after_show = true;
+                    ctx.request_repaint();
+                }
+                Command::Profile { serial, id } => {
+                    self.selected_key = None;
+                    self.background.switch_profile(&serial, id);
+                }
+                Command::Refresh => {}
+                Command::Quit => {
+                    self.close_to_tray = false;
+                    self.background.set_closing_to_tray(false);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+        self.background.refresh_tray();
+    }
+
+    /// Puts the window in the tray. Devices and plugins run on their own
+    /// threads and carry on; what floats over the window goes with it.
+    fn hide(&mut self, ctx: &egui::Context) {
+        self.save_pending(true);
+        self.prefs.close();
+        self.prefs_after_show = false;
+        if let Some(host) = &self.host {
+            host.close_inspector();
+        }
+        self.plugin_page_requested = None;
+        self.plugin_page_area = None;
+        self.plugin_page_placed = None;
+        self.background.hidden.store(true, Ordering::Relaxed);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn show(&mut self, ctx: &egui::Context) {
+        self.background.hidden.store(false, Ordering::Relaxed);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Picks the device and profile the editor shows this frame. Returns the
@@ -2082,7 +2123,17 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Unlike `ui`, this also runs while the window is minimized.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tick(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // egui treats only minimized and covered windows as not visible, so
+        // this runs for a hidden one too.
+        if self.background.hidden.load(Ordering::Relaxed) {
+            return;
+        }
         let ctx = ui.ctx().clone();
         self.plugin_page_area = None;
         // Set the owner before a selected key can request its settings page.
@@ -2291,12 +2342,12 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.save_pending(true);
-        if let Some(host) = &self.host {
-            host.shutdown();
+        self.background.detach();
+        if !self.background.closing_to_tray() {
+            self.background.shutdown();
+        } else if let Some(host) = &self.host {
+            host.close_inspector();
         }
-        let _ = self.runtime.send(Msg::Shutdown);
-        // Give the writer threads a moment to send the reset.
-        std::thread::sleep(Duration::from_millis(150));
     }
 }
 
@@ -2422,50 +2473,6 @@ fn status_text(status: &Status) -> (String, Color32) {
 fn open_path(state: &Shared, path: &str) {
     if let Err(e) = crate::os::open(path) {
         runtime::lock(state).notify(e);
-    }
-}
-
-/// Starts the plugin host; plugins live in the config folder and run with
-/// the `deckly-web` helper installed next to Deckly.
-fn start_host() -> (
-    Option<Host>,
-    Option<std::sync::mpsc::Receiver<deckly_plugin_host::HostEvent>>,
-) {
-    let Some(dir) = store::config_dir() else {
-        return (None, None);
-    };
-    let helper = std::env::current_exe().ok().and_then(|exe| {
-        let name = if cfg!(windows) {
-            "deckly-web.exe"
-        } else {
-            "deckly-web"
-        };
-        Some(exe.parent()?.join(name))
-    });
-    let config = deckly_plugin_host::Config {
-        plugins_dir: dir.join("plugins"),
-        logs_dir: dir.join("logs").join("plugins"),
-        web_helper: helper,
-        node: std::env::var_os("DECKLY_NODE").map(PathBuf::from),
-        guard: std::env::current_exe().ok(),
-        runtimes_dir: dir.join("runtimes"),
-        app: deckly_plugin_host::AppInfo {
-            language: "en".into(),
-            platform_version: String::new(),
-            font: if cfg!(windows) {
-                "Segoe UI".into()
-            } else {
-                String::new()
-            },
-        },
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    match Host::start(config, tx) {
-        Ok(host) => (Some(host), Some(rx)),
-        Err(e) => {
-            eprintln!("deckly: cannot start plugins: {e}");
-            (None, None)
-        }
     }
 }
 
@@ -2632,17 +2639,150 @@ fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
 }
 
 #[cfg(test)]
+mod tray_tests {
+    use super::clipboard_tests::editor;
+    use super::*;
+    use eframe::egui::{ViewportCommand, ViewportEvent, ViewportId};
+
+    /// Runs what eframe runs for a hidden window: `tick`, without any ui.
+    fn pass(app: &mut App, ctx: &egui::Context, close: bool) -> Vec<ViewportCommand> {
+        let mut input = egui::RawInput::default();
+        if close && let Some(root) = input.viewports.get_mut(&ViewportId::ROOT) {
+            root.events.push(ViewportEvent::Close);
+        }
+        ctx.run_logic(&input, |ctx| app.tick(ctx))
+            .viewport_commands
+            .remove(&ViewportId::ROOT)
+            .unwrap_or_default()
+    }
+
+    fn tray_editor(reopens_window: bool) -> App {
+        App {
+            background: Background::idle(reopens_window),
+            close_to_tray: true,
+            ..editor()
+        }
+    }
+
+    #[test]
+    fn closing_hides_the_window_and_what_floats_over_it() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(false);
+        app.prefs.open(&ctx, None);
+        let commands = pass(&mut app, &ctx, true);
+        assert!(commands.contains(&ViewportCommand::CancelClose));
+        assert!(commands.contains(&ViewportCommand::Visible(false)));
+        assert!(app.background.hidden.load(Ordering::Relaxed));
+        assert!(!app.prefs.is_open());
+    }
+
+    #[test]
+    fn closing_quits_without_a_tray() {
+        let ctx = egui::Context::default();
+        let mut app = editor();
+        assert!(pass(&mut app, &ctx, true).is_empty());
+        assert!(!app.background.closing_to_tray());
+    }
+
+    #[test]
+    fn closing_really_closes_where_the_window_cannot_hide() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(true);
+        assert!(pass(&mut app, &ctx, true).is_empty());
+        assert!(app.background.closing_to_tray());
+        assert!(!app.background.hidden.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn quit_right_after_closing_still_quits() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(true);
+        app.background.send(Command::Quit);
+        assert!(pass(&mut app, &ctx, true).contains(&ViewportCommand::Close));
+        assert!(!app.background.closing_to_tray());
+    }
+
+    #[test]
+    fn show_brings_a_hidden_or_minimized_window_back() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(false);
+        pass(&mut app, &ctx, true);
+        app.background.send(Command::Show);
+        let commands = pass(&mut app, &ctx, false);
+        assert!(commands.contains(&ViewportCommand::Visible(true)));
+        assert!(commands.contains(&ViewportCommand::Minimized(false)));
+        assert!(commands.contains(&ViewportCommand::Focus));
+        assert!(!app.background.hidden.load(Ordering::Relaxed));
+        assert!(!app.prefs.is_open());
+    }
+
+    #[test]
+    fn preferences_from_the_tray_show_the_hidden_window_too() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(false);
+        pass(&mut app, &ctx, true);
+        app.background.send(Command::Preferences);
+        let commands = pass(&mut app, &ctx, false);
+        assert!(commands.contains(&ViewportCommand::Visible(true)));
+        assert!(!app.background.hidden.load(Ordering::Relaxed));
+        pass(&mut app, &ctx, false);
+        assert!(app.prefs.is_open());
+    }
+
+    /// Clicking Preferences in the tray with the window hidden crashed:
+    /// `ui` follows `tick` in the same pass, and in a hidden window's pass
+    /// eframe cannot create a window, so it never calls the viewport's
+    /// callback and egui panics.
+    #[test]
+    fn preferences_wait_for_a_pass_that_can_create_their_window() {
+        egui::Context::set_immediate_viewport_renderer(|_, _| {});
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = tray_editor(false);
+        pass(&mut app, &ctx, true);
+        app.background.send(Command::Preferences);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.tick(ui.ctx());
+            app.preferences(ui.ctx(), None, DeviceKind::Mk2);
+        });
+        output.textures_delta.clear();
+        assert!(!app.prefs.is_open());
+        pass(&mut app, &ctx, false);
+        assert!(app.prefs.is_open());
+    }
+
+    #[test]
+    fn closing_again_cancels_preferences_that_are_on_their_way() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(false);
+        app.background.send(Command::Preferences);
+        pass(&mut app, &ctx, false);
+        pass(&mut app, &ctx, true);
+        pass(&mut app, &ctx, false);
+        assert!(!app.prefs.is_open());
+    }
+
+    #[test]
+    fn quit_is_not_held_back_by_the_tray() {
+        let ctx = egui::Context::default();
+        let mut app = tray_editor(false);
+        pass(&mut app, &ctx, true);
+        app.background.send(Command::Quit);
+        assert!(pass(&mut app, &ctx, false).contains(&ViewportCommand::Close));
+        // eframe answers that command with a close request.
+        assert!(pass(&mut app, &ctx, true).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod clipboard_tests {
     use super::*;
 
-    fn editor() -> App {
-        let (runtime, _) = std::sync::mpsc::channel();
+    pub(super) fn editor() -> App {
+        let background = Background::idle(false);
         App {
-            state: Arc::new(std::sync::Mutex::new(runtime::State::new(
-                Vec::new(),
-                Default::default(),
-            ))),
-            runtime,
+            state: background.state.clone(),
+            runtime: background.runtime.clone(),
             renderer: Renderer::new(),
             textures: HashMap::new(),
             selected_device: None,
@@ -2669,6 +2809,9 @@ mod clipboard_tests {
             folder_nav: None,
             split: DEFAULT_SPLIT,
             list_width: LIST_WIDTH,
+            background,
+            prefs_after_show: false,
+            close_to_tray: false,
         }
     }
 

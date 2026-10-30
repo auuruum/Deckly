@@ -31,6 +31,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-28 | [Plugin host](2026-10-28-plugin-host.md) | Plugin launch arguments, registration, info object, events and commands, manifests |
 | 2026-10-28 | [Action copy and paste](2026-10-28-action-clipboard.md) | Keyboard shortcuts, replacement confirmation, complete key and folder snapshots |
 | 2026-10-28 | [Editor undo and redo](2026-10-28-editor-history.md) | Profile edit history, action and page restoration, shortcuts and memory limits |
+| 2026-10-30 | [Official app 7.6: tray menu](2026-10-30-tray-menu.md) | Menu groups, device heading, profile list with the active one checked |
 
 ## Open questions
 
