@@ -23,19 +23,31 @@ pub const PARENT_FOLDER: &str = deckly_core::profile::PARENT_FOLDER_ACTION;
 pub const PAGE_INDICATOR: &str = "com.deckly.navigation.page-indicator";
 pub const BRIGHTNESS: &str = "com.deckly.device.brightness";
 pub const SLEEP: &str = "com.deckly.device.sleep";
+pub const MULTI_ACTION: &str = deckly_core::profile::MULTI_ACTION;
+pub const MULTI_ACTION_SWITCH: &str = deckly_core::profile::MULTI_ACTION_SWITCH;
+pub const RANDOM_ACTION: &str = deckly_core::profile::RANDOM_ACTION;
+pub const KEY_LOGIC: &str = deckly_core::profile::KEY_LOGIC;
+pub const DELAY: &str = deckly_core::profile::DELAY_ACTION;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
+    MultiAction,
     System,
     Navigation,
     Device,
 }
 
 impl Category {
-    pub const ALL: [Category; 3] = [Category::Navigation, Category::Device, Category::System];
+    pub const ALL: [Category; 4] = [
+        Category::MultiAction,
+        Category::Navigation,
+        Category::Device,
+        Category::System,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Category::MultiAction => "Multi Action",
             Category::System => "System",
             Category::Navigation => "Navigation",
             Category::Device => "Device",
@@ -44,6 +56,7 @@ impl Category {
 
     pub fn icon(self) -> &'static str {
         match self {
+            Category::MultiAction => icon::STACK,
             Category::System => icon::DESKTOP_TOWER,
             Category::Navigation => icon::ARROWS_OUT_CARDINAL,
             Category::Device => icon::SQUARES_FOUR,
@@ -61,6 +74,46 @@ pub struct ActionDef {
 }
 
 pub const ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        uuid: MULTI_ACTION,
+        name: "Multi Action",
+        category: Category::MultiAction,
+        icon: icon::STACK,
+        tooltip: "Run several actions in a row",
+        defaults: || json!({}),
+    },
+    ActionDef {
+        uuid: MULTI_ACTION_SWITCH,
+        name: "Multi Action Switch",
+        category: Category::MultiAction,
+        icon: icon::SWAP,
+        tooltip: "Alternate between two Multi Actions",
+        defaults: || json!({}),
+    },
+    ActionDef {
+        uuid: RANDOM_ACTION,
+        name: "Random Action",
+        category: Category::MultiAction,
+        icon: icon::SHUFFLE,
+        tooltip: "Run one action, picked at random",
+        defaults: || json!({}),
+    },
+    ActionDef {
+        uuid: KEY_LOGIC,
+        name: "Key Logic",
+        category: Category::MultiAction,
+        icon: icon::HAND_TAP,
+        tooltip: "Different actions for a press, a double press and a hold",
+        defaults: || json!({}),
+    },
+    ActionDef {
+        uuid: DELAY,
+        name: "Delay",
+        category: Category::MultiAction,
+        icon: icon::TIMER,
+        tooltip: "Pause the sequence of actions",
+        defaults: || json!({ "delay": 1000 }),
+    },
     ActionDef {
         uuid: WEBSITE,
         name: "Website",
@@ -178,6 +231,25 @@ pub const PLACED: &[ActionDef] = &[ActionDef {
     defaults: || json!({}),
 }];
 
+/// The longest pause a Delay action takes.
+pub const MAX_DELAY_MS: i64 = 3_600_000;
+
+/// Whether the action list shows a built-in action: `holder` is the action
+/// of the open Multi Action or Key Logic key. Page actions work in Key Logic
+/// but not in a sequence, and Delay exists only inside a sequence.
+pub fn listed(uuid: &str, holder: Option<&str>) -> bool {
+    match holder {
+        None => uuid != DELAY,
+        Some(holder) => {
+            let paged = matches!(
+                uuid,
+                NEXT_PAGE | PREVIOUS_PAGE | GO_TO_PAGE | PAGE_INDICATOR
+            );
+            KeyConfig::new(holder, json!({})).can_hold(uuid) && (holder == KEY_LOGIC || !paged)
+        }
+    }
+}
+
 pub fn find(uuid: &str) -> Option<&'static ActionDef> {
     ACTIONS.iter().chain(PLACED).find(|a| a.uuid == uuid)
 }
@@ -186,8 +258,23 @@ pub fn new_key(def: &ActionDef) -> KeyConfig {
     KeyConfig::new(def.uuid, (def.defaults)())
 }
 
+/// The side a Multi Action Switch is on, 0 or 1.
+pub fn switch_side(key: &KeyConfig) -> usize {
+    usize::from(int_setting(&key.settings, "side", 0) == 1)
+}
+
+pub fn set_switch_side(key: &mut KeyConfig, side: usize) {
+    set_setting(&mut key.settings, "side", json!(side));
+}
+
 /// The icon drawn on a key that has no custom image.
 pub fn key_icon(key: &KeyConfig) -> &'static str {
+    if key.action == MULTI_ACTION_SWITCH {
+        return match switch_side(key) {
+            0 => icon::TOGGLE_LEFT,
+            _ => icon::TOGGLE_RIGHT,
+        };
+    }
     if key.action == MULTIMEDIA {
         return match media_setting(&key.settings) {
             Some(MediaKey::Next) => icon::SKIP_FORWARD,
@@ -355,8 +442,8 @@ pub fn run(key: &KeyConfig) -> Result<Outcome, String> {
             _ => Err("this folder cannot be opened".into()),
         },
         PARENT_FOLDER => Ok(Outcome::ParentFolder),
-        // Only shows the page number.
-        PAGE_INDICATOR => Ok(Outcome::Done),
+        // Only shows the page number; Delay is waited for by the sequence.
+        PAGE_INDICATOR | DELAY => Ok(Outcome::Done),
         BRIGHTNESS => {
             let value = int_setting(s, "value", 10).clamp(0, 100) as u8;
             let change = match str_setting(s, "mode") {
@@ -433,6 +520,35 @@ mod tests {
         );
         assert_eq!(run(&key(PAGE_INDICATOR, json!({}))), Ok(Outcome::Done));
         assert!(run(&key("com.example.nope", json!({}))).is_err());
+    }
+
+    #[test]
+    fn lists_follow_the_official_support_flags() {
+        let names = |holder| -> Vec<&str> {
+            ACTIONS
+                .iter()
+                .filter(|a| a.category != Category::System && listed(a.uuid, holder))
+                .map(|a| a.name)
+                .collect()
+        };
+        assert_eq!(
+            names(Some(MULTI_ACTION)),
+            ["Delay", "Switch Profile", "Brightness", "Sleep"]
+        );
+        assert_eq!(
+            names(Some(KEY_LOGIC)),
+            [
+                "Switch Profile",
+                "Previous Page",
+                "Next Page",
+                "Go to Page",
+                "Page Indicator",
+                "Brightness",
+                "Sleep"
+            ]
+        );
+        assert!(names(None).contains(&"Multi Action"));
+        assert!(!names(None).contains(&"Delay"));
     }
 
     #[test]

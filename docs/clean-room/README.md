@@ -32,6 +32,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-28 | [Action copy and paste](2026-10-28-action-clipboard.md) | Keyboard shortcuts, replacement confirmation, complete key and folder snapshots |
 | 2026-10-28 | [Editor undo and redo](2026-10-28-editor-history.md) | Profile edit history, action and page restoration, shortcuts and memory limits |
 | 2026-10-30 | [Official app 7.6: tray menu](2026-10-30-tray-menu.md) | Menu groups, device heading, profile list with the active one checked |
+| 2026-10-30 | [Official app 7.6: Multi Action and Key Logic](2026-10-30-multi-actions.md) | Sequence timing and cancelling, Switch, Random, custom delays, press detection, editor layout |
 
 ## Open questions
 

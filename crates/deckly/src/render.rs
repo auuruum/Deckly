@@ -133,12 +133,15 @@ impl Renderer {
             key.title.hash(&mut h);
             self.title_style(key).hash(&mut h);
             key.image.hash(&mut h);
-            // Only multimedia icons depend on settings today.
+            // Multimedia icons and the switch below depend on settings.
             if key.action == actions::MULTIMEDIA {
                 actions::str_setting(&key.settings, "media").hash(&mut h);
             }
             if key.action == actions::PAGE_INDICATOR {
                 live.page.hash(&mut h);
+            }
+            if key.action == actions::MULTI_ACTION_SWITCH {
+                actions::switch_side(key).hash(&mut h);
             }
             self.pressed_size(live).hash(&mut h);
         }

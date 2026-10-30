@@ -50,6 +50,8 @@ pub struct Action {
     pub automatic_states: bool,
     pub visible: bool,
     pub user_title: bool,
+    pub in_multi_actions: bool,
+    pub in_key_logic: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -383,6 +385,8 @@ fn parse_action(v: &Value) -> Option<Action> {
         automatic_states: !flag(v, "DisableAutomaticStates", false),
         visible: flag(v, "VisibleInActionsList", true),
         user_title: flag(v, "UserTitleEnabled", true),
+        in_multi_actions: flag(v, "SupportedInMultiActions", true),
+        in_key_logic: flag(v, "SupportedInKeyLogicActions", true),
     })
 }
 

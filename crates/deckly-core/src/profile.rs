@@ -25,6 +25,29 @@ pub const FOLDER_ACTION: &str = "com.deckly.navigation.folder";
 /// The key every folder gets to go back to where it was opened from.
 pub const PARENT_FOLDER_ACTION: &str = "com.deckly.navigation.parent-folder";
 
+/// Runs its actions in order.
+pub const MULTI_ACTION: &str = "com.deckly.multi.action";
+/// Two Multi Actions on one key; each press runs the next one.
+pub const MULTI_ACTION_SWITCH: &str = "com.deckly.multi.switch";
+/// Runs one of its actions, picked at random.
+pub const RANDOM_ACTION: &str = "com.deckly.multi.random";
+/// One action each for a single press, a double press and a hold.
+pub const KEY_LOGIC: &str = "com.deckly.multi.key-logic";
+/// A pause between the actions of a Multi Action.
+pub const DELAY_ACTION: &str = "com.deckly.multi.delay";
+/// The actions one list of a Multi Action can hold.
+pub const MAX_GROUP_ACTIONS: usize = 100;
+
+/// How many lists of actions a key with this action holds.
+pub fn group_count(action: &str) -> usize {
+    match action {
+        MULTI_ACTION | RANDOM_ACTION => 1,
+        MULTI_ACTION_SWITCH => 2,
+        KEY_LOGIC => 3,
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     #[serde(default = "format_version")]
@@ -61,6 +84,44 @@ pub struct KeyConfig {
     /// Action-specific settings.
     #[serde(default)]
     pub settings: serde_json::Value,
+    /// The actions a Multi Action, Multi Action Switch, Random Action or
+    /// Key Logic key holds, one list per [`group_count`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Vec<KeyConfig>>,
+    /// Custom timing of an action inside a Multi Action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delays: Option<ActionDelays>,
+    /// The state a many-state action inside a Multi Action asks for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_state: Option<u8>,
+}
+
+/// Timing of one action inside a Multi Action, in milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionDelays {
+    /// From the virtual key press to its release.
+    pub press: u32,
+    /// From the release to the next action.
+    pub next: u32,
+}
+
+impl Default for ActionDelays {
+    fn default() -> Self {
+        Self {
+            press: Self::MAX,
+            next: Self::MAX,
+        }
+    }
+}
+
+impl ActionDelays {
+    pub const MIN: u32 = 1;
+    pub const MAX: u32 = 100;
+
+    pub fn sanitize(&mut self) {
+        self.press = self.press.clamp(Self::MIN, Self::MAX);
+        self.next = self.next.clamp(Self::MIN, Self::MAX);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -133,13 +194,53 @@ impl Page {
 
 impl KeyConfig {
     pub fn new(action: impl Into<String>, settings: serde_json::Value) -> Self {
+        let action: String = action.into();
+        let groups = vec![Vec::new(); group_count(&action)];
         Self {
-            action: action.into(),
+            action,
             title: String::new(),
             title_style: None,
             image: None,
             settings,
+            groups,
+            delays: None,
+            desired_state: None,
         }
+    }
+
+    /// Whether `member` can go in this key's lists of actions. Lists hold
+    /// single actions only; Delay is for sequences, not Key Logic.
+    pub fn can_hold(&self, member: &str) -> bool {
+        group_count(&self.action) > 0
+            && group_count(member) == 0
+            && !matches!(member, FOLDER_ACTION | PARENT_FOLDER_ACTION)
+            && (member != DELAY_ACTION || self.action != KEY_LOGIC)
+    }
+
+    /// Brings the action lists of a key from an untrusted source within
+    /// limits: the right number of lists, and only actions that can be in
+    /// them. Key Logic has one action per list.
+    fn sanitize_groups(&mut self) {
+        let lists = group_count(&self.action);
+        let mut groups = std::mem::take(&mut self.groups);
+        groups.resize(lists, Vec::new());
+        let size = if self.action == KEY_LOGIC {
+            1
+        } else {
+            MAX_GROUP_ACTIONS
+        };
+        for list in &mut groups {
+            list.retain(|k| self.can_hold(&k.action));
+            list.truncate(size);
+            for member in list {
+                member.groups.clear();
+                if let Some(delays) = &mut member.delays {
+                    delays.sanitize();
+                }
+                sanitize_title(member);
+            }
+        }
+        self.groups = groups;
     }
 
     /// The folder a folder key opens.
@@ -228,17 +329,8 @@ impl Profile {
             }
             page.keys.retain(|&index, _| index < key_count);
             for key in page.keys.values_mut() {
-                if key.title.chars().count() > MAX_TITLE_CHARS {
-                    key.title = key.title.chars().take(MAX_TITLE_CHARS).collect();
-                }
-                if let Some(style) = &mut key.title_style {
-                    style.sanitize();
-                }
-                // Before the global title style existed every key stored
-                // one; an untouched default style now follows the global one.
-                if key.title_style == Some(TitleStyle::default()) {
-                    key.title_style = None;
-                }
+                sanitize_title(key);
+                key.sanitize_groups();
             }
         }
         self.normalize_folders();
@@ -279,6 +371,20 @@ impl Profile {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, text).map_err(ProfileError::Io)?;
         std::fs::rename(&tmp, path).map_err(ProfileError::Io)
+    }
+}
+
+fn sanitize_title(key: &mut KeyConfig) {
+    if key.title.chars().count() > MAX_TITLE_CHARS {
+        key.title = key.title.chars().take(MAX_TITLE_CHARS).collect();
+    }
+    if let Some(style) = &mut key.title_style {
+        style.sanitize();
+    }
+    // Before the global title style existed every key stored one; an
+    // untouched default style now follows the global one.
+    if key.title_style == Some(TitleStyle::default()) {
+        key.title_style = None;
     }
 }
 
@@ -505,6 +611,73 @@ mod tests {
         }
         p.normalize_folders();
         assert_eq!(p.folders.len(), MAX_FOLDER_DEPTH);
+    }
+
+    #[test]
+    fn group_keys_round_trip_with_their_actions() {
+        let mut p = Profile::new("Test", DeviceKind::Mk2);
+        let mut key = KeyConfig::new(MULTI_ACTION_SWITCH, json!({}));
+        assert_eq!(key.groups.len(), 2);
+        let mut member = KeyConfig::new("com.example.a", json!({"x": 1}));
+        member.delays = Some(ActionDelays { press: 1, next: 50 });
+        member.desired_state = Some(1);
+        key.groups[1].push(member);
+        p.pages[0].keys.insert(0, key);
+        p.pages[0]
+            .keys
+            .insert(1, KeyConfig::new("com.example.b", json!({})));
+        let text = p.to_json().unwrap();
+        assert_eq!(Profile::from_json(&text).unwrap(), p);
+        // Plain keys stay as small as before.
+        assert_eq!(text.matches("\"groups\"").count(), 1);
+        assert!(!text.contains("delays\": null"));
+    }
+
+    #[test]
+    fn group_lists_are_repaired() {
+        let text = r#"{"id":"a","name":"x","device":"mk2","pages":[{"id":"p","keys":{
+            "0":{"action":"com.deckly.multi.action","groups":[
+                [{"action":"com.deckly.multi.action"},
+                 {"action":"com.deckly.navigation.folder"},
+                 {"action":"com.deckly.navigation.parent-folder"},
+                 {"action":"com.deckly.multi.delay","groups":[[{"action":"x"}]],
+                  "delays":{"press":0,"next":99999}}],
+                [{"action":"extra"}]]},
+            "1":{"action":"com.deckly.multi.key-logic","groups":[
+                [{"action":"a"},{"action":"b"}],
+                [{"action":"com.deckly.multi.delay"}]]},
+            "2":{"action":"com.deckly.multi.switch"},
+            "3":{"action":"plain","groups":[[{"action":"x"}]]}}}]}"#;
+        let p = Profile::from_json(text).unwrap();
+        let keys = &p.pages[0].keys;
+        assert_eq!(keys[&0].groups.len(), 1);
+        let only = &keys[&0].groups[0];
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].action, DELAY_ACTION);
+        assert!(only[0].groups.is_empty());
+        assert_eq!(
+            only[0].delays,
+            Some(ActionDelays {
+                press: ActionDelays::MIN,
+                next: ActionDelays::MAX
+            })
+        );
+        // Key Logic has one action per press and no pauses.
+        assert_eq!(keys[&1].groups.len(), 3);
+        assert_eq!(keys[&1].groups[0].len(), 1);
+        assert!(keys[&1].groups[1].is_empty());
+        assert_eq!(keys[&2].groups.len(), 2);
+        assert!(keys[&3].groups.is_empty());
+    }
+
+    #[test]
+    fn group_lists_are_bounded() {
+        let mut key = KeyConfig::new(MULTI_ACTION, json!({}));
+        key.groups[0] = vec![KeyConfig::new("a", json!({})); MAX_GROUP_ACTIONS + 5];
+        let mut p = Profile::new("Test", DeviceKind::Mk2);
+        p.pages[0].keys.insert(0, key);
+        p.sanitize();
+        assert_eq!(p.pages[0].keys[&0].groups[0].len(), MAX_GROUP_ACTIONS);
     }
 
     #[test]
