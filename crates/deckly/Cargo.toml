@@ -22,6 +22,8 @@ ab_glyph = "0.2.32"
 resvg = { version = "0.49.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 # Native file dialogs (Win32, xdg-portal, AppKit); no GTK.
 rfd = "0.17.2"
+# The tray icon. `ksni` talks D-Bus from Rust on Linux; no GTK.
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -31,6 +33,10 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Asks whether a tray exists; already in the tree through accesskit.
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [lints]
 workspace = true

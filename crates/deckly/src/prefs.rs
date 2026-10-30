@@ -132,6 +132,16 @@ impl Preferences {
         self.autostart = None;
     }
 
+    pub fn close(&mut self) {
+        self.open = false;
+        self.advanced = None;
+    }
+
+    #[cfg(test)]
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// Opens the window on the Devices tab.
     pub fn open_devices(&mut self, ctx: &egui::Context, device: Option<&str>) {
         self.open(ctx, device);

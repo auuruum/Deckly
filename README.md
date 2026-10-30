@@ -22,13 +22,30 @@ build, use `cargo dev --release`. Plain `cargo run` and `cargo run --release`
 from the repository root use the same launcher.
 
 Close existing Deckly instances before rebuilding, especially on Windows,
-where a running executable cannot be replaced. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for development switches and checks.
+where a running executable cannot be replaced: use Quit Deckly in the tray,
+since closing the window leaves Deckly running. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for development switches and checks.
 
 Close the official Stream Deck app first: both apps cannot drive the same device at once.
 
 Development switches: `DECKLY_NO_DEVICES=1` opens the editor without touching
 any device, `DECKLY_DEBUG=1` prints device events and action results.
+
+## Tray
+
+Closing the window keeps Deckly running in the tray, so keys and plugins keep
+working. Click the tray icon or start Deckly again to bring the window back;
+only one Deckly runs at a time. The icon's menu lists each connected device
+with its profiles, so you can switch profiles without opening the window, and
+offers Preferences and Quit Deckly, which ends the app.
+
+Tested on Windows 10. On macOS and Linux this is compile-checked only so far.
+A Wayland window cannot be hidden, so on Linux, under X11 and Wayland alike,
+the window really closes and opens anew from the tray. Devices and plugins
+keep running, but the editor starts over: its selection, copied action and
+undo history are gone. The panel must support StatusNotifierItem; stock GNOME
+needs the AppIndicator extension. Without a tray, closing the window quits
+Deckly as before.
 
 ## Copy and paste actions
 
