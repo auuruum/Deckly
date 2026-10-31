@@ -57,6 +57,15 @@
   both the virtual keyboard and XTEST.
 - Electron on native Wayland cut symbols beyond U+FFFF to 16 bits: `😀` (U+1F600)
   arrived as U+F600.
+- Pasted with the wlr data control protocol and Shift+Insert, `😀`, a flag, a
+  joined family and text around them, across lines with real Enter keys,
+  arrived exactly in Electron on native Wayland (a text box and a
+  contenteditable field), VS Code, gnome-text-editor, kitty, Alacritty, Firefox
+  and Electron under XWayland.
+- With Deckly's process alive, `wl-paste` then gave back the old clipboard and
+  primary selection, a PNG byte for byte, and an empty clipboard stayed empty.
+  `NEWER` copied during a paste was kept. The clipboard does not outlive the
+  process offering it: when the test program ended, it was empty.
 - `wpctl` raised and lowered the real volume and left it where it was.
 - A stand-in portal on a private D-Bus saw the expected order (CreateSession,
   SelectDevices, Start, then keysyms), and the saved restore token on the next
@@ -76,12 +85,15 @@
 - Chromium's Wayland path keeps a key's character in 16 bits, so no keyboard
   layout can carry an emoji to it. Only this one client was tried.
 - Other Chromium apps (Discord, Claude) should behave like the Electron and VS
-  Code runs above. They were not typed into.
+  Code runs above. They were not typed into. The contenteditable field stood in
+  for a chat box; Discord's own field may treat a paste differently.
 
 ## Unknown
 
 - Real GNOME and KDE portals. Whether both accept every keysym, and whether
-  emoji reach Chromium apps that way.
+  emoji reach Chromium apps that way; the portal path does not paste.
+- Compositors other than Hyprland with the virtual keyboard, and any compositor
+  without data control: there Deckly types the emoji as a key, a path not run.
 - XTEST on a real X11 session with a second layout active. It presses keys of
   the first layout, so letters may come out in the active one.
 - Text on macOS and Windows at run time. Both send text as Unicode, not as
@@ -113,5 +125,15 @@
   compositor binds no action to media keys.
 - A private layout keeps US symbols on their real keys and levels, as a real
   keyboard does; symbols a US keyboard lacks use only key numbers seen to arrive.
+- A line with a character beyond U+FFFF is pasted whole under the virtual
+  keyboard, in every client, since nothing tells which one has focus. Enter and
+  Tab stay keys. It uses Shift+Insert, so terminals work, and sets the primary
+  selection too, which is what they paste.
+- A paste restores the clipboard, and keeps up to 32 MiB of it in memory until
+  something else is copied, as the old owner is gone. A type that does not fit
+  or takes too long is not restored. If nothing can be read, the clipboard is
+  left alone and the emoji is typed instead.
+- Pasted text carries `x-kde-passwordManagerHint`, so clipboard histories can
+  skip it.
 - uinput refuses text outside a US keyboard with a clear error rather than
   typing part of it: it presses places, so it cannot make other symbols.

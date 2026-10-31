@@ -48,6 +48,21 @@ impl Key {
         Some(Self { sym, code, shifted })
     }
 
+    /// The character this key types, `None` for keys that do something else.
+    fn character(self) -> Option<char> {
+        let unicode = match self.sym {
+            sym @ 0..0x100 => sym,
+            sym => sym.checked_sub(0x0100_0000)?,
+        };
+        char::from_u32(unicode)
+    }
+
+    /// A character that does not fit 16 bits, which is all Chromium keeps of
+    /// a key on Wayland.
+    fn beyond_16_bits(self) -> bool {
+        (0x0101_0000..=0x0110_ffff).contains(&self.sym)
+    }
+
     pub fn media(key: MediaKey) -> Self {
         match key {
             MediaKey::PlayPause => Self::at(0x1008_ff14, 164),
@@ -69,6 +84,7 @@ pub const SUPER: Key = Key::at(0xffeb, 125);
 pub const NOTHING: Key = Key::at(0x00ff_ffff, 247);
 const ENTER: Key = Key::at(0xff0d, 28);
 const TAB: Key = Key::at(0xff09, 15);
+const INSERT: Key = Key::at(0xff63, 110);
 
 /// Modifier state bits of the core X and Wayland protocols, by modifier key.
 pub const fn modifier_bit(key: Key) -> u32 {
@@ -193,7 +209,7 @@ fn named(name: &str) -> Option<Key> {
         "PageUp" => Key::at(0xff55, 104),
         "PageDown" => Key::at(0xff56, 109),
         "End" => Key::at(0xff57, 107),
-        "Insert" => Key::at(0xff63, 110),
+        "Insert" => INSERT,
         "Delete" => Key::at(0xffff, 111),
         "Copy" => Key::at(0x1008_ff57, 133),
         "Cut" => Key::at(0x1008_ff58, 137),
@@ -250,6 +266,53 @@ pub fn text(text: &str) -> Vec<Stroke> {
         .filter_map(Key::for_char)
         .map(Stroke::single)
         .collect()
+}
+
+/// A stretch of strokes and how it reaches the client.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Part<'a> {
+    Keys(&'a [Stroke]),
+    Paste(&'a [Stroke]),
+}
+
+/// Splits text for clients that cannot take every key. A line or cell with a
+/// character beyond 16 bits is pasted whole, in one go, so an emoji and the
+/// joiners between its pieces stay together; Enter and Tab stay real keys, as
+/// a chat box sends on one and a form moves on with the other.
+pub fn parts(strokes: &[Stroke]) -> Vec<Part<'_>> {
+    let breaks = |stroke: &Stroke| stroke.key == ENTER || stroke.key == TAB;
+    let mut out = Vec::new();
+    let mut typed_to = 0;
+    let mut at = 0;
+    for line in strokes.split_inclusive(breaks) {
+        let length = line.len() - usize::from(line.last().is_some_and(breaks));
+        let text = line.get(..length).unwrap_or_default();
+        if text.iter().any(|stroke| stroke.key.beyond_16_bits()) {
+            if typed_to < at {
+                out.push(Part::Keys(&strokes[typed_to..at]));
+            }
+            out.push(Part::Paste(text));
+            typed_to = at + length;
+        }
+        at += line.len();
+    }
+    if typed_to < strokes.len() {
+        out.push(Part::Keys(&strokes[typed_to..]));
+    }
+    out
+}
+
+/// The text a run of strokes types.
+pub fn string(strokes: &[Stroke]) -> String {
+    strokes.iter().filter_map(|s| s.key.character()).collect()
+}
+
+/// Shift+Insert, which pastes nearly everywhere, terminals included.
+pub fn paste_stroke() -> Stroke {
+    Stroke {
+        mods: vec![SHIFT],
+        key: INSERT,
+    }
 }
 
 /// XKB key numbers for symbols without a place of their own: the number pad
@@ -496,6 +559,58 @@ mod tests {
         assert_eq!((keys[2].sym, keys[2].code), (0x0100_20ac, None));
         assert_eq!((keys[3].sym, keys[3].code), (0x0100_044f, None));
         assert_eq!((keys[4], keys[5]), (ENTER, TAB));
+    }
+
+    fn pasted(strokes: &[Stroke]) -> Vec<String> {
+        parts(strokes)
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Paste(run) => Some(string(run)),
+                Part::Keys(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn text_within_16_bits_stays_on_keys() {
+        let strokes = text("tests!!! € я 日本語\nnext");
+        assert_eq!(parts(&strokes), [Part::Keys(&strokes)]);
+        assert_eq!(parts(&[]), []);
+    }
+
+    #[test]
+    fn a_line_with_an_emoji_is_pasted_whole() {
+        let strokes = text("hello \u{1f600}!");
+        assert_eq!(parts(&strokes), [Part::Paste(&strokes)]);
+        assert_eq!(string(&strokes), "hello \u{1f600}!");
+    }
+
+    #[test]
+    fn enter_and_tab_around_an_emoji_stay_keys() {
+        let strokes = text("one\n\u{1f600}\ttwo\n");
+        let parts = parts(&strokes);
+        assert_eq!(pasted(&strokes), ["\u{1f600}"]);
+        assert_eq!(
+            parts,
+            [
+                Part::Keys(&strokes[..4]),
+                Part::Paste(&strokes[4..5]),
+                Part::Keys(&strokes[5..]),
+            ]
+        );
+    }
+
+    #[test]
+    fn joined_emoji_stay_in_one_paste() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(pasted(&text(family)), [family]);
+    }
+
+    #[test]
+    fn hotkeys_and_media_keys_are_never_pasted() {
+        let strokes = [paste_stroke(), Stroke::single(Key::media(MediaKey::Mute))];
+        assert_eq!(parts(&strokes), [Part::Keys(&strokes)]);
+        assert_eq!(string(&strokes), "");
     }
 
     #[test]

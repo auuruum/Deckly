@@ -10,10 +10,14 @@
 //! - X11: XTEST, then uinput.
 //! - No graphical session in the environment: uinput.
 //!
+//! Under the virtual keyboard, a line with an emoji is pasted instead of typed:
+//! Chromium cannot take it as a key (see `paste`).
+//!
 //! `DECKLY_INPUT=wayland|portal|x11|uinput` forces one way, for debugging.
 
 mod keys;
 mod media;
+mod paste;
 mod portal;
 mod uinput;
 mod wayland;
