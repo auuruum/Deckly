@@ -623,7 +623,8 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
 }
 
 /// Records a new device and picks its profile: the device's default
-/// profile if it has one, else the profile it showed last.
+/// profile if it has one, else the profile it showed last. A device seen for
+/// the first time takes the profile it shows as its default.
 fn connect(state: &Shared, info: &ConnectedDevice) {
     let mut s = lock(state);
     let preferred = s
@@ -641,6 +642,11 @@ fn connect(state: &Shared, info: &ConnectedDevice) {
         && current.as_ref() != Some(&id)
     {
         s.settings.assignments.insert(info.serial.clone(), id);
+        s.save_settings();
+    }
+    if let Some(id) = s.settings.assignments.get(&info.serial).cloned()
+        && s.settings.add_device(&info.serial, &id)
+    {
         s.save_settings();
     }
     s.devices.retain(|d| d.serial != info.serial);

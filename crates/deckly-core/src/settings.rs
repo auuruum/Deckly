@@ -212,6 +212,17 @@ impl Settings {
         }
     }
 
+    /// Records a device seen for the first time, with `profile` as its
+    /// default; returns whether it was new. A known device is left alone:
+    /// having no default may be the user's choice.
+    pub fn add_device(&mut self, serial: &str, profile: &str) -> bool {
+        if self.devices.contains_key(serial) {
+            return false;
+        }
+        self.device_mut(serial).default_profile = Some(profile.to_owned());
+        true
+    }
+
     /// Forgets every reference to a deleted profile. Devices that had it as
     /// their default take `replacement` as their new default.
     pub fn forget_profile(&mut self, id: &str, replacement: Option<&str>) {
@@ -479,6 +490,18 @@ mod tests {
             Settings::from_json(&text).unwrap().device("S").screensaver,
             None
         );
+    }
+
+    #[test]
+    fn a_new_device_gets_a_default_once() {
+        let mut s = Settings::default();
+        assert!(s.add_device("A", "p1"));
+        assert_eq!(s.device("A").default_profile.as_deref(), Some("p1"));
+
+        // Unticked by the user: it stays that way on the next connect.
+        s.device_mut("A").default_profile = None;
+        assert!(!s.add_device("A", "p1"));
+        assert_eq!(s.device("A").default_profile, None);
     }
 
     #[test]
