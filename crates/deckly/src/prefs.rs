@@ -6,6 +6,7 @@
 //! measured positions, relative to the window's client area.
 
 use crate::actions;
+use crate::backup;
 use crate::cropper::{Cropper, Purpose};
 use crate::logo;
 use crate::os::autostart;
@@ -13,10 +14,12 @@ use crate::render::{self, Live, Renderer};
 use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
+use crate::transfer::{self, Job, PluginKind, SharedJob, Summary};
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
 use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, KeyPress, Orientation, TitleAlign, TitleStyle,
 };
+use deckly_plugin_host::Host;
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Pos2, Rect, RichText, Sense, Stroke,
     TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
@@ -24,6 +27,7 @@ use eframe::egui::{
 use egui_phosphor::regular as icon;
 use image::RgbaImage;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 const SIZE: Vec2 = vec2(740.0, 489.0);
@@ -64,6 +68,7 @@ pub struct Env<'a> {
     pub device: Option<&'a str>,
     /// Model of the profile shown in the main window.
     pub kind: DeviceKind,
+    pub host: Option<&'a Host>,
 }
 
 pub struct Preferences {
@@ -81,6 +86,13 @@ pub struct Preferences {
     style: Option<TitleStyle>,
     /// Read from the system when the General tab is first shown.
     autostart: Option<Result<bool, String>>,
+    /// The official app's data folder, looked for at the same time.
+    official: Option<Option<PathBuf>>,
+    /// A running import or backup, or its result.
+    job: SharedJob,
+    /// What the import dialog will bring in.
+    import_profiles: bool,
+    import_plugins: bool,
     preview: Option<(u64, TextureHandle)>,
     /// The Advanced Settings window, open for this device.
     advanced: Option<(String, &'static DeviceModel)>,
@@ -116,6 +128,10 @@ impl Preferences {
             confirm_delete: None,
             style: None,
             autostart: None,
+            official: None,
+            job: SharedJob::default(),
+            import_profiles: true,
+            import_plugins: true,
             preview: None,
             advanced: None,
             cropper: Cropper::default(),
@@ -165,6 +181,7 @@ impl Preferences {
                 self.open = false;
             }
             egui::CentralPanel::no_frame().show(ui, |ui| self.contents(ui, env));
+            self.job_dialog(ui.ctx(), env);
         });
         if !self.open {
             self.advanced = None;
@@ -345,12 +362,213 @@ impl Preferences {
             }
         }
 
+        label(ui, o, 147.0, 30.0, "Backup:");
+        if button(ui, at(o, VALUE_X, 151.0, 130.0, 22.0), "Create Backup…")
+            .on_hover_text("Save profiles, settings and plugins to one file")
+            .clicked()
+        {
+            self.create_backup(ui.ctx(), env);
+        }
+        let restore = at(o, VALUE_X + 140.0, 151.0, 150.0, 22.0);
+        if button(ui, restore, "Restore from Backup…")
+            .on_hover_text("Bring back a Deckly backup, also from another computer")
+            .clicked()
+        {
+            self.restore_backup(ui.ctx(), env);
+        }
+
+        label(ui, o, 181.0, 30.0, "Stream Deck App:");
+        let official = self
+            .official
+            .get_or_insert_with(transfer::official_dir)
+            .clone();
+        let mut x = VALUE_X;
+        if let Some(dir) = official {
+            if button(ui, at(o, x, 185.0, 130.0, 22.0), "Import Everything…")
+                .on_hover_text("Import the profiles and plugins of the app on this computer")
+                .clicked()
+            {
+                self.scan(ui.ctx(), env, dir.join("ProfilesV3"), Some(dir));
+            }
+            x += 140.0;
+        }
+        if button(ui, at(o, x, 185.0, 150.0, 22.0), "Import Backup File…")
+            .on_hover_text("Import a backup or profile exported by the official app")
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter(
+                    "Stream Deck backup",
+                    &["streamDeckProfilesBackup", "streamDeckProfile"],
+                )
+                .pick_file()
+        {
+            self.scan(ui.ctx(), env, path, None);
+        }
+
         label(ui, o, 234.0, 22.0, "About:");
         let text = "Deckly is an independent app. It is not made, approved or \
                     supported by Elgato or Corsair.";
         value_dim(ui, o, VALUE_X, 237.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
+    }
+
+    fn create_backup(&mut self, ctx: &egui::Context, env: &Env<'_>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Deckly backup", &[backup::EXTENSION])
+            .set_file_name(format!("Deckly.{}", backup::EXTENSION))
+            .save_file()
+        else {
+            return;
+        };
+        let (state, host) = (env.state.clone(), env.host.cloned());
+        transfer::start(&self.job, ctx, "Creating the backup", move |progress| {
+            let done = backup::create(&path, &state, host.as_ref(), progress);
+            finished("Backup failed", done)
+        });
+    }
+
+    fn restore_backup(&mut self, ctx: &egui::Context, env: &Env<'_>) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Deckly backup", &[backup::EXTENSION])
+            .pick_file()
+        else {
+            return;
+        };
+        let (state, host) = (env.state.clone(), env.host.cloned());
+        let runtime = env.runtime.clone();
+        transfer::start(&self.job, ctx, "Restoring the backup", move |progress| {
+            let done = backup::restore(&path, &state, host.as_ref(), &runtime, progress);
+            finished("Restore failed", done)
+        });
+    }
+
+    /// Reads a source; what it found waits in the import dialog.
+    fn scan(
+        &mut self,
+        ctx: &egui::Context,
+        env: &Env<'_>,
+        path: PathBuf,
+        official: Option<PathBuf>,
+    ) {
+        let state = env.state.clone();
+        self.import_profiles = true;
+        self.import_plugins = true;
+        transfer::start(
+            &self.job,
+            ctx,
+            "Reading profiles",
+            move |_| match transfer::scan(&path, official.as_deref().map(Path::new), &state) {
+                Ok(scan) => Job::Review(Box::new(scan)),
+                Err(e) => finished("Import failed", Err(e)),
+            },
+        );
+    }
+
+    /// The dialog over the window while a job runs or waits for an answer.
+    fn job_dialog(&mut self, ctx: &egui::Context, env: &Env<'_>) {
+        let mut close = false;
+        let mut import = false;
+        let job = self.job.clone();
+        let mut job = match job.lock() {
+            Ok(job) => job,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match &*job {
+            Job::Idle => return,
+            Job::Busy(text) => {
+                egui::Modal::new(egui::Id::new("job-busy")).show(ctx, |ui| {
+                    ui.set_width(380.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(text);
+                    });
+                });
+            }
+            Job::Review(scan) => {
+                egui::Modal::new(egui::Id::new("job-review")).show(ctx, |ui| {
+                    ui.set_width(420.0);
+                    ui.heading("Import from Stream Deck");
+                    ui.add_space(8.0);
+                    ui.checkbox(
+                        &mut self.import_profiles,
+                        transfer::count(scan.profiles.len(), "profile"),
+                    );
+                    if scan.replaces > 0 {
+                        ui.small(format!(
+                            "{} of them replace profiles imported earlier, with any changes \
+                             made since.",
+                            scan.replaces
+                        ));
+                    }
+                    let ready = scan.count(PluginKind::Ready);
+                    if ready > 0 {
+                        let text = transfer::count(ready, "plugin");
+                        ui.checkbox(&mut self.import_plugins, text);
+                    }
+                    let installed = scan.count(PluginKind::Installed);
+                    if installed > 0 {
+                        ui.small(format!("{installed} more plugins are already installed."));
+                    }
+                    let encrypted = scan.count(PluginKind::Encrypted);
+                    if encrypted > 0 {
+                        ui.small(format!(
+                            "{encrypted} plugins are encrypted by the official marketplace and \
+                             cannot be copied. Their keys are kept."
+                        ));
+                    }
+                    if !scan.skipped.is_empty() {
+                        let n = transfer::count(scan.skipped.len(), "profile");
+                        ui.small(format!("{n} cannot be imported."));
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        close = ui.button("Cancel").clicked();
+                        let any = self.import_profiles || (self.import_plugins && ready > 0);
+                        import = ui.add_enabled(any, egui::Button::new("Import")).clicked();
+                    });
+                });
+            }
+            Job::Done(summary) => {
+                egui::Modal::new(egui::Id::new("job-done")).show(ctx, |ui| {
+                    ui.set_width(520.0);
+                    ui.heading(&summary.title);
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for line in &summary.lines {
+                                ui.label(line);
+                                ui.add_space(4.0);
+                            }
+                        });
+                    ui.add_space(12.0);
+                    close = ui.button("OK").clicked();
+                });
+            }
+        }
+        if close {
+            *job = Job::Idle;
+        } else if import {
+            let taken = std::mem::take(&mut *job);
+            drop(job);
+            if let Job::Review(scan) = taken {
+                let (state, host) = (env.state.clone(), env.host.cloned());
+                let runtime = env.runtime.clone();
+                let (profiles, plugins) = (self.import_profiles, self.import_plugins);
+                transfer::start(&self.job, ctx, "Importing", move |progress| {
+                    Job::Done(transfer::commit(
+                        *scan,
+                        profiles,
+                        plugins,
+                        &state,
+                        host.as_ref(),
+                        &runtime,
+                        progress,
+                    ))
+                });
+            }
+        }
     }
 
     // ----- Devices -------------------------------------------------------
@@ -952,6 +1170,13 @@ impl Preferences {
             .with_texture(texture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
         );
     }
+}
+
+fn finished(failed: &str, result: Result<Summary, String>) -> Job {
+    Job::Done(result.unwrap_or_else(|e| Summary {
+        title: failed.to_owned(),
+        lines: vec![e],
+    }))
 }
 
 fn viewport_id() -> egui::ViewportId {

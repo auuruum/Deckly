@@ -74,6 +74,10 @@ pub fn save_profile(profile: &Profile) -> Result<(), String> {
 
 pub fn delete_profile(id: &str) -> Result<(), String> {
     let path = profile_path(id).ok_or("invalid profile id")?;
+    // Imported and restored pictures live in a folder per profile.
+    if let Some(dir) = config_dir().map(|d| d.join("images").join(id)) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

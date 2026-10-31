@@ -281,6 +281,16 @@ impl Profile {
         self.folders.iter_mut().find(|f| f.id == id)
     }
 
+    /// Visits every key on pages and in folders, and every action a key holds.
+    pub fn for_each_key(&mut self, mut visit: impl FnMut(&mut KeyConfig)) {
+        for page in self.pages.iter_mut().chain(&mut self.folders) {
+            for key in page.keys.values_mut() {
+                visit(key);
+                key.groups.iter_mut().flatten().for_each(&mut visit);
+            }
+        }
+    }
+
     /// Gives every folder key a folder of its own and drops folders no key
     /// leads to. A folder key whose folder is missing gets a new empty one;
     /// a folder that a second key leads to (a pasted key) is copied for that
@@ -678,6 +688,20 @@ mod tests {
         p.pages[0].keys.insert(0, key);
         p.sanitize();
         assert_eq!(p.pages[0].keys[&0].groups[0].len(), MAX_GROUP_ACTIONS);
+    }
+
+    #[test]
+    fn every_key_is_visited() {
+        let mut p = Profile::new("Test", DeviceKind::Mk2);
+        let mut multi = KeyConfig::new(MULTI_ACTION, json!({}));
+        multi.groups[0].push(KeyConfig::new("a", json!({})));
+        p.pages[0].keys.insert(0, multi);
+        p.pages[0].keys.insert(1, folder_key(""));
+        p.normalize_folders();
+        let mut seen = 0;
+        p.for_each_key(|_| seen += 1);
+        // The Multi Action, its action, the folder key and the parent key.
+        assert_eq!(seen, 4);
     }
 
     #[test]

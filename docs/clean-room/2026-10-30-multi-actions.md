@@ -126,4 +126,5 @@
   is not read yet.
 - The official app's Action Wheel and Action Trigger (dial actions) are not
   covered here.
-- Importing official profiles with these actions is not implemented.
+- Importing official profiles with these actions is covered by
+  [the import entry](2026-10-31-official-profiles.md).

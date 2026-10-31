@@ -225,6 +225,12 @@ impl Manifest {
         order.into_iter().filter(|p| !p.is_empty()).collect()
     }
 
+    /// Whether the plugin has no actions and no code, so Deckly has no use for
+    /// it. The official app's icon editor is one: a page opened from its menu.
+    pub fn offers_nothing(&self) -> bool {
+        self.actions.is_empty() && self.code_paths().is_empty()
+    }
+
     /// Works out how to run the plugin on this platform.
     pub fn entry(&self, dir: &Path) -> Result<Entry, String> {
         let mut first_error = None;
@@ -545,6 +551,15 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(safe_join(dir, "C:\\Windows\\x.exe"), None);
         }
+    }
+
+    #[test]
+    fn a_plugin_with_neither_actions_nor_code_offers_nothing() {
+        let parse = |text: &str| Manifest::parse(text.as_bytes(), "a.b").unwrap();
+        assert!(parse(r#"{"Name":"X","IconEditorPath":"index.html"}"#).offers_nothing());
+        assert!(!parse(r#"{"Name":"X","CodePath":"a.js"}"#).offers_nothing());
+        let actions = r#"{"Name":"X","Actions":[{"UUID":"a.b.c","Name":"C"}]}"#;
+        assert!(!parse(actions).offers_nothing());
     }
 
     #[test]

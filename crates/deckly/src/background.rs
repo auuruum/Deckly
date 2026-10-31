@@ -313,7 +313,7 @@ fn start_host() -> (
         runtimes_dir: dir.join("runtimes"),
         app: deckly_plugin_host::AppInfo {
             language: "en".into(),
-            platform_version: String::new(),
+            platform_version: crate::os::system_version(),
             font: if cfg!(windows) {
                 "Segoe UI".into()
             } else {

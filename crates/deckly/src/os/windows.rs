@@ -2,13 +2,17 @@
 
 use super::command::split_words;
 use super::{Hotkey, MediaKey};
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 const VK_BACK: u16 = 0x08;
 const VK_TAB: u16 = 0x09;
@@ -125,6 +129,55 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
         Ok(())
     } else {
         Err("Windows blocked the simulated input".into())
+    }
+}
+
+/// The Windows version, from the registry: the version calls of the system
+/// answer with what the program's manifest declares.
+pub fn version_text() -> String {
+    const KEY: PCWSTR = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    let number = |name: PCWSTR| {
+        let mut value = 0u32;
+        let mut size = size_of::<u32>() as u32;
+        // SAFETY: the strings are static NUL-terminated wide strings, and
+        // the output pointer and its size describe `value`, which outlives
+        // the call.
+        let result = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                KEY,
+                name,
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&raw mut value).cast()),
+                Some(&raw mut size),
+            )
+        };
+        (result == ERROR_SUCCESS).then_some(value)
+    };
+    let mut build = [0u16; 16];
+    let mut size = size_of_val(&build) as u32;
+    // SAFETY: as above, for the `build` buffer; the call writes at most
+    // `size` bytes and ends the string with a NUL.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            KEY,
+            w!("CurrentBuildNumber"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(build.as_mut_ptr().cast()),
+            Some(&raw mut size),
+        )
+    };
+    let end = build.iter().position(|&c| c == 0).unwrap_or(build.len());
+    let build = String::from_utf16_lossy(&build[..end]);
+    match (
+        number(w!("CurrentMajorVersionNumber")),
+        number(w!("CurrentMinorVersionNumber")),
+    ) {
+        (Some(major), Some(minor)) if result == ERROR_SUCCESS => format!("{major}.{minor}.{build}"),
+        _ => String::new(),
     }
 }
 

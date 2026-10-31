@@ -6,10 +6,12 @@
 mod actions;
 mod app;
 mod background;
+mod backup;
 mod clipboard;
 mod cropper;
 mod history;
 mod logo;
+mod official;
 mod os;
 mod plugins;
 mod prefs;
@@ -18,6 +20,7 @@ mod runtime;
 mod sequence;
 mod store;
 mod theme;
+mod transfer;
 
 fn main() -> eframe::Result {
     // Deckly runs each plugin through a copy of itself in guard mode.

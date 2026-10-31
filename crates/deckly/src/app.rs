@@ -800,7 +800,12 @@ impl App {
                 .button(format!("{}  Open Log", icon::FILE_TEXT))
                 .clicked()
             {
-                open_path(&self.state, &log.to_string_lossy());
+                if log.is_file() {
+                    open_path(&self.state, &log.to_string_lossy());
+                } else {
+                    let text = format!("{} has not written a log yet", p.name);
+                    runtime::lock(&self.state).notify(text);
+                }
                 ui.close();
             }
             if ui
@@ -2608,6 +2613,7 @@ impl App {
             renderer: &mut self.renderer,
             device,
             kind,
+            host: self.host.as_ref(),
         };
         self.prefs.show(ctx, &mut env);
     }

@@ -159,6 +159,31 @@ impl State {
             .and_then(|k| self.profiles.iter().find(|p| p.device == k))
             .map(|p| p.id.clone());
         self.settings.forget_profile(id, replacement.as_deref());
+        self.assign_orphans();
+        self.save_settings();
+    }
+
+    /// Takes in imported or restored profiles, replacing those with the same
+    /// id. They are saved already.
+    pub fn adopt_profiles(&mut self, profiles: Vec<Profile>) {
+        for profile in profiles {
+            self.profiles.retain(|p| p.id != profile.id);
+            self.pages.remove(&profile.id);
+            self.folders.remove(&profile.id);
+            self.profiles.push(profile);
+        }
+        self.profiles.sort_by_key(|p| p.name.to_lowercase());
+    }
+
+    /// Replaces the settings with restored ones.
+    pub fn adopt_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+        self.assign_orphans();
+        self.save_settings();
+    }
+
+    /// Gives connected devices without a valid profile one for their model.
+    fn assign_orphans(&mut self) {
         let orphans: Vec<(String, DeviceKind)> = self
             .devices
             .iter()
@@ -169,7 +194,6 @@ impl State {
             let next = self.ensure_profile(kind);
             self.settings.assignments.insert(serial, next);
         }
-        self.save_settings();
     }
 
     /// The name a device is shown with: its own name or the model name.
