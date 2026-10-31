@@ -141,7 +141,9 @@ sits at the bottom. Registry value names `auto_launch_enabled` and
 - A disabled device is returned to its own idle screen and its keys are
   ignored. A sleeping device turns its backlight off; the first key press
   only wakes it.
-- A device's default profile is shown when the device connects.
+- A device's default profile is shown when the device connects. A device seen
+  for the first time takes the profile it shows as its default, so a new install
+  starts with the box ticked; unticking it later is kept.
 - The Style tab covers show title, position, size and colour; Deckly has one
   title font, so font family and bold/italic/underline are not offered.
   The inspector gets a button that makes a key follow the global style again.
