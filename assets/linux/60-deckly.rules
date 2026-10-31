@@ -1,0 +1,4 @@
+# Gives the logged-in user access to Stream Deck devices, and to uinput for
+# simulated keys on desktops that offer no other way. See README.md, "Linux".
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

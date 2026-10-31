@@ -33,6 +33,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-28 | [Editor undo and redo](2026-10-28-editor-history.md) | Profile edit history, action and page restoration, shortcuts and memory limits |
 | 2026-10-30 | [Official app 7.6: tray menu](2026-10-30-tray-menu.md) | Menu groups, device heading, profile list with the active one checked |
 | 2026-10-30 | [Official app 7.6: Multi Action and Key Logic](2026-10-30-multi-actions.md) | Sequence timing and cancelling, Switch, Random, custom delays, press detection, editor layout |
+| 2026-10-31 | [Linux and macOS actions and plugins](2026-10-31-linux-macos-actions.md) | Simulated input per session, media control, command lines in Open, Windows plugins through Wine |
 
 ## Open questions
 

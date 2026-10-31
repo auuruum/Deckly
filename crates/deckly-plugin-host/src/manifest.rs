@@ -12,6 +12,8 @@ pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_ACTIONS: usize = 256;
 pub const MAX_STATES: usize = 16;
 const MAX_TEXT_CHARS: usize = 500;
+/// Entries looked at when matching one path part ignoring case.
+const MAX_FOLDER_ENTRIES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
@@ -26,6 +28,8 @@ pub struct Manifest {
     pub code_path: String,
     pub code_path_win: String,
     pub code_path_mac: String,
+    /// `CodePathLin`, which some plugins add next to the official fields.
+    pub code_path_lin: String,
     pub property_inspector: String,
     pub sdk_version: u64,
     /// `Nodejs.Version`, when the plugin asks for Node.
@@ -68,6 +72,8 @@ pub enum Entry {
     Node(PathBuf),
     /// An executable for this platform.
     Native(PathBuf),
+    /// A Windows executable on another platform, run through Wine.
+    Windows(PathBuf),
     /// An HTML page run by a web engine.
     Html(PathBuf),
 }
@@ -172,6 +178,7 @@ impl Manifest {
             code_path: text(&v, "CodePath"),
             code_path_win: text(&v, "CodePathWin"),
             code_path_mac: text(&v, "CodePathMac"),
+            code_path_lin: text(&v, "CodePathLin"),
             property_inspector: text(&v, "PropertyInspectorPath"),
             sdk_version: v.get("SDKVersion").and_then(Value::as_u64).unwrap_or(2),
             node_version: node.map(|n| text(n, "Version")),
@@ -198,51 +205,65 @@ impl Manifest {
         self.actions.iter().find(|a| a.uuid == uuid)
     }
 
+    /// The code paths to try here: this platform's own, the general one,
+    /// then other platforms' as a last resort. A JavaScript or HTML plugin
+    /// runs anywhere, and a Windows program may run through Wine.
+    fn code_paths(&self) -> Vec<&str> {
+        let (win, mac, lin) = (
+            self.code_path_win.as_str(),
+            self.code_path_mac.as_str(),
+            self.code_path_lin.as_str(),
+        );
+        let general = self.code_path.as_str();
+        let order = if cfg!(windows) {
+            [win, general, mac, lin]
+        } else if cfg!(target_os = "macos") {
+            [mac, general, win, lin]
+        } else {
+            [lin, general, win, mac]
+        };
+        order.into_iter().filter(|p| !p.is_empty()).collect()
+    }
+
     /// Works out how to run the plugin on this platform.
     pub fn entry(&self, dir: &Path) -> Result<Entry, String> {
-        let platform_path = if cfg!(windows) {
-            &self.code_path_win
-        } else if cfg!(target_os = "macos") {
-            &self.code_path_mac
-        } else {
-            ""
-        };
-        let code = if platform_path.is_empty() {
-            &self.code_path
-        } else {
-            platform_path
-        };
-        if code.is_empty() {
-            return Err(format!("no code for {}", current_platform()));
+        let mut first_error = None;
+        for code in self.code_paths() {
+            match code_entry(dir, code) {
+                Ok(entry) => return Ok(entry),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
         }
-        let path = safe_join(dir, code).ok_or_else(|| format!("bad code path \"{code}\""))?;
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default();
-        match ext.as_str() {
-            "js" | "mjs" | "cjs" => return exists(path).map(Entry::Node),
-            "html" | "htm" => return exists(path).map(Entry::Html),
-            _ => {}
-        }
-        // Windows plugins may leave out ".exe", and their names often contain
-        // dots ("com.example.tool"), so append rather than replace.
-        let path = if cfg!(windows) && !path.is_file() {
-            let mut with_exe = path.into_os_string();
-            with_exe.push(".exe");
-            PathBuf::from(with_exe)
-        } else {
-            path
-        };
-        let path = exists(path)?;
-        if !native_for_this_platform(&path) {
-            return Err(format!(
-                "this plugin's program is not made for {}",
-                current_platform()
-            ));
-        }
-        Ok(Entry::Native(path))
+        Err(first_error.unwrap_or_else(|| format!("no code for {}", current_platform())))
+    }
+}
+
+fn code_entry(dir: &Path, code: &str) -> Result<Entry, String> {
+    let path = safe_join(dir, code).ok_or_else(|| format!("bad code path \"{code}\""))?;
+    // Windows plugins may leave out ".exe", and their names often contain
+    // dots ("com.example.tool"), so append rather than replace.
+    let Some(path) = find_file(dir, code).or_else(|| find_file(dir, &format!("{code}.exe"))) else {
+        return Err(format!("{} is missing", path.display()));
+    };
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "js" | "mjs" | "cjs" => return Ok(Entry::Node(path)),
+        "html" | "htm" => return Ok(Entry::Html(path)),
+        _ => {}
+    }
+    match program_kind(&path) {
+        ProgramKind::ThisPlatform => Ok(Entry::Native(path)),
+        ProgramKind::Windows => Ok(Entry::Windows(path)),
+        ProgramKind::Other => Err(format!(
+            "this plugin's program is not made for {}",
+            current_platform()
+        )),
     }
 }
 
@@ -251,14 +272,6 @@ impl Manifest {
 /// (docs/clean-room/2026-10-28-plugin-host.md).
 pub fn needs_official_app(dir: &Path) -> bool {
     dir.join("BRUtils.dll").is_file()
-}
-
-fn exists(path: PathBuf) -> Result<PathBuf, String> {
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(format!("{} is missing", path.display()))
-    }
 }
 
 /// The platform name used in manifests and the registration info.
@@ -272,17 +285,26 @@ pub fn current_platform() -> &'static str {
     }
 }
 
-/// Checks an executable's header against this platform's format, so a
-/// Windows program is reported instead of failing to start on Linux.
-fn native_for_this_platform(path: &Path) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+enum ProgramKind {
+    ThisPlatform,
+    /// A Windows program on another platform.
+    Windows,
+    Other,
+}
+
+/// Reads an executable's header, so a program for another system is told
+/// apart before it fails to start.
+fn program_kind(path: &Path) -> ProgramKind {
     use std::io::Read;
     let mut magic = [0u8; 4];
     let read = std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic));
     if read.is_err() {
-        return false;
+        return ProgramKind::Other;
     }
-    if cfg!(windows) {
-        magic.starts_with(b"MZ")
+    let windows = magic.starts_with(b"MZ");
+    let here = if cfg!(windows) {
+        windows
     } else if cfg!(target_os = "macos") {
         matches!(
             magic,
@@ -290,6 +312,11 @@ fn native_for_this_platform(path: &Path) -> bool {
         ) || magic.starts_with(b"#!")
     } else {
         magic == *b"\x7FELF" || magic.starts_with(b"#!")
+    };
+    match (here, windows) {
+        (true, _) => ProgramKind::ThisPlatform,
+        (false, true) => ProgramKind::Windows,
+        (false, false) => ProgramKind::Other,
     }
 }
 
@@ -313,6 +340,37 @@ pub fn safe_join(dir: &Path, relative: &str) -> Option<PathBuf> {
     (parts > 0).then_some(out)
 }
 
+/// Finds a file a manifest names. Plugins are mostly written on Windows,
+/// where "Images/Key.png" also opens "images/key.PNG", so on a miss each part
+/// of the path is matched ignoring case.
+pub fn find_file(dir: &Path, relative: &str) -> Option<PathBuf> {
+    let exact = safe_join(dir, relative)?;
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let mut found = dir.to_path_buf();
+    for part in exact.strip_prefix(dir).ok()?.components() {
+        let wanted = part.as_os_str();
+        let direct = found.join(wanted);
+        found = if direct.exists() {
+            direct
+        } else {
+            let wanted = wanted.to_str()?;
+            let name = std::fs::read_dir(&found)
+                .ok()?
+                .flatten()
+                .take(MAX_FOLDER_ENTRIES)
+                .map(|entry| entry.file_name())
+                .find(|name| {
+                    name.to_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(wanted))
+                })?;
+            found.join(name)
+        };
+    }
+    found.is_file().then_some(found)
+}
+
 /// Finds the file for a manifest image path, which leaves out the extension:
 /// the high-resolution PNG, the PNG, then SVG.
 pub fn image_file(dir: &Path, relative: &str) -> Option<PathBuf> {
@@ -333,10 +391,10 @@ pub fn image_file(dir: &Path, relative: &str) -> Option<PathBuf> {
             format!("{name}.svg"),
         ]
     };
+    let folder = base.parent()?.strip_prefix(dir).ok()?;
     candidates
         .into_iter()
-        .map(|c| base.with_file_name(c))
-        .find(|p| p.is_file())
+        .find_map(|c| find_file(dir, folder.join(c).to_str()?))
 }
 
 fn parse_action(v: &Value) -> Option<Action> {
@@ -516,9 +574,116 @@ mod tests {
         assert!(!needs_official_app(&dir));
         std::fs::write(dir.join("BRUtils.dll"), "").unwrap();
         assert!(needs_official_app(&dir));
-        // A Windows program is refused elsewhere.
         m.code_path = "tool.exe".into();
-        assert_eq!(m.entry(&dir).is_ok(), cfg!(windows));
+        // A Windows program goes through Wine elsewhere.
+        let tool = dir.join("tool.exe");
+        let expected = if cfg!(windows) {
+            Entry::Native(tool)
+        } else {
+            Entry::Windows(tool)
+        };
+        assert_eq!(m.entry(&dir), Ok(expected));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sample_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("deckly-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn with_paths(general: &str, win: &str, mac: &str, lin: &str) -> Manifest {
+        let mut m = Manifest::parse(SAMPLE.as_bytes(), "com.example.sample").unwrap();
+        m.code_path = general.into();
+        m.code_path_win = win.into();
+        m.code_path_mac = mac.into();
+        m.code_path_lin = lin.into();
+        m
+    }
+
+    #[test]
+    fn this_platform_comes_first_then_the_rest() {
+        let m = with_paths("general", "win", "mac", "lin");
+        let first = if cfg!(windows) {
+            "win"
+        } else if cfg!(target_os = "macos") {
+            "mac"
+        } else {
+            "lin"
+        };
+        assert_eq!(m.code_paths()[0], first);
+        assert_eq!(m.code_paths()[1], "general");
+        assert_eq!(m.code_paths().len(), 4);
+        assert!(with_paths("", "", "", "").code_paths().is_empty());
+    }
+
+    #[test]
+    fn a_script_for_another_platform_still_runs() {
+        let dir = sample_dir("other-code");
+        std::fs::write(dir.join("win.js"), "").unwrap();
+        let m = with_paths("", "win.js", "", "");
+        assert_eq!(m.entry(&dir), Ok(Entry::Node(dir.join("win.js"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_code_path_falls_through_to_the_next() {
+        let dir = sample_dir("next-code");
+        std::fs::write(dir.join("plugin.js"), "").unwrap();
+        let m = with_paths("gone.js", "plugin.js", "plugin.js", "plugin.js");
+        assert_eq!(m.entry(&dir), Ok(Entry::Node(dir.join("plugin.js"))));
+        let none = with_paths("", "", "", "");
+        assert!(none.entry(&dir).is_err_and(|e| e.starts_with("no code")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest may leave ".exe" out on any system, not only Windows.
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_programs_without_the_extension_are_found_everywhere() {
+        let dir = sample_dir("no-ext");
+        std::fs::write(dir.join("com.example.tool.exe"), b"MZ\x90\x00").unwrap();
+        let m = with_paths("com.example.tool", "", "", "");
+        assert_eq!(
+            m.entry(&dir),
+            Ok(Entry::Windows(dir.join("com.example.tool.exe")))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_program_for_a_third_system_is_refused() {
+        let dir = sample_dir("foreign");
+        std::fs::write(dir.join("tool"), b"\x00\x01\x02\x03\x04").unwrap();
+        let m = with_paths("tool", "", "", "");
+        assert!(m.entry(&dir).is_err_and(|e| e.contains("not made for")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows and default macOS volumes ignore case; the search must then
+    /// find the file as well, on the first try.
+    #[test]
+    fn files_are_found_whatever_case_the_manifest_uses() {
+        let dir = sample_dir("case");
+        std::fs::create_dir_all(dir.join("Bin/Sub")).unwrap();
+        std::fs::write(dir.join("Bin/Sub/Plugin.JS"), "").unwrap();
+        std::fs::write(dir.join("Bin/Key.png"), "").unwrap();
+        let found = find_file(&dir, "bin\\sub\\plugin.js").unwrap();
+        assert!(found.is_file());
+        assert_eq!(found.parent(), Some(dir.join("Bin/Sub").as_path()));
+        assert!(find_file(&dir, "BIN/key.PNG").is_some());
+        assert!(image_file(&dir, "bin/key").is_some());
+        assert_eq!(find_file(&dir, "bin/none.js"), None);
+        assert_eq!(find_file(&dir, "../bin/sub/plugin.js"), None);
+        assert_eq!(find_file(&dir, "bin"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_full_or_unreadable_folder_is_a_plain_miss() {
+        let dir = sample_dir("miss");
+        assert_eq!(find_file(&dir, "no/such/folder/file"), None);
+        assert_eq!(find_file(&dir.join("gone"), "file"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

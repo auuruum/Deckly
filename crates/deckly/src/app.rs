@@ -2259,6 +2259,12 @@ impl App {
                         }
                         self.recording_hotkey = false;
                     }
+                    // The desktop keeps this key to itself, so recording
+                    // cannot see it: egui reports it only on macOS.
+                    let mut meta = actions::bool_setting(s, "meta");
+                    if ui.checkbox(&mut meta, actions::meta_key_name()).changed() {
+                        actions::set_setting(s, "meta", json!(meta));
+                    }
                 });
                 ui.end_row();
             }

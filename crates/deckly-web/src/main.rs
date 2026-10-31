@@ -47,6 +47,8 @@ const ORIGIN: &str = "http://deckly.localhost/";
 #[cfg(not(windows))]
 const ORIGIN: &str = "deckly://localhost/";
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Entries looked at when matching one path part ignoring case.
+const MAX_FOLDER_ENTRIES: usize = 16 * 1024;
 
 fn main() {
     if let Err(e) = run() {
@@ -196,6 +198,7 @@ fn run() -> Result<(), String> {
                 window_id,
                 ..
             } => popups.close(window_id),
+            #[cfg(windows)]
             Event::UserEvent(Command::ClosePopup(id)) => popups.close(id),
             Event::UserEvent(Command::PopupTitle(id, title)) => popups.title(id, &title),
             Event::UserEvent(Command::Place { x, y, w, h }) if placed => {
@@ -213,8 +216,16 @@ fn run() -> Result<(), String> {
 /// What Deckly tells the helper on its standard input.
 #[derive(Clone, Debug, PartialEq)]
 enum Command {
-    Place { x: i32, y: i32, w: u32, h: u32 },
+    Place {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    },
     Hide,
+    /// WebView2 reports `window.close()` through a callback that only holds
+    /// a proxy; other engines close the window themselves.
+    #[cfg(windows)]
     ClosePopup(WindowId),
     PopupTitle(WindowId, String),
 }
@@ -352,13 +363,34 @@ fn resolve(root: &Path, url_path: &str) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
     for c in Path::new(decoded.trim_start_matches('/')).components() {
         match c {
-            Component::Normal(p) => path.push(p),
+            Component::Normal(p) => path = child(&path, p)?,
             Component::CurDir => {}
             _ => return None,
         }
     }
     let path = path.canonicalize().ok()?;
     (path.starts_with(root) && path.is_file()).then_some(path)
+}
+
+/// A path part inside a folder. Plugin pages written on Windows may spell a
+/// file in another case, which works there, so a miss ignores case.
+fn child(dir: &Path, name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let wanted = name.to_str()?;
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .take(MAX_FOLDER_ENTRIES)
+        .map(|entry| entry.file_name())
+        .find(|found| {
+            found
+                .to_str()
+                .is_some_and(|f| f.eq_ignore_ascii_case(wanted))
+        })
+        .map(|found| dir.join(found))
 }
 
 fn mime(path: &Path) -> &'static str {
@@ -408,6 +440,21 @@ fn serve(root: &Path, url_path: &str) -> Response<Cow<'static, [u8]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_in_another_case_stays_inside_the_plugin() {
+        let dir = std::env::temp_dir().join(format!("deckly-web-case-{}", std::process::id()));
+        let root = dir.join("p.sdPlugin");
+        std::fs::create_dir_all(root.join("Images")).unwrap();
+        std::fs::write(root.join("Images/Key.PNG"), "x").unwrap();
+        std::fs::write(dir.join("Secret.txt"), "s").unwrap();
+        let root = root.canonicalize().unwrap();
+        let found = resolve(&root, "/images/key.png").unwrap();
+        assert_eq!(found, root.join("Images").join("Key.PNG"));
+        assert_eq!(resolve(&root, "/images/none.png"), None);
+        assert_eq!(resolve(&root, "/../secret.txt"), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn serves_only_files_inside_the_plugin() {

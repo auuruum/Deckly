@@ -47,6 +47,49 @@ undo history are gone. The panel must support StatusNotifierItem; stock GNOME
 needs the AppIndicator extension. Without a tray, closing the window quits
 Deckly as before.
 
+## Linux and macOS
+
+All built-in actions run on Linux and macOS. Open takes a file, folder, URL,
+program or `.desktop` file, or a full command with arguments, for example
+`/path/to/python /path/to/script.py toggle "Desk Lamp"`. A command runs
+directly, not in a shell: for pipes, use `sh -c "..."`.
+
+On Linux, Hotkey and Text pick the way that works in your session:
+
+| Session | Way | Setup |
+| --- | --- | --- |
+| Wayland: Hyprland, Sway and other wlroots compositors | virtual keyboard protocol | none |
+| Wayland: GNOME, KDE | RemoteDesktop portal | the desktop asks once |
+| X11 | XTEST | none |
+| Fallback in any session | uinput | access to `/dev/uinput` |
+
+The first three type any language, whatever layout is active. uinput presses
+places on the keyboard, so it follows the active layout and types only what a
+US keyboard can. The rules in `assets/linux/60-deckly.rules` give the
+logged-in user access to Stream Deck devices and to uinput:
+
+```sh
+sudo cp assets/linux/60-deckly.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+sudo udevadm trigger
+```
+
+Multimedia talks to media players over MPRIS and to the volume of PipeWire,
+PulseAudio or ALSA directly, so it works without any media key bindings. When
+nothing answers, it presses the media key. Volume keys step by 5%.
+
+The desktop keeps the Super key to itself, so hotkey recording cannot see it;
+use the Super checkbox next to Record.
+
+On macOS, Hotkey, Text and Multimedia need Deckly allowed under System
+Settings > Privacy & Security > Accessibility. macOS has no Stop media key, so
+that choice reports an error.
+
+Tested on CachyOS with Hyprland: the virtual keyboard, XTEST through XWayland,
+media players and volume. The portal path was tested against a stand-in
+portal, not on a real GNOME or KDE. uinput is not tested yet. macOS is
+compile-checked only.
+
 ## Copy and paste actions
 
 Select a key and press Ctrl+C, then select a destination and press Ctrl+V
@@ -101,7 +144,14 @@ Keys tab under the plugin's name.
   releases its web view. These windows close with their inspector.
 - HTML plugins use a background web view while enabled; closing their
   settings window does not stop the plugin itself.
-- Native plugins run only on the system they were built for.
+- A plugin's code comes from `CodePathWin`, `CodePathMac` or `CodePathLin`
+  for this system, then `CodePath`, then another system's path: JavaScript
+  and HTML plugins run anywhere. Paths ignore case, as they do on Windows.
+- Windows programs run through [Wine](https://www.winehq.org) on Linux and
+  macOS, when it is installed, in a Wine prefix of Deckly's own in `runtimes`.
+  `DECKLY_WINE` forces one Wine. This is best effort: a plugin that needs
+  Windows itself fails on its own, with the reason in its log. Programs built
+  only for macOS cannot run on Linux.
 - Copies installed through the official marketplace are encrypted and
   cannot be used; get the plugin from its author's own download instead.
 - Some plugins refuse to run outside the official app on purpose: they

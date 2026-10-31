@@ -15,6 +15,7 @@ pub mod manifest;
 mod node;
 pub mod protocol;
 mod server;
+mod wine;
 
 pub use guard::{GUARD_ARG, run_guard};
 pub use manifest::{Entry, Manifest};
@@ -47,6 +48,9 @@ pub struct Config {
     /// One Node.js for every plugin, overriding the version each manifest
     /// asks for (a developer setting).
     pub node: Option<PathBuf>,
+    /// The Wine that runs Windows plugins on Linux and macOS, overriding the
+    /// one found on the system (a developer setting).
+    pub wine: Option<PathBuf>,
     /// Where Node.js builds downloaded for plugins are kept.
     pub runtimes_dir: PathBuf,
     /// A program that runs `<guard> --plugin-guard <plugin command>` (see
@@ -326,6 +330,7 @@ struct Slot {
     child: Option<Child>,
     token: Option<String>,
     started: Option<Instant>,
+    register_deadline: Duration,
     registered: bool,
     crashes: Vec<Instant>,
     retry_at: Option<Instant>,
@@ -415,7 +420,7 @@ impl Supervisor {
             .filter_map(|s| match (s.retry_at, s.started) {
                 (Some(at), _) => Some(at),
                 (None, Some(started)) if !s.registered && s.child.is_some() => {
-                    Some(started + REGISTER_DEADLINE)
+                    Some(started + s.register_deadline)
                 }
                 _ => None,
             })
@@ -439,7 +444,7 @@ impl Supervisor {
             .filter(|(_, s)| {
                 !s.registered
                     && s.child.is_some()
-                    && s.started.is_some_and(|t| now >= t + REGISTER_DEADLINE)
+                    && s.started.is_some_and(|t| now >= t + s.register_deadline)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -546,9 +551,17 @@ impl Supervisor {
             return;
         };
         let token = uuid::Uuid::new_v4().simple().to_string();
+        let entry = manifest.entry(&dir);
         let info = {
             let s = lock(&self.shared);
-            protocol::registration_info(&self.config.app, id, &manifest.version, &s.devices)
+            let platform = plugin_platform(entry.as_ref().ok());
+            protocol::registration_info(
+                &self.config.app,
+                platform,
+                id,
+                &manifest.version,
+                &s.devices,
+            )
         };
         let plugin_args = [
             "-port".to_owned(),
@@ -560,8 +573,11 @@ impl Supervisor {
             "-info".to_owned(),
             info.clone(),
         ];
-        let entry = manifest.entry(&dir);
         let web = matches!(entry, Ok(Entry::Html(_)));
+        let register_deadline = match entry {
+            Ok(Entry::Windows(_)) => wine::REGISTER_DEADLINE,
+            _ => REGISTER_DEADLINE,
+        };
         let plugin_args = plugin_args.map(OsString::from);
         let node = match &entry {
             Ok(Entry::Node(_)) => match self.node_for(id, &manifest) {
@@ -586,7 +602,22 @@ impl Supervisor {
                 args.extend(plugin_args);
                 self.guarded(node.into(), args)
             }),
-            Ok(Entry::Native(program)) => Ok(self.guarded(program.into(), plugin_args.to_vec())),
+            Ok(Entry::Native(program)) => {
+                make_executable(&program);
+                Ok(self.guarded(program.into(), plugin_args.to_vec()))
+            }
+            Ok(Entry::Windows(program)) => self
+                .config
+                .wine
+                .clone()
+                .or_else(wine::find)
+                .ok_or_else(|| wine::MISSING.to_owned())
+                .map(|wine| {
+                    let args = wine::arguments(program, &plugin_args);
+                    let mut c = self.guarded(wine.into(), args);
+                    wine::configure(&mut c, &self.config.runtimes_dir);
+                    c
+                }),
             Ok(Entry::Html(page)) => self.web_helper().map(|helper| {
                 let mut c = std::process::Command::new(helper);
                 c.arg("plugin")
@@ -632,6 +663,7 @@ impl Supervisor {
                 slot.child = Some(child);
                 slot.token = Some(token);
                 slot.started = Some(Instant::now());
+                slot.register_deadline = register_deadline;
                 slot.registered = false;
                 self.set_status(id, Status::Starting);
             }
@@ -921,7 +953,7 @@ impl Supervisor {
         } else {
             &action.property_inspector
         };
-        let Some(page) = manifest::safe_join(&dir, path).filter(|p| p.is_file()) else {
+        let Some(page) = manifest::find_file(&dir, path) else {
             return;
         };
         let helper = match self.web_helper() {
@@ -934,7 +966,14 @@ impl Supervisor {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let info = {
             let s = lock(&self.shared);
-            protocol::registration_info(&self.config.app, &id, &manifest.version, &s.devices)
+            let platform = plugin_platform(manifest.entry(&dir).ok().as_ref());
+            protocol::registration_info(
+                &self.config.app,
+                platform,
+                &id,
+                &manifest.version,
+                &s.devices,
+            )
         };
         let title = format!("{} - {}", action.name, manifest.name);
         let mut command = std::process::Command::new(helper);
@@ -1005,6 +1044,33 @@ impl Supervisor {
     fn note(&self, id: &str, text: &str) {
         append_log(&self.config.logs_dir, id, text);
     }
+}
+
+/// The platform a plugin is told it runs on: a Windows program under Wine
+/// sees Windows, so its settings page must hear the same.
+fn plugin_platform(entry: Option<&Entry>) -> &'static str {
+    match entry {
+        Some(Entry::Windows(_)) => "windows",
+        _ => manifest::current_platform(),
+    }
+}
+
+/// Plugin archives made on Windows hold no file modes, so a Unix program in
+/// one unpacks without its executable bit.
+fn make_executable(program: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(program) {
+            let mode = meta.permissions().mode();
+            if mode & 0o100 == 0 {
+                let added = std::fs::Permissions::from_mode(mode | 0o100);
+                let _ = std::fs::set_permissions(program, added);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = program;
 }
 
 /// Adds a line of Deckly's own to a plugin's log.

@@ -135,7 +135,7 @@ pub const ACTIONS: &[ActionDef] = &[
         name: "Open",
         category: Category::System,
         icon: icon::ROCKET_LAUNCH,
-        tooltip: "Open an application or file",
+        tooltip: "Open an application or file, or run a command",
         defaults: || json!({ "path": "" }),
     },
     ActionDef {
@@ -342,12 +342,19 @@ pub fn set_hotkey(settings: &mut Value, hotkey: &Hotkey) {
     set_setting(settings, "key", json!(hotkey.key));
 }
 
-pub fn hotkey_label(hotkey: &Hotkey) -> String {
-    let meta = if cfg!(target_os = "macos") {
+/// The key `Hotkey::meta` stands for here.
+pub fn meta_key_name() -> &'static str {
+    if cfg!(target_os = "macos") {
         "Cmd"
-    } else {
+    } else if cfg!(windows) {
         "Win"
-    };
+    } else {
+        "Super"
+    }
+}
+
+pub fn hotkey_label(hotkey: &Hotkey) -> String {
+    let meta = meta_key_name();
     let parts: Vec<&str> = [
         (hotkey.ctrl, "Ctrl"),
         (hotkey.shift, "Shift"),
@@ -411,7 +418,7 @@ pub fn run(key: &KeyConfig) -> Result<Outcome, String> {
             if !(url.starts_with("http://") || url.starts_with("https://")) || url.len() < 10 {
                 return Err(format!("not a web address: \"{url}\""));
             }
-            os::open(url).map(|_| Outcome::Done)
+            os::open_url(url).map(|_| Outcome::Done)
         }
         TEXT => {
             let mut text = str_setting(s, "text").to_owned();

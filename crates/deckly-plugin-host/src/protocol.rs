@@ -176,6 +176,7 @@ pub const APP_VERSION: &str = "7.6.0";
 /// property inspector.
 pub fn registration_info(
     app: &AppInfo,
+    platform: &str,
     plugin: &str,
     version: &str,
     devices: &[DeviceInfo],
@@ -184,7 +185,7 @@ pub fn registration_info(
         "application": {
             "font": app.font,
             "language": app.language,
-            "platform": crate::manifest::current_platform(),
+            "platform": platform,
             "platformVersion": app.platform_version,
             "version": APP_VERSION,
         },
@@ -480,8 +481,10 @@ mod tests {
             kind: 0,
         };
         let v: Value =
-            serde_json::from_str(&registration_info(&app, "com.a.b", "1.0", &[d])).unwrap();
+            serde_json::from_str(&registration_info(&app, "linux", "com.a.b", "1.0", &[d]))
+                .unwrap();
         assert_eq!(v["application"]["version"], APP_VERSION);
+        assert_eq!(v["application"]["platform"], "linux");
         assert_eq!(v["devices"][0]["size"]["columns"], 5);
         assert_eq!(v["plugin"]["uuid"], "com.a.b");
     }
