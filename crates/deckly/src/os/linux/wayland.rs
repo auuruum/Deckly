@@ -2,13 +2,19 @@
 //! compositors and Hyprland offer to ordinary clients. It needs no
 //! permission, and the keyboard carries its own layout, so any text types
 //! correctly whatever layout is active.
+//!
+//! The compositor tells status bars of each new virtual keyboard and each
+//! layout it loads, and those bars then announce a change of layout. So one
+//! keyboard lives as long as Deckly, its layout is replaced only when it lacks
+//! a key, and it is named after the layout in use (see `hyprland`).
 
-use super::Failure;
 use super::keys::{self, Key, Layout, NOTHING, Part, SHIFT, Stroke, modifier_bit};
 use super::paste;
+use super::{Failure, hyprland};
 use rustix::fs::{MemfdFlags, memfd_create};
 use std::io::Write;
 use std::os::fd::AsFd;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_registry, wl_seat::WlSeat};
@@ -51,8 +57,13 @@ fn failed(e: impl std::fmt::Display) -> Failure {
     Failure::Failed(e.to_string())
 }
 
-/// Splits strokes into runs that each fit one layout.
+/// Splits strokes into runs that each fit one layout: all in one with the US
+/// keys when it fits, as the next press can then often keep that layout.
 fn runs(strokes: &[Stroke]) -> Vec<(Layout, &[Stroke])> {
+    let mut whole = Layout::us();
+    if strokes.iter().all(|stroke| whole.add(stroke)) {
+        return vec![(whole, strokes)];
+    }
     let mut out = Vec::new();
     let mut start = 0;
     let mut layout = Layout::new();
@@ -70,13 +81,13 @@ fn runs(strokes: &[Stroke]) -> Vec<(Layout, &[Stroke])> {
     out
 }
 
-struct Sender<'a> {
-    connection: &'a Connection,
-    keyboard: &'a ZwpVirtualKeyboardV1,
+struct Sender {
+    connection: Connection,
+    keyboard: ZwpVirtualKeyboardV1,
     start: Instant,
 }
 
-impl Sender<'_> {
+impl Sender {
     fn flush(&self) -> Result<(), Failure> {
         self.connection.flush().map_err(failed)?;
         std::thread::sleep(KEY_GAP);
@@ -132,7 +143,9 @@ impl Sender<'_> {
 }
 
 fn upload(keyboard: &ZwpVirtualKeyboardV1, layout: &Layout) -> Result<(), Failure> {
-    let mut map = layout.keymap().into_bytes();
+    let mut map = layout
+        .keymap(hyprland::active_layout().as_deref())
+        .into_bytes();
     map.push(0);
     let file = memfd_create(c"deckly-keymap", MemfdFlags::CLOEXEC).map_err(unavailable)?;
     let mut file = std::fs::File::from(file);
@@ -141,69 +154,116 @@ fn upload(keyboard: &ZwpVirtualKeyboardV1, layout: &Layout) -> Result<(), Failur
     Ok(())
 }
 
-/// Sends strokes in order. `typed` tells whether any key went out, which
-/// decides what a failure means.
-fn type_keys(
-    sender: &Sender,
-    queue: &mut EventQueue<State>,
-    strokes: &[Stroke],
-    typed: &mut bool,
-) -> Result<(), Failure> {
-    for (layout, run) in runs(strokes).iter() {
-        upload(sender.keyboard, layout)?;
-        // A refusal shows up here. Before any key that means trying another
-        // way; later ones would repeat what was typed.
-        match queue.roundtrip(&mut State) {
-            Err(e) if !*typed => return Err(unavailable(e)),
-            Err(e) => return Err(failed(e)),
-            Ok(_) => {}
-        }
-        *typed = true;
-        sender.settle(layout)?;
-        for stroke in *run {
-            sender.stroke(layout, stroke)?;
-        }
-        queue.roundtrip(&mut State).map_err(failed)?;
-    }
-    Ok(())
+struct Session {
+    sender: Sender,
+    queue: EventQueue<State>,
+    /// The layout the compositor has.
+    layout: Option<Layout>,
 }
 
-pub fn send(strokes: &[Stroke]) -> Result<(), Failure> {
-    let connection = Connection::connect_to_env().map_err(unavailable)?;
-    let (globals, mut queue) = registry_queue_init::<State>(&connection).map_err(unavailable)?;
-    let handle = queue.handle();
-    let seat: WlSeat = globals.bind(&handle, 1..=1, ()).map_err(unavailable)?;
-    let manager: ZwpVirtualKeyboardManagerV1 =
-        globals.bind(&handle, 1..=1, ()).map_err(unavailable)?;
-    let keyboard = manager.create_virtual_keyboard(&seat, &handle, ());
-    let sender = Sender {
-        connection: &connection,
-        keyboard: &keyboard,
-        start: Instant::now(),
-    };
-    let mut typed = false;
-    for part in keys::parts(strokes) {
-        match part {
-            Part::Keys(run) => type_keys(&sender, &mut queue, run, &mut typed)?,
-            Part::Paste(run) => {
-                let press = [keys::paste_stroke()];
-                let pasted = paste::paste(&keys::string(run), || {
-                    type_keys(&sender, &mut queue, &press, &mut typed)
-                });
-                match pasted {
-                    // Still right everywhere but in Chromium.
-                    Err(Failure::Unavailable(_)) => {
-                        type_keys(&sender, &mut queue, run, &mut typed)?
+/// The keyboard lives as long as Deckly, as a new one would count as a change
+/// of layout on every press.
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+fn lock() -> MutexGuard<'static, Option<Session>> {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Session {
+    fn open() -> Result<Self, Failure> {
+        let connection = Connection::connect_to_env().map_err(unavailable)?;
+        let (globals, queue) = registry_queue_init::<State>(&connection).map_err(unavailable)?;
+        let handle = queue.handle();
+        let seat: WlSeat = globals.bind(&handle, 1..=1, ()).map_err(unavailable)?;
+        let manager: ZwpVirtualKeyboardManagerV1 =
+            globals.bind(&handle, 1..=1, ()).map_err(unavailable)?;
+        let keyboard = manager.create_virtual_keyboard(&seat, &handle, ());
+        let sender = Sender {
+            connection,
+            keyboard,
+            start: Instant::now(),
+        };
+        Ok(Self {
+            sender,
+            queue,
+            layout: None,
+        })
+    }
+
+    /// False once the compositor has restarted or dropped this connection.
+    fn alive(&mut self) -> bool {
+        self.queue.roundtrip(&mut State).is_ok()
+    }
+
+    fn press(&mut self, layout: &Layout, strokes: &[Stroke]) -> Result<(), Failure> {
+        self.sender.settle(layout)?;
+        for stroke in strokes {
+            self.sender.stroke(layout, stroke)?;
+        }
+        self.queue.roundtrip(&mut State).map_err(failed)?;
+        Ok(())
+    }
+
+    /// Sends strokes in order. `typed` tells whether any key went out, which
+    /// decides what a failure means.
+    fn type_keys(&mut self, strokes: &[Stroke], typed: &mut bool) -> Result<(), Failure> {
+        if let Some(layout) = self.layout.take().filter(|l| l.holds(strokes)) {
+            *typed = true;
+            let pressed = self.press(&layout, strokes);
+            self.layout = Some(layout);
+            return pressed;
+        }
+        for (layout, run) in runs(strokes) {
+            upload(&self.sender.keyboard, &layout)?;
+            // A refusal shows up here. Before any key that means trying
+            // another way; later ones would repeat what was typed.
+            match self.queue.roundtrip(&mut State) {
+                Err(e) if !*typed => return Err(unavailable(e)),
+                Err(e) => return Err(failed(e)),
+                Ok(_) => {}
+            }
+            *typed = true;
+            self.press(&layout, run)?;
+            self.layout = Some(layout);
+        }
+        Ok(())
+    }
+
+    fn send(&mut self, strokes: &[Stroke]) -> Result<(), Failure> {
+        let mut typed = false;
+        for part in keys::parts(strokes) {
+            match part {
+                Part::Keys(run) => self.type_keys(run, &mut typed)?,
+                Part::Paste(run) => {
+                    let press = [keys::paste_stroke()];
+                    let text = keys::string(run);
+                    let pasted = paste::paste(&text, || self.type_keys(&press, &mut typed));
+                    match pasted {
+                        // Still right everywhere but in Chromium.
+                        Err(Failure::Unavailable(_)) => self.type_keys(run, &mut typed)?,
+                        other => other?,
                     }
-                    other => other?,
                 }
             }
         }
+        Ok(())
     }
-    // Clients still handle the last keys with this layout.
-    std::thread::sleep(LAYOUT_GAP);
-    keyboard.destroy();
-    connection.flush().map_err(failed)
+}
+
+pub fn send(strokes: &[Stroke]) -> Result<(), Failure> {
+    let mut slot = lock();
+    if !slot.as_mut().is_some_and(Session::alive) {
+        *slot = Some(Session::open()?);
+    }
+    let Some(session) = slot.as_mut() else {
+        return Err(unavailable("no virtual keyboard"));
+    };
+    let result = session.send(strokes);
+    if result.is_err() {
+        // Next time starts with a fresh keyboard.
+        *slot = None;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -228,5 +288,14 @@ mod tests {
     #[test]
     fn short_text_needs_one_layout() {
         assert_eq!(runs(&keys::text("hello world")).len(), 1);
+        assert_eq!(runs(&keys::text("Привет, мир!")).len(), 1);
+    }
+
+    #[test]
+    fn a_layout_for_one_text_serves_the_next() {
+        let first = keys::text("hello");
+        let later = keys::text("Other text! 123\n");
+        let runs = runs(&first);
+        assert!(runs.iter().all(|(layout, _)| layout.holds(&later)));
     }
 }

@@ -335,6 +335,8 @@ const SPARE_KEYS: [RangeInclusive<u32>; 12] = [
     51..=61,
 ];
 
+const MAX_NAME_BYTES: usize = 128;
+
 /// A private keyboard layout: every key a run of strokes needs. What a US
 /// keyboard has sits on its real key and level, so clients see the same key
 /// and Shift as from a real keyboard; the rest takes a spare key. Text in any
@@ -354,6 +356,17 @@ impl Layout {
             keycodes: HashMap::new(),
         };
         for key in [SHIFT, CTRL, ALT, SUPER, NOTHING] {
+            layout.place(key);
+        }
+        layout
+    }
+
+    /// Everything a US keyboard types, and the keys text needs. It holds most
+    /// of what is ever sent, so it rarely has to be replaced.
+    pub fn us() -> Self {
+        let mut layout = Self::new();
+        let keys = (' '..='~').filter_map(Key::for_char);
+        for key in keys.chain([ENTER, TAB, INSERT]) {
             layout.place(key);
         }
         layout
@@ -398,6 +411,14 @@ impl Layout {
         stroke.mods.iter().all(|&m| self.place(m)) && self.place(stroke.key)
     }
 
+    /// Whether every key of these strokes is already here.
+    pub fn holds(&self, strokes: &[Stroke]) -> bool {
+        strokes.iter().all(|stroke| {
+            let mut keys = stroke.mods.iter().chain([&stroke.key]);
+            keys.all(|&key| self.keycodes.contains_key(&key.sym))
+        })
+    }
+
     /// The XKB key number of a key that was added.
     pub fn keycode(&self, key: Key) -> Option<u32> {
         self.keycodes.get(&key.sym).map(|&(keycode, _)| keycode)
@@ -408,8 +429,9 @@ impl Layout {
         self.keycodes.get(&key.sym).is_some_and(|&(_, shift)| shift)
     }
 
-    /// The layout as an XKB keymap.
-    pub fn keymap(&self) -> String {
+    /// The layout as an XKB keymap. Compositors announce `name` as the layout
+    /// in use; without one Hyprland says "error".
+    pub fn keymap(&self, name: Option<&str>) -> String {
         let mut out =
             String::from("xkb_keymap {\nxkb_keycodes \"deckly\" {\nminimum = 8;\nmaximum = 255;\n");
         for keycode in self.syms.keys() {
@@ -420,6 +442,8 @@ impl Layout {
              xkb_compatibility \"deckly\" { include \"complete\" };\n\
              xkb_symbols \"deckly\" {\n",
         );
+        let name = name.filter(|name| fits_a_keymap(name)).unwrap_or("Deckly");
+        let _ = writeln!(out, "name[Group1] = \"{name}\";");
         for (keycode, levels) in &self.syms {
             let _ = match levels {
                 [plain, 0] => writeln!(out, "key <K{keycode}> {{ [ {plain:#x} ] }};"),
@@ -441,6 +465,15 @@ impl Layout {
         out.push_str("};\n};\n");
         out
     }
+}
+
+/// A name that cannot break out of its quotes in a keymap.
+fn fits_a_keymap(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
+        && !name
+            .chars()
+            .any(|c| matches!(c, '"' | '\\') || c.is_control())
 }
 
 #[cfg(test)]
@@ -630,7 +663,7 @@ mod tests {
         assert!(layout.keycode(euro).is_some());
         assert!(!layout.needs_shift(euro));
         assert_eq!(layout.keycode(Key::for_char('z').unwrap()), None);
-        let map = layout.keymap();
+        let map = layout.keymap(None);
         assert!(map.contains("key <K38> { [ 0x61, 0x41 ] };"));
         assert!(map.contains("[ 0x10020ac ]"));
         assert!(map.contains("modifier_map Mod4 { <K133> };"));
@@ -649,7 +682,7 @@ mod tests {
         assert_eq!(layout.keycode(bang), Some(10));
         assert_eq!(layout.keycode(at), Some(11));
         assert!(layout.needs_shift(bang) && layout.needs_shift(at));
-        let map = layout.keymap();
+        let map = layout.keymap(None);
         assert!(map.contains("key <K10> { [ 0x31, 0x21 ] };"));
         assert!(map.contains("key <K11> { [ 0x32, 0x40 ] };"));
     }
@@ -697,6 +730,37 @@ mod tests {
         assert!(layout.keycode(q).is_some());
         assert!(!layout.needs_shift(q));
         assert!(!layout.add(&Stroke::single(Key::for_char('Q').unwrap())));
+    }
+
+    #[test]
+    fn keymaps_carry_a_name_that_cannot_break_them() {
+        let layout = Layout::new();
+        let name = |name| layout.keymap(name);
+        assert!(name(Some("Russian")).contains("name[Group1] = \"Russian\";"));
+        assert!(name(None).contains("name[Group1] = \"Deckly\";"));
+        for bad in ["", "a\"b", "a\\b", "a\nb"] {
+            assert!(
+                name(Some(bad)).contains("name[Group1] = \"Deckly\";"),
+                "{bad}"
+            );
+        }
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        assert!(name(Some(&long)).contains("name[Group1] = \"Deckly\";"));
+    }
+
+    #[test]
+    fn the_us_layout_holds_all_plain_text_and_hotkeys_for_it() {
+        let layout = Layout::us();
+        assert!(layout.holds(&text("Hello, World! ~`^\"\t\n")));
+        assert!(layout.holds(&[paste_stroke()]));
+        let save = hotkey(&Hotkey {
+            ctrl: true,
+            key: "S".into(),
+            ..Hotkey::default()
+        });
+        assert!(layout.holds(&Vec::from_iter(save)));
+        assert!(!layout.holds(&text("я")));
+        assert!(!layout.holds(&Vec::from_iter(hotkey(&hk("F5")))));
     }
 
     #[test]
