@@ -308,6 +308,7 @@ fn start_host() -> (
         logs_dir: dir.join("logs").join("plugins"),
         web_helper: helper,
         node: std::env::var_os("DECKLY_NODE").map(PathBuf::from),
+        wine: std::env::var_os("DECKLY_WINE").map(PathBuf::from),
         guard: std::env::current_exe().ok(),
         runtimes_dir: dir.join("runtimes"),
         app: deckly_plugin_host::AppInfo {

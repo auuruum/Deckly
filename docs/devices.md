@@ -11,6 +11,7 @@ strips, the Neo's touch sensors and info window are not implemented.
 | Stream Deck MK.2 (`0x0080`) | 1.02.000 | Windows 10 22H2 | Tested: detection, key input, key images (upright, correct order), brightness, pages, logo on exit. | 2026-10-25 |
 | Stream Deck MK.2 (`0x0080`) | 1.02.000 | Windows 10 22H2 | Re-checked after the per-model rotation and protocol split: key images upright and in order, key input, brightness. Logo on exit not re-checked. | 2026-10-26 |
 | Stream Deck MK.2 (`0x0080`) | 1.02.000 | Windows 10 22H2 | Tested by the owner: screensaver set through Customize Image, shown on the keys after Sleep After, woken by a key press; standby image (report `0x02`/`0x09`) stored and shown with Deckly closed. Orientation choices not checked yet. | 2026-10-26 |
+| Stream Deck MK.2 (`0x0080`) | | CachyOS, kernel 7.3, Hyprland 0.56 | Seen working by the owner: detection, key images, key input reaching actions. Built-in actions were checked without the device (see `docs/clean-room/2026-10-31-linux-macos-actions.md`); pressing them on the device is not recorded yet. | 2026-10-31 |
 | Stream Deck (v2) (`0x006D`) | | | Untested | |
 | Stream Deck MK.2 scissor keys (`0x00A5`) | | | Untested | |
 | Stream Deck 15-key module (`0x00B9`) | | | Untested | |

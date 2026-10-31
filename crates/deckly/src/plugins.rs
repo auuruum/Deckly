@@ -711,7 +711,7 @@ impl Worker {
             self.log(plugin, &format!("openUrl refused: {url}"));
             return;
         }
-        if let Err(e) = os::open(url) {
+        if let Err(e) = os::open_url(url) {
             self.log(plugin, &format!("openUrl: {e}"));
         }
     }

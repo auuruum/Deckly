@@ -8,15 +8,32 @@ pub mod autostart;
 pub mod instance;
 pub mod tray;
 
+mod command;
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use self::windows::{media_key, open, send_hotkey, type_text};
+pub use self::windows::{media_key, open, open_url, send_hotkey, type_text};
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+pub use self::unix::{open, open_url};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use self::linux::{media_key, send_hotkey, type_text};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use self::macos::{media_key, send_hotkey, type_text};
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod other;
-#[cfg(not(windows))]
-pub use self::other::{media_key, open, send_hotkey, type_text};
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub use self::other::{media_key, send_hotkey, type_text};
 
 /// A key combination in Deckly's own notation. `key` uses egui key names
 /// ("A", "F5", "Space", "Left", ...).
@@ -25,7 +42,7 @@ pub struct Hotkey {
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
-    /// Windows key / Command key.
+    /// Windows key / Super key / Command key.
     pub meta: bool,
     pub key: String,
 }

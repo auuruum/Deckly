@@ -35,8 +35,21 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Asks whether a tray exists; already in the tree through accesskit.
+# Asks whether a tray exists, talks to media players and to the remote desktop
+# portal; already in the tree through accesskit.
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+# Simulated input: the Wayland virtual keyboard, XTEST and /dev/uinput. All pure
+# Rust, and already in the tree through winit, except for the XTEST feature.
+wayland-client = "0.31.15"
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+x11rb = { version = "0.13.2", default-features = false, features = ["xtest"] }
+rustix = { version = "1.1.5", default-features = false, features = ["std", "fs"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Simulated input through Quartz events; already in the tree through winit.
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGRemoteOperation"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "objc2-core-graphics"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSGeometry"] }
 
 [lints]
 workspace = true

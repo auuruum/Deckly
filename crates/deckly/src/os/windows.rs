@@ -1,5 +1,6 @@
 //! Windows: SendInput for keys and text, ShellExecuteW for opening targets.
 
+use super::command::split_words;
 use super::{Hotkey, MediaKey};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -178,11 +179,8 @@ pub fn media_key(key: MediaKey) -> Result<(), String> {
     send(&[key_input(vk, false), key_input(vk, true)])
 }
 
-pub fn open(target: &str) -> Result<(), String> {
-    let target = target.trim();
-    if target.is_empty() {
-        return Err("nothing to open".into());
-    }
+/// Hands a target to the shell, with `parameters` for a program.
+fn shell_open(target: &str, parameters: &str) -> bool {
     // SAFETY: all string arguments are valid, NUL-terminated wide strings
     // that outlive the call.
     let result = unsafe {
@@ -190,13 +188,54 @@ pub fn open(target: &str) -> Result<(), String> {
             None,
             w!("open"),
             &HSTRING::from(target),
-            None,
+            &HSTRING::from(parameters),
             None,
             SW_SHOWNORMAL,
         )
     };
     // ShellExecuteW reports success with a value above 32.
-    if result.0 as usize > 32 {
+    result.0 as usize > 32
+}
+
+/// Puts a word back into a Windows command line.
+fn quoted(word: &str) -> String {
+    if word.is_empty() || word.contains(char::is_whitespace) {
+        format!("\"{word}\"")
+    } else {
+        word.to_owned()
+    }
+}
+
+/// Opens a URL or file; the text is never taken for a command line, so it is
+/// safe for text from plugins.
+pub fn open_url(target: &str) -> Result<(), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("nothing to open".into());
+    }
+    if shell_open(target, "") {
+        Ok(())
+    } else {
+        Err(format!("cannot open \"{target}\""))
+    }
+}
+
+/// Opens what the user wrote in an Open action: a URL, a path, or a command
+/// line with arguments.
+pub fn open(target: &str) -> Result<(), String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("nothing to open".into());
+    }
+    if shell_open(target, "") {
+        return Ok(());
+    }
+    let words = split_words(target).ok_or_else(|| format!("unclosed quote in \"{target}\""))?;
+    let opened = words.split_first().is_some_and(|(program, args)| {
+        let args: Vec<String> = args.iter().map(|a| quoted(a)).collect();
+        shell_open(program, &args.join(" "))
+    });
+    if opened {
         Ok(())
     } else {
         Err(format!("cannot open \"{target}\""))
@@ -206,6 +245,13 @@ pub fn open(target: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_line_words_are_quoted_again() {
+        assert_eq!(quoted("toggle"), "toggle");
+        assert_eq!(quoted("RGB Lights"), "\"RGB Lights\"");
+        assert_eq!(quoted(""), "\"\"");
+    }
 
     #[test]
     fn maps_key_names() {

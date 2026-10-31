@@ -49,6 +49,12 @@ Development switches:
 
 - `DECKLY_NO_DEVICES=1`: open the editor without touching any device.
 - `DECKLY_DEBUG=1`: print device events and action results.
+- `DECKLY_INPUT=wayland|portal|x11|uinput`: force one way of pressing keys on
+  Linux.
+- `DECKLY_WINE=/path/to/wine`: force the Wine that runs Windows plugins.
+
+To check simulated input on a Linux session by hand, focus a text field and
+run `cargo test -p deckly -- --ignored typing`.
 
 Set them per shell. PowerShell:
 
