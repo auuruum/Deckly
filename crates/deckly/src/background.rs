@@ -217,8 +217,7 @@ impl Background {
     pub fn switch_profile(&self, serial: &str, id: String) {
         let mut s = runtime::lock(&self.state);
         if s.profile(&id).is_some() {
-            s.settings.assignments.insert(serial.to_owned(), id);
-            s.save_settings();
+            s.assign(serial, id);
         }
         drop(s);
         let _ = self.runtime.send(Msg::Refresh);

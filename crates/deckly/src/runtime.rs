@@ -41,6 +41,8 @@ pub struct State {
     pub catalog: plugins::Catalog,
     /// What plugins set on their keys, by context.
     pub plugin_keys: HashMap<String, plugins::PluginKey>,
+    /// The profile a device showed before its current one, by serial.
+    pub previous: HashMap<String, String>,
 }
 
 impl State {
@@ -55,7 +57,21 @@ impl State {
             notice: None,
             catalog: plugins::Catalog::default(),
             plugin_keys: HashMap::new(),
+            previous: HashMap::new(),
         }
+    }
+
+    /// Shows a profile on a device and saves the choice. The profile it
+    /// replaces is remembered for plugins that ask to go back.
+    pub fn assign(&mut self, serial: &str, id: String) {
+        let old = self
+            .settings
+            .assignments
+            .insert(serial.to_owned(), id.clone());
+        if let Some(old) = old.filter(|o| *o != id) {
+            self.previous.insert(serial.to_owned(), old);
+        }
+        self.save_settings();
     }
 
     pub fn profile(&self, id: &str) -> Option<&Profile> {
@@ -1138,8 +1154,7 @@ fn apply_outcome(
         }
         Ok(Outcome::SwitchProfile(id)) => {
             if s.profile(&id).is_some() {
-                s.settings.assignments.insert(serial, id);
-                s.save_settings();
+                s.assign(&serial, id);
             } else {
                 s.notify("Switch Profile: that profile no longer exists");
             }

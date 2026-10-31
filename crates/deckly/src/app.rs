@@ -577,8 +577,7 @@ impl App {
         match device {
             Some(d) => {
                 let mut s = runtime::lock(&self.state);
-                s.settings.assignments.insert(d.serial.clone(), id);
-                s.save_settings();
+                s.assign(&d.serial, id);
                 drop(s);
                 let _ = self.runtime.send(Msg::Refresh);
             }

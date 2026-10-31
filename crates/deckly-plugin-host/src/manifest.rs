@@ -38,6 +38,9 @@ pub struct Manifest {
     pub node_debug: String,
     /// `OS[].Platform`: "windows", "mac".
     pub platforms: Vec<String>,
+    /// `Profiles[].Name`: profiles the plugin ships, as `<name>.streamDeckProfile`
+    /// files in its folder.
+    pub profiles: Vec<String>,
     pub actions: Vec<Action>,
 }
 
@@ -187,6 +190,17 @@ impl Manifest {
                 .get("OS")
                 .and_then(Value::as_array)
                 .map(|list| list.iter().map(|o| text(o, "Platform")).take(4).collect())
+                .unwrap_or_default(),
+            profiles: v
+                .get("Profiles")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .map(|p| text(p, "Name"))
+                        .filter(|n| !n.is_empty())
+                        .take(MAX_ACTIONS)
+                        .collect()
+                })
                 .unwrap_or_default(),
             actions,
         })
@@ -480,6 +494,7 @@ mod tests {
         "Name": "Sample", "Version": "1.2.0.0", "Author": "Someone",
         "CodePath": "bin/plugin.js", "Nodejs": {"Version": "20", "Debug": "enabled"},
         "SDKVersion": 2, "OS": [{"Platform": "windows", "MinimumVersion": "10"}],
+        "Profiles": [{"Name": "profiles/Mine", "DeviceType": 0}, {"DeviceType": 1}],
         "Category": "Things", "PropertyInspectorPath": "ui/pi.html",
         "Actions": [
             {"UUID": "com.example.sample.one", "Name": "One", "Icon": "imgs/one",
@@ -497,6 +512,7 @@ mod tests {
         assert_eq!(m.node_version.as_deref(), Some("20"));
         assert_eq!(m.node_debug, "enabled");
         assert_eq!(m.platforms, ["windows"]);
+        assert_eq!(m.profiles, ["profiles/Mine"]);
         assert_eq!(m.category_name(), "Things");
         assert_eq!(m.actions.len(), 2);
         let one = &m.actions[0];
@@ -685,7 +701,10 @@ mod tests {
         std::fs::write(dir.join("Bin/Key.png"), "").unwrap();
         let found = find_file(&dir, "bin\\sub\\plugin.js").unwrap();
         assert!(found.is_file());
-        assert_eq!(found.parent(), Some(dir.join("Bin/Sub").as_path()));
+        // A case-insensitive volume answers the path as asked; both sides
+        // resolve to the real folder.
+        let real = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(real(found.parent().unwrap()), real(&dir.join("Bin/Sub")));
         assert!(find_file(&dir, "BIN/key.PNG").is_some());
         assert!(image_file(&dir, "bin/key").is_some());
         assert_eq!(find_file(&dir, "bin/none.js"), None);
