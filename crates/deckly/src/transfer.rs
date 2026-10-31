@@ -424,7 +424,7 @@ pub fn commit(
     };
     let mut report = Report::default();
     if profiles {
-        match write_profiles(&scan, &mut report, state, progress) {
+        match write_profiles(&scan, &mut report, state, Some(progress)) {
             Ok(n) => summary.lines.push(count(n, "profile") + " imported."),
             Err(e) => summary.lines.push(format!("Profiles not imported: {e}")),
         }
@@ -516,13 +516,33 @@ pub fn commit(
     summary
 }
 
+/// Brings in the profile a plugin ships and returns its id. A profile that
+/// is in Deckly already is left alone, so the user's edits survive.
+pub fn import_bundled(file: &Path, state: &Shared) -> Result<String, String> {
+    let mut scan = scan(file, None, state)?;
+    let id = scan
+        .profiles
+        .first()
+        .map(|c| c.profile.id.clone())
+        .ok_or("the file holds no profile")?;
+    {
+        let s = runtime::lock(state);
+        scan.profiles.retain(|c| s.profile(&c.profile.id).is_none());
+    }
+    if !scan.profiles.is_empty() {
+        write_profiles(&scan, &mut Report::default(), state, None)?;
+    }
+    Ok(id)
+}
+
 fn write_profiles(
     scan: &Scan,
     report: &mut Report,
     state: &Shared,
-    progress: &Progress,
+    progress: Option<&Progress>,
 ) -> Result<usize, String> {
-    progress.show("Copying key pictures");
+    let show = |text: &str| progress.iter().for_each(|p| p.show(text));
+    show("Copying key pictures");
     let (mut tree, _) = Tree::open(&scan.source)?;
     for (from, to) in &scan.images {
         // A missing picture leaves the key with its action's icon.
@@ -535,7 +555,7 @@ fn write_profiles(
         }
         std::fs::write(to, bytes).map_err(|e| e.to_string())?;
     }
-    progress.show("Saving profiles");
+    show("Saving profiles");
     let mut saved = Vec::new();
     for converted in &scan.profiles {
         merge_report(report, &converted.report);

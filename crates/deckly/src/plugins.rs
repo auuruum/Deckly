@@ -605,11 +605,78 @@ impl Worker {
                 self.host.send(plugin, msg);
             }
             Command::OpenUrl { url } => self.open_url(plugin, &url),
+            Command::SwitchToProfile {
+                device,
+                profile,
+                page,
+            } => {
+                if let Err(e) = self.switch_to_profile(plugin, &device, profile, page) {
+                    self.log(plugin, &format!("switchToProfile: {e}"));
+                }
+            }
             Command::LogMessage { .. }
             | Command::SendToPropertyInspector { .. }
             | Command::SendToPlugin { .. } => {}
             Command::Other(event) => self.log(plugin, &format!("{event} is not supported yet")),
         }
+    }
+
+    /// Shows one of the plugin's own profiles on a device, bringing it in on
+    /// first use; no name goes back to the profile shown before.
+    fn switch_to_profile(
+        &self,
+        plugin: &str,
+        device: &str,
+        name: Option<String>,
+        page: Option<usize>,
+    ) -> Result<(), String> {
+        let (serial, kind) = runtime::lock(&self.state)
+            .devices
+            .iter()
+            .find(|d| protocol::device_id(&d.serial) == device)
+            .map(|d| (d.serial.clone(), d.model.kind))
+            .ok_or("unknown device")?;
+        let id = match name {
+            Some(name) => {
+                let dir = self.plugin_dir(plugin).ok_or("unknown plugin")?;
+                // Only profiles the manifest lists, so a plugin cannot point
+                // Deckly at other files.
+                let listed = self.host.plugins().iter().any(|p| {
+                    p.id == plugin
+                        && p.manifest
+                            .as_ref()
+                            .is_some_and(|m| m.profiles.contains(&name))
+                });
+                if !listed {
+                    return Err(format!("{name} is not a profile of this plugin"));
+                }
+                let file = deckly_plugin_host::manifest::find_file(
+                    &dir,
+                    &format!("{name}.streamDeckProfile"),
+                )
+                .ok_or(format!("the file of profile {name} is missing"))?;
+                crate::transfer::import_bundled(&file, &self.state)?
+            }
+            None => runtime::lock(&self.state)
+                .previous
+                .get(&serial)
+                .cloned()
+                .ok_or("there is no previous profile")?,
+        };
+        let mut s = runtime::lock(&self.state);
+        let profile = s.profile(&id).ok_or("that profile no longer exists")?;
+        if profile.device != kind {
+            return Err("that profile is for another device model".into());
+        }
+        s.assign(&serial, id.clone());
+        s.set_folder_path(&id, Vec::new());
+        if let Some(page) = page {
+            s.set_page(&id, page);
+        }
+        drop(s);
+        let _ = self.runtime.send(Msg::Refresh);
+        (self.repaint)();
+        Ok(())
     }
 
     fn inspector_command(&mut self, plugin: &str, instance: &Instance, command: Command) {

@@ -59,6 +59,13 @@ pub enum Command {
         context: String,
         payload: Value,
     },
+    /// Show a profile of the plugin on a device; without a name, the one
+    /// shown before. `page` counts from 0.
+    SwitchToProfile {
+        device: String,
+        profile: Option<String>,
+        page: Option<usize>,
+    },
     /// A command Deckly does not handle (yet), by event name.
     Other(String),
 }
@@ -126,6 +133,18 @@ pub fn parse_command(text: &str) -> Result<Command, String> {
         "sendToPlugin" => Command::SendToPlugin {
             context: context(),
             payload,
+        },
+        "switchToProfile" => Command::SwitchToProfile {
+            device: str_field(&v, "device"),
+            profile: payload
+                .get("profile")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            page: payload
+                .get("page")
+                .and_then(Value::as_u64)
+                .map(|p| p as usize),
         },
         other => Command::Other(other.chars().take(64).collect()),
     })
@@ -405,6 +424,25 @@ mod tests {
         );
         assert!(
             parse_command(r#"{"event":"setState","context":"c","payload":{"state":99}}"#).is_err()
+        );
+        assert_eq!(
+            parse_command(
+                r#"{"event":"switchToProfile","device":"d","payload":{"profile":"profiles/A","page":2}}"#
+            ),
+            Ok(Command::SwitchToProfile {
+                device: "d".into(),
+                profile: Some("profiles/A".into()),
+                page: Some(2)
+            })
+        );
+        // Going back: the SDK leaves out an undefined profile.
+        assert_eq!(
+            parse_command(r#"{"event":"switchToProfile","device":"d","payload":{}}"#),
+            Ok(Command::SwitchToProfile {
+                device: "d".into(),
+                profile: None,
+                page: None
+            })
         );
         assert!(parse_command(r#"{"context":"c"}"#).is_err());
         assert!(parse_command("garbage").is_err());
