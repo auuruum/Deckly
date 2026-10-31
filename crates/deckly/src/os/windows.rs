@@ -4,7 +4,8 @@ use super::command::split_words;
 use super::{Hotkey, MediaKey};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    RegGetValueW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -179,6 +180,30 @@ pub fn version_text() -> String {
         (Some(major), Some(minor)) if result == ERROR_SUCCESS => format!("{major}.{minor}.{build}"),
         _ => String::new(),
     }
+}
+
+/// Reads the official app's `Devices` setting from the registry, as stored.
+pub fn official_devices_setting() -> Option<Vec<u8>> {
+    const MAX_BYTES: usize = 1024 * 1024;
+    let mut bytes = vec![0u8; MAX_BYTES];
+    let mut size = MAX_BYTES as u32;
+    // SAFETY: the strings are static NUL-terminated wide strings, and `size`
+    // holds the length of the buffer, which outlives the call.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Elgato Systems GmbH\StreamDeck"),
+            w!("Devices"),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(bytes.as_mut_ptr().cast()),
+            Some(&raw mut size),
+        )
+    };
+    (result == ERROR_SUCCESS).then(|| {
+        bytes.truncate(size as usize);
+        bytes
+    })
 }
 
 pub fn send_hotkey(hotkey: &Hotkey) -> Result<(), String> {

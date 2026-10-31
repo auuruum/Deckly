@@ -42,6 +42,15 @@ pub fn system_version() -> String {
     numeric_version(&version_text()).unwrap_or_else(|| "1.0".to_owned())
 }
 
+/// The official app's `Devices` setting, which holds its profile order. Only
+/// known on Windows; elsewhere imports use name order.
+pub fn official_devices_setting() -> Option<Vec<u8>> {
+    #[cfg(windows)]
+    return self::windows::official_devices_setting();
+    #[cfg(not(windows))]
+    None
+}
+
 fn version_text() -> String {
     #[cfg(windows)]
     return self::windows::version_text();

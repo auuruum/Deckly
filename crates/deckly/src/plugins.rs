@@ -829,20 +829,27 @@ fn load_global(plugin: &str) -> Value {
 /// Loads a manifest image (PNG or SVG).
 fn load_file_image(dir: &Path, relative: &str) -> Option<RgbaImage> {
     let path = image_file(dir, relative)?;
-    let result = if path.extension().is_some_and(|e| e == "svg") {
-        std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| render_svg(&bytes))
-    } else {
-        render::decode_file(&path)
-    };
-    match result {
+    match decode_picture(&path) {
         Ok(img) => Some(img),
         Err(e) => {
             eprintln!("deckly: plugin image {}: {e}", path.display());
             None
         }
     }
+}
+
+/// Decodes a picture file: an SVG or anything [`render::decode_file`] reads.
+pub fn decode_picture(path: &Path) -> Result<RgbaImage, String> {
+    if path.extension().is_none_or(|e| e != "svg") {
+        return render::decode_file(path);
+    }
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if len > MAX_IMAGE_DATA as u64 {
+        return Err("file is too large".into());
+    }
+    std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| render_svg(&bytes))
 }
 
 /// Decodes what a plugin sends with `setImage`: a data URL (PNG, JPEG, SVG;

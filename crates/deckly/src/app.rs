@@ -1326,7 +1326,7 @@ impl App {
                 pos2(strip.left() + 2.0 + slot as f32 * CHIP, strip.top()),
                 vec2(CHIP, HEIGHT),
             );
-            let resp = ui.interact(r, ui.id().with(("page", i)), Sense::click());
+            let mut resp = ui.interact(r, ui.id().with(("page", i)), Sense::click());
             let current = i == *page;
             if current {
                 painter.rect_filled(r.shrink2(vec2(1.0, 1.0)), CornerRadius::same(9), PAGER_CHIP);
@@ -1338,13 +1338,29 @@ impl App {
             } else {
                 TEXT_DIM
             };
-            painter.text(
-                r.center(),
-                Align2::CENTER_CENTER,
-                (i + 1).to_string(),
-                font(12.0),
-                color,
-            );
+            let shown_page = profile.pages.get(i);
+            let picture = shown_page
+                .and_then(|p| p.icon.as_deref())
+                .and_then(|path| prefs::page_picture(ui.ctx(), path));
+            if let Some(picture) = picture {
+                let area = Rect::from_center_size(r.center(), Vec2::splat(14.0));
+                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(picture.id(), area, whole, color);
+            } else {
+                painter.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    (i + 1).to_string(),
+                    font(12.0),
+                    color,
+                );
+            }
+            if let Some(name) = shown_page
+                .map(|p| p.name.as_str())
+                .filter(|n| !n.is_empty())
+            {
+                resp = resp.on_hover_text(name);
+            }
             if resp.clicked() {
                 new_page = i;
             }
@@ -1407,12 +1423,12 @@ impl App {
     fn folder_strip(&mut self, ui: &mut Ui, geo: &CanvasGeometry, profile: &Profile, view: &View) {
         const HEIGHT: f32 = 20.0;
         const PAD: f32 = 10.0;
-        let mut crumbs = vec![format!(
-            "{}  Page {}",
-            icon::ARROW_BEND_LEFT_UP,
-            view.page + 1
-        )];
         let mut parent = profile.pages.get(view.page);
+        let mut crumbs = vec![format!(
+            "{}  {}",
+            icon::ARROW_BEND_LEFT_UP,
+            parent.map(|p| p.title(view.page)).unwrap_or_default()
+        )];
         for id in &view.path {
             let title = parent
                 .and_then(|p| p.keys.values().find(|k| k.folder() == Some(id.as_str())))

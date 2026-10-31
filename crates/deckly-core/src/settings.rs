@@ -5,14 +5,16 @@
 //! The set of settings follows the official app's Preferences window
 //! (docs/clean-room/2026-10-26-preferences.md).
 
-use crate::profile::TitleStyle;
+use crate::profile::{Profile, TitleStyle};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 /// Devices remembered in the settings file; more are dropped on load.
 pub const MAX_DEVICES: usize = 256;
+/// Entries of the profile order; more are dropped on load.
+const MAX_PROFILE_ORDER: usize = 10_000;
 pub const DEFAULT_BRIGHTNESS: u8 = 70;
 /// Longer screensaver paths are dropped on load.
 const MAX_PATH_BYTES: usize = 4096;
@@ -33,6 +35,9 @@ pub struct Settings {
     pub title_style: TitleStyle,
     /// How a held key looks on the device.
     pub key_press: KeyPress,
+    /// Profile ids in the order lists show them. Profiles not on it follow,
+    /// by name.
+    pub profile_order: Vec<String>,
 }
 
 impl Default for Settings {
@@ -43,6 +48,7 @@ impl Default for Settings {
             devices: BTreeMap::new(),
             title_style: TitleStyle::default(),
             key_press: KeyPress::default(),
+            profile_order: Vec::new(),
         }
     }
 }
@@ -210,11 +216,57 @@ impl Settings {
     /// their default take `replacement` as their new default.
     pub fn forget_profile(&mut self, id: &str, replacement: Option<&str>) {
         self.assignments.retain(|_, p| p != id);
+        self.profile_order.retain(|p| p != id);
         for d in self.devices.values_mut() {
             if d.default_profile.as_deref() == Some(id) {
                 d.default_profile = replacement.map(str::to_owned);
             }
         }
+    }
+
+    /// Puts profiles in the saved order.
+    pub fn sort_profiles(&self, profiles: &mut [Profile]) {
+        let place: HashMap<&str, usize> = self
+            .profile_order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        profiles.sort_by_cached_key(|p| {
+            let at = place.get(p.id.as_str()).copied().unwrap_or(usize::MAX);
+            (at, p.name.to_lowercase())
+        });
+    }
+
+    /// Gives the profiles in `ids` the order `ids` has, in the places they
+    /// hold among all profiles. Lists show one model's profiles at a time.
+    pub fn reorder_profiles(&mut self, profiles: &mut [Profile], ids: &[String]) {
+        let mut next = ids.iter();
+        self.profile_order = profiles
+            .iter()
+            .map(|p| {
+                ids.contains(&p.id)
+                    .then(|| next.next())
+                    .flatten()
+                    .unwrap_or(&p.id)
+                    .clone()
+            })
+            .collect();
+        self.sort_profiles(profiles);
+    }
+
+    /// Moves the profiles `order` names behind all others, in that order.
+    pub fn place_profiles_last(&mut self, profiles: &mut [Profile], order: &[String]) {
+        let (named, others): (Vec<&Profile>, Vec<&Profile>) =
+            profiles.iter().partition(|p| order.contains(&p.id));
+        self.profile_order = others.iter().map(|p| p.id.clone()).collect();
+        self.profile_order.extend(
+            order
+                .iter()
+                .filter(|id| named.iter().any(|p| p.id == **id))
+                .cloned(),
+        );
+        self.sort_profiles(profiles);
     }
 
     pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
@@ -232,6 +284,7 @@ impl Settings {
         while self.assignments.len() > MAX_DEVICES {
             self.assignments.pop_last();
         }
+        self.profile_order.truncate(MAX_PROFILE_ORDER);
         for d in self.devices.values_mut() {
             d.name = d.name.trim().chars().take(MAX_DEVICE_NAME_CHARS).collect();
             d.brightness = d.brightness.min(100);
@@ -264,6 +317,71 @@ mod tests {
         assert!(s.device("A1").enabled);
     }
 
+    fn profiles(names: &[(&str, crate::DeviceKind)]) -> Vec<Profile> {
+        names
+            .iter()
+            .map(|(name, kind)| {
+                let mut p = Profile::new(*name, *kind);
+                p.id = (*name).to_owned();
+                p
+            })
+            .collect()
+    }
+
+    fn ids(profiles: &[Profile]) -> Vec<&str> {
+        profiles.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    fn strings(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[test]
+    fn profiles_follow_the_saved_order_then_their_names() {
+        use crate::DeviceKind::Mk2;
+        let mut list = profiles(&[("b", Mk2), ("D", Mk2), ("a", Mk2), ("c", Mk2)]);
+        let s = Settings {
+            profile_order: strings(&["c", "gone", "a"]),
+            ..Settings::default()
+        };
+        s.sort_profiles(&mut list);
+        assert_eq!(ids(&list), ["c", "a", "b", "D"]);
+    }
+
+    #[test]
+    fn reordering_one_model_leaves_the_others_in_place() {
+        use crate::DeviceKind::{Mini, Mk2};
+        let mut list = profiles(&[("a", Mk2), ("m", Mini), ("b", Mk2), ("c", Mk2)]);
+        let mut s = Settings {
+            profile_order: strings(&["a", "m", "b", "c"]),
+            ..Settings::default()
+        };
+        s.sort_profiles(&mut list);
+        s.reorder_profiles(&mut list, &strings(&["c", "a", "b"]));
+        assert_eq!(ids(&list), ["c", "m", "a", "b"]);
+        assert_eq!(s.profile_order, ["c", "m", "a", "b"]);
+    }
+
+    #[test]
+    fn imported_profiles_follow_the_others_in_the_given_order() {
+        use crate::DeviceKind::Mk2;
+        let mut list = profiles(&[("mine", Mk2), ("x", Mk2), ("y", Mk2)]);
+        let mut s = Settings::default();
+        s.place_profiles_last(&mut list, &strings(&["y", "not-imported", "x"]));
+        assert_eq!(ids(&list), ["mine", "y", "x"]);
+        assert_eq!(s.profile_order, ["mine", "y", "x"]);
+    }
+
+    #[test]
+    fn a_forgotten_profile_leaves_the_order() {
+        let mut s = Settings {
+            profile_order: strings(&["p1", "p2"]),
+            ..Settings::default()
+        };
+        s.forget_profile("p1", None);
+        assert_eq!(s.profile_order, ["p2"]);
+    }
+
     #[test]
     fn round_trip() {
         let mut s = Settings::default();
@@ -277,6 +395,7 @@ mod tests {
             shrink: false,
             size: 70,
         };
+        s.profile_order = strings(&["p2", "p1"]);
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
     }
