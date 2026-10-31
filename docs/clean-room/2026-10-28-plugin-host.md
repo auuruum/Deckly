@@ -293,3 +293,23 @@ static REA inspection (metadata and `#US` strings only, nothing executed) of
   not work with Deckly. A plugin folder holding `BRUtils.dll` is marked
   "Works only in the official app" in the plugin list, the install notice
   and the key editor; checked by `manifest::tests::entries_follow_the_code_path`.
+
+## Empty platform version crashed .NET plugins (2026-10-31)
+
+Source: the crash report the owner pasted from Windows Display Settings 1.2.0.0
+(`com.geekyeggo.windowsdisplaysettings`), Windows 10 22H2.
+
+- Observed: the plugin exited with code -532462766 right after starting and was
+  restarted. Its library read `application.platformVersion` from `-info` as a
+  version and threw on the empty string Deckly sent. It does this before it
+  connects, so the plugin never ran.
+- Deckly decision: `os::system_version` reports the real version as plain numbers:
+  `10.0.19045` from the registry on Windows, the leading numbers of the kernel
+  release on Linux, `sw_vers` on macOS. Two to four numeric parts, always, since
+  that is what the library accepts. Checked by
+  `os::version_tests::this_system_reports_a_version_plugins_can_parse`.
+- Run: the installed plugin started by a build with this fix in an empty settings
+  folder received `10.0.19045`, was still running 20 seconds later and logged no
+  exception. The same check on a build without the fix reproduced the crash.
+- Unknown: the exact text the official app sends. The value was not seen; it was
+  read as present in 2026-10-28 without recording it.
