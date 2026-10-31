@@ -380,6 +380,7 @@ fn find_plugins(dir: &Path, usage: &HashMap<&str, &str>, state: &Shared) -> Vec<
             let id = name.strip_suffix(".sdPlugin")?.to_owned();
             let dir = entry.path();
             let (name, kind) = match Manifest::load(&dir) {
+                Ok(m) if m.offers_nothing() => return None,
                 Ok(m) if installed.get(&m.uuid) == Some(&m.version) => {
                     (m.name, PluginKind::Installed)
                 }
@@ -767,6 +768,12 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(dir.join("com.example.c.sdPlugin")).unwrap();
         std::fs::write(dir.join("com.example.c.sdPlugin/manifest.json"), b"{}").unwrap();
+        std::fs::create_dir_all(dir.join("com.example.d.sdPlugin")).unwrap();
+        std::fs::write(
+            dir.join("com.example.d.sdPlugin/manifest.json"),
+            br#"{"UUID":"com.example.d","Name":"Delta","IconEditorPath":"index.html"}"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(dir.join("not-a-plugin")).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(
@@ -785,6 +792,8 @@ mod tests {
         // An encrypted plugin takes its name from the profiles that use it.
         assert_eq!(kind("Beta"), Some(PluginKind::Encrypted));
         assert_eq!(kind("com.example.c"), Some(PluginKind::Unreadable));
+        // No actions and no code: nothing to import.
+        assert_eq!(kind("Delta"), None);
         #[cfg(unix)]
         assert_eq!(found.iter().filter(|p| p.name == "Alpha").count(), 2);
         #[cfg(not(unix))]

@@ -70,6 +70,11 @@ fn staging_root(plugins_dir: &Path) -> io::Result<TempDir> {
 
 fn staged(root: TempDir, dir: PathBuf) -> Result<Staged, InstallError> {
     let manifest = Manifest::load(&dir).map_err(InstallError::Manifest)?;
+    if manifest.offers_nothing() {
+        return Err(InstallError::NotAPlugin(
+            "it has no actions and no code Deckly can use".into(),
+        ));
+    }
     let expected = format!("{}.sdPlugin", manifest.uuid);
     if dir.file_name().and_then(|n| n.to_str()) != Some(expected.as_str()) {
         return Err(InstallError::NotAPlugin(format!(
@@ -401,6 +406,15 @@ mod tests {
         assert!(!dir.join("evil.txt").exists());
         // Folder name must match the manifest id.
         archive(&file, &[("com.other.sdPlugin/manifest.json", MANIFEST)]);
+        assert!(stage_archive(&file, &plugins).is_err());
+        // Nothing in it that Deckly could use.
+        archive(
+            &file,
+            &[(
+                "com.example.p.sdPlugin/manifest.json",
+                br#"{"UUID":"com.example.p","Name":"P"}"#,
+            )],
+        );
         assert!(stage_archive(&file, &plugins).is_err());
         // No plugin folder at all.
         archive(&file, &[("readme.txt", b"x")]);

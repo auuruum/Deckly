@@ -103,6 +103,9 @@
   encrypted. It was the only such file in each of them.
 - The Elgato tutorial plugin's `Name` is a single space, which Deckly's manifest
   reader refuses.
+- Stream Deck Icon Library (`com.elgato.keycreator`) has no `Actions` and no code
+  path. Its manifest has `IconEditorPath`, `IconMenuItem` and `DefaultWindowSize`:
+  a web page the app offers from a menu, not something a key can run.
 - A plugin's global settings are registry values named after the plugin, twice
   over. They begin `@ByteArray(`, and what follows is not JSON and differs in its
   first byte from plugin to plugin. They were not decoded further.
@@ -147,6 +150,10 @@
 - Encrypted plugins are not decrypted and not copied: that would bypass an access
   control (`AGENTS.md`). Their keys stay in place and the result names the plugins.
 - Global plugin settings are not imported, for the same reason.
+- Plugins with no actions and no code are not imported, listed or installed, since
+  Deckly has no icon editor to open them in. The rule goes by the manifest, not by
+  plugin id. Checked by
+  `manifest::tests::a_plugin_with_neither_actions_nor_code_offers_nothing`.
 - `.decklyBackup` is Deckly's own format, not based on the official one: a zip
   with `backup.json`, `settings.json`, `profiles/`, `images/`, `screensavers/`,
   `plugin-data/` and `plugins/`.

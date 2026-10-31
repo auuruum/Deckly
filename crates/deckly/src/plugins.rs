@@ -449,6 +449,9 @@ impl Worker {
                 }));
                 continue;
             };
+            if m.offers_nothing() {
+                continue;
+            }
             let source = Arc::as_ptr(m) as usize;
             if let Some(prev) = old.get(&p.id).filter(|o| o.source == source) {
                 let mut next = (**prev).clone();
