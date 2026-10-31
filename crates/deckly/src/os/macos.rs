@@ -140,11 +140,28 @@ fn post_units(units: &[u16], down: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Splits text into what one event carries, never through a character: half
+/// an emoji at the end of one event and half at the start of the next types
+/// neither.
+fn chunks(text: &str) -> Vec<Vec<u16>> {
+    let mut parts = Vec::new();
+    let mut part = Vec::new();
+    for c in text.chars() {
+        if part.len() + c.len_utf16() > CHUNK_UNITS {
+            parts.push(std::mem::take(&mut part));
+        }
+        part.extend_from_slice(c.encode_utf16(&mut [0; 2]));
+    }
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
+}
+
 fn post_text(text: &str) -> Result<(), String> {
-    let units: Vec<u16> = text.encode_utf16().collect();
-    for part in units.chunks(CHUNK_UNITS) {
-        post_units(part, true)?;
-        post_units(part, false)?;
+    for part in chunks(text) {
+        post_units(&part, true)?;
+        post_units(&part, false)?;
         std::thread::sleep(KEY_GAP);
     }
     Ok(())
@@ -238,6 +255,19 @@ mod tests {
         assert_eq!(key_code("Fx"), None);
         assert_eq!(key_code("a"), None);
         assert_eq!(key_code(""), None);
+    }
+
+    #[test]
+    fn chunks_never_split_a_character() {
+        let text = format!("{}\u{1f600}!", "a".repeat(CHUNK_UNITS - 1));
+        let parts = chunks(&text);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), CHUNK_UNITS - 1);
+        for part in &parts {
+            assert!(String::from_utf16(part).is_ok());
+        }
+        assert_eq!(String::from_utf16(&parts.concat()).ok(), Some(text));
+        assert!(chunks("").is_empty());
     }
 
     #[test]
