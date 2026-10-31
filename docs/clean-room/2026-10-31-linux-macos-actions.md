@@ -66,6 +66,20 @@
   primary selection, a PNG byte for byte, and an empty clipboard stayed empty.
   `NEWER` copied during a paste was kept. The clipboard does not outlive the
   process offering it: when the test program ended, it was empty.
+- Each Deckly key press made the owner's Noctalia 5.4 show its keyboard layout
+  popup with `--`. Hyprland's event socket showed why: a new virtual keyboard
+  sends `activelayout` with the first configured layout, and every keymap
+  upload sends another, even with the same name. A keymap without a name was
+  reported as `error`. Noctalia's public source shows the popup only when the
+  name differs from the last one, and labels unknown names `--`.
+- With one keyboard kept for the process and keymaps named after the main
+  keyboard's layout, a series of plain presses gave two events on the first
+  press and none after. With Russian active they read `English (US)` then
+  `Russian`. Text that needed a new keymap gave one more event, named `Russian`.
+- Text stayed exact with that keyboard while another virtual keyboard typed
+  between presses, in Electron on Wayland, Electron under XWayland and kitty.
+  After the compositor restarted, the next press made a new keyboard and
+  reported no error.
 - `wpctl` raised and lowered the real volume and left it where it was.
 - A stand-in portal on a private D-Bus saw the expected order (CreateSession,
   SelectDevices, Start, then keysyms), and the saved restore token on the next
@@ -92,6 +106,13 @@
 
 - Real GNOME and KDE portals. Whether both accept every keysym, and whether
   emoji reach Chromium apps that way; the portal path does not paste.
+- Whether the popup is gone on the owner's desktop: Noctalia was not run in the
+  test compositor, and its installed version may differ from the source read.
+- With a layout other than the first active, the first press after Deckly
+  starts still sends `English (US)` before the real name, so one popup is
+  expected then.
+- A real keyboard typing right after a Deckly press: another virtual keyboard
+  stood in for it.
 - Compositors other than Hyprland with the virtual keyboard, and any compositor
   without data control: there Deckly types the emoji as a key, a path not run.
 - XTEST on a real X11 session with a second layout active. It presses keys of
@@ -129,6 +150,10 @@
   keyboard, in every client, since nothing tells which one has focus. Enter and
   Tab stay keys. It uses Shift+Insert, so terminals work, and sets the primary
   selection too, which is what they paste.
+- One virtual keyboard lives as long as Deckly, and its keymap is replaced only
+  when it lacks a key, since status bars take each new keyboard or keymap for a
+  change of layout. Keymaps go by the name of the layout in use, asked of
+  Hyprland, or `Deckly` when that is unknown.
 - A paste restores the clipboard, and keeps up to 32 MiB of it in memory until
   something else is copied, as the old owner is gone. A type that does not fit
   or takes too long is not restored. If nothing can be read, the clipboard is

@@ -15,6 +15,7 @@
 //!
 //! `DECKLY_INPUT=wayland|portal|x11|uinput` forces one way, for debugging.
 
+mod hyprland;
 mod keys;
 mod media;
 mod paste;
