@@ -4,14 +4,15 @@
 //! correctly whatever layout is active.
 
 use super::Failure;
-use super::keys::{Key, Layout, NOTHING, Stroke, modifier_bit};
+use super::keys::{self, Key, Layout, NOTHING, Part, SHIFT, Stroke, modifier_bit};
+use super::paste;
 use rustix::fs::{MemfdFlags, memfd_create};
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_registry, wl_seat::WlSeat};
-use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
 
@@ -102,8 +103,12 @@ impl Sender<'_> {
     }
 
     fn stroke(&self, layout: &Layout, stroke: &Stroke) -> Result<(), Failure> {
-        let mask = stroke.mods.iter().fold(0, |m, &key| m | modifier_bit(key));
-        for &key in &stroke.mods {
+        let mut mods = stroke.mods.clone();
+        if layout.needs_shift(stroke.key) && !mods.contains(&SHIFT) {
+            mods.push(SHIFT);
+        }
+        let mask = mods.iter().fold(0, |m, &key| m | modifier_bit(key));
+        for &key in &mods {
             self.key(layout, key, PRESSED);
         }
         if mask != 0 {
@@ -117,7 +122,7 @@ impl Sender<'_> {
         self.flush()?;
         if mask != 0 {
             self.keyboard.modifiers(0, 0, 0, 0);
-            for &key in stroke.mods.iter().rev() {
+            for &key in mods.iter().rev() {
                 self.key(layout, key, RELEASED);
             }
             self.flush()?;
@@ -136,6 +141,33 @@ fn upload(keyboard: &ZwpVirtualKeyboardV1, layout: &Layout) -> Result<(), Failur
     Ok(())
 }
 
+/// Sends strokes in order. `typed` tells whether any key went out, which
+/// decides what a failure means.
+fn type_keys(
+    sender: &Sender,
+    queue: &mut EventQueue<State>,
+    strokes: &[Stroke],
+    typed: &mut bool,
+) -> Result<(), Failure> {
+    for (layout, run) in runs(strokes).iter() {
+        upload(sender.keyboard, layout)?;
+        // A refusal shows up here. Before any key that means trying another
+        // way; later ones would repeat what was typed.
+        match queue.roundtrip(&mut State) {
+            Err(e) if !*typed => return Err(unavailable(e)),
+            Err(e) => return Err(failed(e)),
+            Ok(_) => {}
+        }
+        *typed = true;
+        sender.settle(layout)?;
+        for stroke in *run {
+            sender.stroke(layout, stroke)?;
+        }
+        queue.roundtrip(&mut State).map_err(failed)?;
+    }
+    Ok(())
+}
+
 pub fn send(strokes: &[Stroke]) -> Result<(), Failure> {
     let connection = Connection::connect_to_env().map_err(unavailable)?;
     let (globals, mut queue) = registry_queue_init::<State>(&connection).map_err(unavailable)?;
@@ -144,27 +176,29 @@ pub fn send(strokes: &[Stroke]) -> Result<(), Failure> {
     let manager: ZwpVirtualKeyboardManagerV1 =
         globals.bind(&handle, 1..=1, ()).map_err(unavailable)?;
     let keyboard = manager.create_virtual_keyboard(&seat, &handle, ());
-    let mut state = State;
     let sender = Sender {
         connection: &connection,
         keyboard: &keyboard,
         start: Instant::now(),
     };
-    for (index, (layout, run)) in runs(strokes).iter().enumerate() {
-        upload(&keyboard, layout)?;
-        // A refusal shows up here. Before any key that means trying another
-        // way; later ones would repeat what was typed.
-        let sent = queue.roundtrip(&mut state);
-        match sent {
-            Err(e) if index == 0 => return Err(unavailable(e)),
-            Err(e) => return Err(failed(e)),
-            Ok(_) => {}
+    let mut typed = false;
+    for part in keys::parts(strokes) {
+        match part {
+            Part::Keys(run) => type_keys(&sender, &mut queue, run, &mut typed)?,
+            Part::Paste(run) => {
+                let press = [keys::paste_stroke()];
+                let pasted = paste::paste(&keys::string(run), || {
+                    type_keys(&sender, &mut queue, &press, &mut typed)
+                });
+                match pasted {
+                    // Still right everywhere but in Chromium.
+                    Err(Failure::Unavailable(_)) => {
+                        type_keys(&sender, &mut queue, run, &mut typed)?
+                    }
+                    other => other?,
+                }
+            }
         }
-        sender.settle(layout)?;
-        for stroke in *run {
-            sender.stroke(layout, stroke)?;
-        }
-        queue.roundtrip(&mut state).map_err(failed)?;
     }
     // Clients still handle the last keys with this layout.
     std::thread::sleep(LAYOUT_GAP);

@@ -6,6 +6,7 @@
 use crate::os::{Hotkey, MediaKey};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
+use std::ops::RangeInclusive;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
@@ -47,6 +48,21 @@ impl Key {
         Some(Self { sym, code, shifted })
     }
 
+    /// The character this key types, `None` for keys that do something else.
+    fn character(self) -> Option<char> {
+        let unicode = match self.sym {
+            sym @ 0..0x100 => sym,
+            sym => sym.checked_sub(0x0100_0000)?,
+        };
+        char::from_u32(unicode)
+    }
+
+    /// A character that does not fit 16 bits, which is all Chromium keeps of
+    /// a key on Wayland.
+    fn beyond_16_bits(self) -> bool {
+        (0x0101_0000..=0x0110_ffff).contains(&self.sym)
+    }
+
     pub fn media(key: MediaKey) -> Self {
         match key {
             MediaKey::PlayPause => Self::at(0x1008_ff14, 164),
@@ -64,14 +80,11 @@ pub const SHIFT: Key = Key::at(0xffe1, 42);
 pub const CTRL: Key = Key::at(0xffe3, 29);
 pub const ALT: Key = Key::at(0xffe9, 56);
 pub const SUPER: Key = Key::at(0xffeb, 125);
-/// A key that means nothing to anyone.
-pub const NOTHING: Key = Key {
-    sym: 0x00ff_ffff,
-    code: None,
-    shifted: false,
-};
+/// A key that means nothing to anyone, on a number clients have no name for.
+pub const NOTHING: Key = Key::at(0x00ff_ffff, 247);
 const ENTER: Key = Key::at(0xff0d, 28);
 const TAB: Key = Key::at(0xff09, 15);
+const INSERT: Key = Key::at(0xff63, 110);
 
 /// Modifier state bits of the core X and Wayland protocols, by modifier key.
 pub const fn modifier_bit(key: Key) -> u32 {
@@ -152,6 +165,18 @@ fn us_place(c: char) -> Option<(u16, bool)> {
     }
 }
 
+/// The symbols a US keyboard has at `code`: plain, then with Shift. Zero for
+/// none.
+fn us_levels(code: u16) -> [u32; 2] {
+    let mut levels = [0; 2];
+    for c in ' '..='~' {
+        if let Some((_, shifted)) = us_place(c).filter(|&(at, _)| at == code) {
+            levels[usize::from(shifted)] = u32::from(c);
+        }
+    }
+    levels
+}
+
 fn function_key(n: u32) -> Option<Key> {
     let code = match n {
         1..=10 => Some(58 + n as u16),
@@ -184,7 +209,7 @@ fn named(name: &str) -> Option<Key> {
         "PageUp" => Key::at(0xff55, 104),
         "PageDown" => Key::at(0xff56, 109),
         "End" => Key::at(0xff57, 107),
-        "Insert" => Key::at(0xff63, 110),
+        "Insert" => INSERT,
         "Delete" => Key::at(0xffff, 111),
         "Copy" => Key::at(0x1008_ff57, 133),
         "Cut" => Key::at(0x1008_ff58, 137),
@@ -243,17 +268,83 @@ pub fn text(text: &str) -> Vec<Stroke> {
         .collect()
 }
 
-/// The lowest and highest key numbers an XKB keymap can use.
-const MIN_KEYCODE: u32 = 9;
-const MAX_KEYCODE: u32 = 255;
+/// A stretch of strokes and how it reaches the client.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Part<'a> {
+    Keys(&'a [Stroke]),
+    Paste(&'a [Stroke]),
+}
 
-/// A private keyboard layout: every key a run of strokes needs, on its own
-/// key number. Text in any language works this way, whatever layout the
-/// user has active.
+/// Splits text for clients that cannot take every key. A line or cell with a
+/// character beyond 16 bits is pasted whole, in one go, so an emoji and the
+/// joiners between its pieces stay together; Enter and Tab stay real keys, as
+/// a chat box sends on one and a form moves on with the other.
+pub fn parts(strokes: &[Stroke]) -> Vec<Part<'_>> {
+    let breaks = |stroke: &Stroke| stroke.key == ENTER || stroke.key == TAB;
+    let mut out = Vec::new();
+    let mut typed_to = 0;
+    let mut at = 0;
+    for line in strokes.split_inclusive(breaks) {
+        let length = line.len() - usize::from(line.last().is_some_and(breaks));
+        let text = line.get(..length).unwrap_or_default();
+        if text.iter().any(|stroke| stroke.key.beyond_16_bits()) {
+            if typed_to < at {
+                out.push(Part::Keys(&strokes[typed_to..at]));
+            }
+            out.push(Part::Paste(text));
+            typed_to = at + length;
+        }
+        at += line.len();
+    }
+    if typed_to < strokes.len() {
+        out.push(Part::Keys(&strokes[typed_to..]));
+    }
+    out
+}
+
+/// The text a run of strokes types.
+pub fn string(strokes: &[Stroke]) -> String {
+    strokes.iter().filter_map(|s| s.key.character()).collect()
+}
+
+/// Shift+Insert, which pastes nearly everywhere, terminals included.
+pub fn paste_stroke() -> Stroke {
+    Stroke {
+        mods: vec![SHIFT],
+        key: INSERT,
+    }
+}
+
+/// XKB key numbers for symbols without a place of their own: the number pad
+/// and the extra keys of other keyboards, then the main block, which text
+/// wants for itself. Chromium and Electron apps silently drop a key they have
+/// no name for, and most numbers above the main keys are such keys, so only
+/// numbers seen to arrive there are listed.
+const SPARE_KEYS: [RangeInclusive<u32>; 12] = [
+    79..=91,
+    63..=63,
+    106..=106,
+    125..=125,
+    129..=129,
+    94..=94,
+    97..=97,
+    132..=132,
+    10..=21,
+    24..=35,
+    38..=49,
+    51..=61,
+];
+
+/// A private keyboard layout: every key a run of strokes needs. What a US
+/// keyboard has sits on its real key and level, so clients see the same key
+/// and Shift as from a real keyboard; the rest takes a spare key. Text in any
+/// language works this way, whatever layout the user has active.
 #[derive(Debug)]
 pub struct Layout {
-    syms: BTreeMap<u32, u32>,
-    keycodes: HashMap<u32, u32>,
+    /// Symbols by key number: plain, then with Shift. Zero for none.
+    syms: BTreeMap<u32, [u32; 2]>,
+    /// By symbol: its key number, and whether it needs Shift.
+    keycodes: HashMap<u32, (u32, bool)>,
 }
 
 impl Layout {
@@ -268,27 +359,37 @@ impl Layout {
         layout
     }
 
-    /// Finds a key number for a key: its real one when free, so a hotkey
-    /// looks like the physical key. `false` when the layout is full.
+    /// Finds a place for a key: its real one when free, with the US symbols
+    /// that belong there, else a spare key. `false` when the layout is full.
     fn place(&mut self, key: Key) -> bool {
         if self.keycodes.contains_key(&key.sym) {
             return true;
         }
         let real = key
             .code
-            .filter(|_| !key.shifted)
-            .map(|code| u32::from(code) + 8)
-            .filter(|keycode| !self.syms.contains_key(keycode));
-        let free = || {
-            (MIN_KEYCODE..=MAX_KEYCODE)
-                .rev()
-                .find(|k| !self.syms.contains_key(k))
+            .map(|code| (code, u32::from(code) + 8))
+            .filter(|(_, keycode)| !self.syms.contains_key(keycode));
+        let (keycode, levels) = if let Some((code, keycode)) = real {
+            let mut levels = us_levels(code);
+            levels[usize::from(key.shifted)] = key.sym;
+            (keycode, levels)
+        } else {
+            let spare = SPARE_KEYS
+                .iter()
+                .cloned()
+                .flatten()
+                .find(|k| !self.syms.contains_key(k));
+            let Some(keycode) = spare else {
+                return false;
+            };
+            (keycode, [key.sym, 0])
         };
-        let Some(keycode) = real.or_else(free) else {
-            return false;
-        };
-        self.syms.insert(keycode, key.sym);
-        self.keycodes.insert(key.sym, keycode);
+        self.syms.insert(keycode, levels);
+        for (level, sym) in levels.into_iter().enumerate() {
+            if sym != 0 {
+                self.keycodes.insert(sym, (keycode, level == 1));
+            }
+        }
         true
     }
 
@@ -299,7 +400,12 @@ impl Layout {
 
     /// The XKB key number of a key that was added.
     pub fn keycode(&self, key: Key) -> Option<u32> {
-        self.keycodes.get(&key.sym).copied()
+        self.keycodes.get(&key.sym).map(|&(keycode, _)| keycode)
+    }
+
+    /// Whether a key that was added needs Shift held.
+    pub fn needs_shift(&self, key: Key) -> bool {
+        self.keycodes.get(&key.sym).is_some_and(|&(_, shift)| shift)
     }
 
     /// The layout as an XKB keymap.
@@ -314,17 +420,13 @@ impl Layout {
              xkb_compatibility \"deckly\" { include \"complete\" };\n\
              xkb_symbols \"deckly\" {\n",
         );
-        for (keycode, sym) in &self.syms {
-            // Letters get both cases, so Shift in a hotkey acts as it should.
-            match char::from_u32(*sym).filter(char::is_ascii_lowercase) {
-                Some(c) => {
-                    let upper = u32::from(c.to_ascii_uppercase());
-                    let _ = writeln!(out, "key <K{keycode}> {{ [ {sym:#x}, {upper:#x} ] }};");
+        for (keycode, levels) in &self.syms {
+            let _ = match levels {
+                [plain, 0] => writeln!(out, "key <K{keycode}> {{ [ {plain:#x} ] }};"),
+                [plain, shifted] => {
+                    writeln!(out, "key <K{keycode}> {{ [ {plain:#x}, {shifted:#x} ] }};")
                 }
-                None => {
-                    let _ = writeln!(out, "key <K{keycode}> {{ [ {sym:#x} ] }};");
-                }
-            }
+            };
         }
         for (key, name) in [
             (SHIFT, "Shift"),
@@ -459,8 +561,60 @@ mod tests {
         assert_eq!((keys[4], keys[5]), (ENTER, TAB));
     }
 
+    fn pasted(strokes: &[Stroke]) -> Vec<String> {
+        parts(strokes)
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Paste(run) => Some(string(run)),
+                Part::Keys(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn layouts_use_real_key_numbers_and_tell_cases_apart() {
+    fn text_within_16_bits_stays_on_keys() {
+        let strokes = text("tests!!! € я 日本語\nnext");
+        assert_eq!(parts(&strokes), [Part::Keys(&strokes)]);
+        assert_eq!(parts(&[]), []);
+    }
+
+    #[test]
+    fn a_line_with_an_emoji_is_pasted_whole() {
+        let strokes = text("hello \u{1f600}!");
+        assert_eq!(parts(&strokes), [Part::Paste(&strokes)]);
+        assert_eq!(string(&strokes), "hello \u{1f600}!");
+    }
+
+    #[test]
+    fn enter_and_tab_around_an_emoji_stay_keys() {
+        let strokes = text("one\n\u{1f600}\ttwo\n");
+        let parts = parts(&strokes);
+        assert_eq!(pasted(&strokes), ["\u{1f600}"]);
+        assert_eq!(
+            parts,
+            [
+                Part::Keys(&strokes[..4]),
+                Part::Paste(&strokes[4..5]),
+                Part::Keys(&strokes[5..]),
+            ]
+        );
+    }
+
+    #[test]
+    fn joined_emoji_stay_in_one_paste() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        assert_eq!(pasted(&text(family)), [family]);
+    }
+
+    #[test]
+    fn hotkeys_and_media_keys_are_never_pasted() {
+        let strokes = [paste_stroke(), Stroke::single(Key::media(MediaKey::Mute))];
+        assert_eq!(parts(&strokes), [Part::Keys(&strokes)]);
+        assert_eq!(string(&strokes), "");
+    }
+
+    #[test]
+    fn layouts_use_real_keys_and_levels() {
         let mut layout = Layout::new();
         let a = Key::for_char('a').unwrap();
         let upper = Key::for_char('A').unwrap();
@@ -469,14 +623,80 @@ mod tests {
         assert!(layout.add(&Stroke::single(upper)));
         assert!(layout.add(&Stroke::single(euro)));
         assert_eq!(layout.keycode(a), Some(38));
+        assert_eq!(layout.keycode(upper), Some(38));
+        assert!(!layout.needs_shift(a));
+        assert!(layout.needs_shift(upper));
         assert_eq!(layout.keycode(SHIFT), Some(50));
-        assert!(layout.keycode(upper).is_some_and(|k| k != 38));
         assert!(layout.keycode(euro).is_some());
+        assert!(!layout.needs_shift(euro));
         assert_eq!(layout.keycode(Key::for_char('z').unwrap()), None);
         let map = layout.keymap();
         assert!(map.contains("key <K38> { [ 0x61, 0x41 ] };"));
         assert!(map.contains("[ 0x10020ac ]"));
         assert!(map.contains("modifier_map Mod4 { <K133> };"));
+    }
+
+    /// Chromium drops keys it has no name for: "tests!!!hello" came out as
+    /// "testshello" when `!` sat on a free key number near the top.
+    #[test]
+    fn symbols_on_a_us_keyboard_use_its_keys_and_shift() {
+        let mut layout = Layout::new();
+        for stroke in text("tests!!!dadadad@@@hello") {
+            assert!(layout.add(&stroke));
+        }
+        let bang = Key::for_char('!').unwrap();
+        let at = Key::for_char('@').unwrap();
+        assert_eq!(layout.keycode(bang), Some(10));
+        assert_eq!(layout.keycode(at), Some(11));
+        assert!(layout.needs_shift(bang) && layout.needs_shift(at));
+        let map = layout.keymap();
+        assert!(map.contains("key <K10> { [ 0x31, 0x21 ] };"));
+        assert!(map.contains("key <K11> { [ 0x32, 0x40 ] };"));
+    }
+
+    #[test]
+    fn every_symbol_of_a_us_keyboard_has_its_real_key() {
+        for c in ' '..='~' {
+            let key = Key::for_char(c).unwrap();
+            let mut layout = Layout::new();
+            assert!(layout.add(&Stroke::single(key)));
+            let real = key.code.map(|code| u32::from(code) + 8);
+            assert_eq!(layout.keycode(key), real, "{c}");
+            assert_eq!(layout.needs_shift(key), key.shifted, "{c}");
+        }
+    }
+
+    #[test]
+    fn spare_keys_are_ones_chromium_delivers() {
+        // Numbers seen to give no key event in Electron 43 on Wayland.
+        let dropped = [
+            92, 103, 109, 120, 138, 147, 149, 153, 154, 155, 156, 157, 159, 161, 162, 165, 168,
+            170, 178, 183, 184, 185, 186, 203, 204, 205, 206, 207, 208, 210, 211, 213, 219, 220,
+            221, 222, 223, 224, 226, 227, 228, 229, 230, 231, 234, 244, 245, 246, 247, 248, 249,
+            250, 251, 253, 254, 255,
+        ];
+        let spare: Vec<u32> = SPARE_KEYS.iter().cloned().flatten().collect();
+        assert!(spare.iter().all(|k| !dropped.contains(k)));
+        let mut unique = spare.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), spare.len());
+    }
+
+    #[test]
+    fn a_spare_key_does_not_cost_a_letter_its_place() {
+        let mut layout = Layout::new();
+        let symbols = (0..SPARE_KEYS.iter().cloned().flatten().count() as u32 - 1)
+            .filter_map(|n| Key::for_char(char::from_u32(0x4e00 + n)?));
+        for key in symbols {
+            assert!(layout.add(&Stroke::single(key)));
+        }
+        // The last spare is taken by "q", whose own key went to a symbol.
+        let q = Key::for_char('q').unwrap();
+        assert!(layout.add(&Stroke::single(q)));
+        assert!(layout.keycode(q).is_some());
+        assert!(!layout.needs_shift(q));
+        assert!(!layout.add(&Stroke::single(Key::for_char('Q').unwrap())));
     }
 
     #[test]
@@ -495,6 +715,6 @@ mod tests {
             }
             placed += 1;
         }
-        assert_eq!(placed as u32, MAX_KEYCODE - MIN_KEYCODE + 1 - 5);
+        assert_eq!(placed, SPARE_KEYS.iter().cloned().flatten().count());
     }
 }

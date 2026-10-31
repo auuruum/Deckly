@@ -1033,6 +1033,7 @@ dependencies = [
  "tray-icon",
  "wayland-client",
  "wayland-protocols-misc",
+ "wayland-protocols-wlr",
  "windows 0.62.2",
  "x11rb",
  "zbus",
