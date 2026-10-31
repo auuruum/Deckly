@@ -1326,7 +1326,7 @@ impl App {
                 pos2(strip.left() + 2.0 + slot as f32 * CHIP, strip.top()),
                 vec2(CHIP, HEIGHT),
             );
-            let resp = ui.interact(r, ui.id().with(("page", i)), Sense::click());
+            let mut resp = ui.interact(r, ui.id().with(("page", i)), Sense::click());
             let current = i == *page;
             if current {
                 painter.rect_filled(r.shrink2(vec2(1.0, 1.0)), CornerRadius::same(9), PAGER_CHIP);
@@ -1338,13 +1338,29 @@ impl App {
             } else {
                 TEXT_DIM
             };
-            painter.text(
-                r.center(),
-                Align2::CENTER_CENTER,
-                (i + 1).to_string(),
-                font(12.0),
-                color,
-            );
+            let shown_page = profile.pages.get(i);
+            let picture = shown_page
+                .and_then(|p| p.icon.as_deref())
+                .and_then(|path| prefs::page_picture(ui.ctx(), path));
+            if let Some(picture) = picture {
+                let area = Rect::from_center_size(r.center(), Vec2::splat(14.0));
+                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(picture.id(), area, whole, color);
+            } else {
+                painter.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    (i + 1).to_string(),
+                    font(12.0),
+                    color,
+                );
+            }
+            if let Some(name) = shown_page
+                .map(|p| p.name.as_str())
+                .filter(|n| !n.is_empty())
+            {
+                resp = resp.on_hover_text(name);
+            }
             if resp.clicked() {
                 new_page = i;
             }
@@ -1407,12 +1423,12 @@ impl App {
     fn folder_strip(&mut self, ui: &mut Ui, geo: &CanvasGeometry, profile: &Profile, view: &View) {
         const HEIGHT: f32 = 20.0;
         const PAD: f32 = 10.0;
-        let mut crumbs = vec![format!(
-            "{}  Page {}",
-            icon::ARROW_BEND_LEFT_UP,
-            view.page + 1
-        )];
         let mut parent = profile.pages.get(view.page);
+        let mut crumbs = vec![format!(
+            "{}  {}",
+            icon::ARROW_BEND_LEFT_UP,
+            parent.map(|p| p.title(view.page)).unwrap_or_default()
+        )];
         for id in &view.path {
             let title = parent
                 .and_then(|p| p.keys.values().find(|k| k.folder() == Some(id.as_str())))
@@ -1952,7 +1968,12 @@ impl App {
             .filter(|p| p.device == profile.device)
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
-        let page_count = profile.pages.len();
+        let pages: Vec<String> = profile
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, page)| page.label(i))
+            .collect();
         let Some(index) = self.selected_key else {
             hint(ui, "Select a key to edit its action.");
             return;
@@ -2065,8 +2086,12 @@ impl App {
                         .show(ui, |ui| {
                             ui.label(RichText::new("Title").color(TEXT_DIM));
                             ui.horizontal_top(|ui| {
+                                let linked = overlay.as_ref().and_then(|o| o.title.as_deref());
                                 ui.add(
                                     egui::TextEdit::multiline(&mut key.title)
+                                        .hint_text(
+                                            RichText::new(linked.unwrap_or("")).color(TEXT_FAINT),
+                                        )
                                         .desired_rows(1)
                                         .desired_width(260.0),
                                 );
@@ -2080,7 +2105,7 @@ impl App {
                                         desired_state_row(ui, key, p.states);
                                     }
                                 }
-                                None => self.action_form(ui, key, &profiles, page_count),
+                                None => self.action_form(ui, key, &profiles, &pages),
                             }
                         });
                 })
@@ -2228,7 +2253,7 @@ impl App {
         ui: &mut Ui,
         key: &mut KeyConfig,
         profiles: &[(String, String)],
-        pages: usize,
+        pages: &[String],
     ) {
         let s = &mut key.settings;
         let label = |ui: &mut Ui, text: &str| {
@@ -2339,13 +2364,21 @@ impl App {
             }
             actions::GO_TO_PAGE => {
                 label(ui, "Page");
-                let mut n = actions::int_setting(s, "page", 1).clamp(1, pages.max(1) as i64);
-                if ui
-                    .add(egui::DragValue::new(&mut n).range(1..=pages.max(1) as i64))
-                    .changed()
-                {
-                    actions::set_setting(s, "page", json!(n));
-                }
+                let current = actions::int_setting(s, "page", 1);
+                let name = usize::try_from(current - 1)
+                    .ok()
+                    .and_then(|i| pages.get(i))
+                    .map_or("Choose a page", String::as_str);
+                egui::ComboBox::from_id_salt("go-to-page")
+                    .selected_text(name)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (number, page) in (1i64..).zip(pages) {
+                            if ui.selectable_label(number == current, page).clicked() {
+                                actions::set_setting(s, "page", json!(number));
+                            }
+                        }
+                    });
                 ui.end_row();
             }
             actions::SWITCH_PROFILE => {

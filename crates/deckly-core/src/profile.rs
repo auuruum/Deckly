@@ -17,6 +17,9 @@ pub const MAX_FOLDERS: usize = 500;
 /// Folders nest at most this deep; deeper folder keys open nothing.
 pub const MAX_FOLDER_DEPTH: usize = 16;
 pub const MAX_TITLE_CHARS: usize = 200;
+pub const MAX_PAGE_NAME_CHARS: usize = 64;
+/// The name of the profile made for a device that has none.
+pub const DEFAULT_PROFILE_NAME: &str = "Default Profile";
 /// Profile files larger than this are refused before parsing.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -65,6 +68,12 @@ pub struct Profile {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub id: String,
+    /// Empty shows the page's number, see [`Page::title`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Picture shown for the page instead of its number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
     #[serde(default)]
     pub keys: BTreeMap<u8, KeyConfig>,
 }
@@ -187,7 +196,25 @@ impl Page {
     pub fn new() -> Self {
         Self {
             id: new_id(),
-            keys: BTreeMap::new(),
+            ..Self::default()
+        }
+    }
+
+    /// The name people see for the page at `index`.
+    pub fn title(&self, index: usize) -> String {
+        if self.name.is_empty() {
+            format!("Page {}", index + 1)
+        } else {
+            self.name.clone()
+        }
+    }
+
+    /// The short form for lists and keys: its name or its number.
+    pub fn label(&self, index: usize) -> String {
+        if self.name.is_empty() {
+            (index + 1).to_string()
+        } else {
+            self.name.clone()
         }
     }
 }
@@ -291,6 +318,23 @@ impl Profile {
         }
     }
 
+    /// Visits every picture the profile points at: page icons and key images.
+    pub fn for_each_picture(&mut self, mut visit: impl FnMut(&mut Option<PathBuf>)) {
+        for page in &mut self.pages {
+            visit(&mut page.icon);
+        }
+        self.for_each_key(|key| visit(&mut key.image));
+    }
+
+    /// Whether this is still the empty profile made for a device that had
+    /// none. Nothing is lost when one goes.
+    pub fn is_placeholder(&self) -> bool {
+        self.name == DEFAULT_PROFILE_NAME
+            && self.folders.is_empty()
+            && matches!(self.pages.as_slice(), [page]
+                if page.keys.is_empty() && page.name.is_empty() && page.icon.is_none())
+    }
+
     /// Gives every folder key a folder of its own and drops folders no key
     /// leads to. A folder key whose folder is missing gets a new empty one;
     /// a folder that a second key leads to (a pasted key) is copied for that
@@ -337,6 +381,7 @@ impl Profile {
             if page.id.is_empty() {
                 page.id = new_id();
             }
+            page.name = page.name.trim().chars().take(MAX_PAGE_NAME_CHARS).collect();
             page.keys.retain(|&index, _| index < key_count);
             for key in page.keys.values_mut() {
                 sanitize_title(key);
@@ -688,6 +733,59 @@ mod tests {
         p.pages[0].keys.insert(0, key);
         p.sanitize();
         assert_eq!(p.pages[0].keys[&0].groups[0].len(), MAX_GROUP_ACTIONS);
+    }
+
+    #[test]
+    fn pages_keep_their_name_and_icon() {
+        let mut p = Profile::new("Test", DeviceKind::Mk2);
+        p.pages[0].name = "Scenes".into();
+        p.pages[0].icon = Some(PathBuf::from("icon.svg"));
+        p.pages.push(Page::new());
+        let back = Profile::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(back.pages[0].title(0), "Scenes");
+        assert_eq!(back.pages[1].title(1), "Page 2");
+        assert_eq!(back.pages[0].label(0), "Scenes");
+        assert_eq!(back.pages[1].label(1), "2");
+
+        p.pages[0].name = format!("  {}  ", "x".repeat(MAX_PAGE_NAME_CHARS + 5));
+        p.sanitize();
+        assert_eq!(p.pages[0].name.chars().count(), MAX_PAGE_NAME_CHARS);
+    }
+
+    #[test]
+    fn only_an_untouched_default_profile_is_a_placeholder() {
+        let new = || Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
+        assert!(new().is_placeholder());
+        assert!(!Profile::new("Streaming", DeviceKind::Mk2).is_placeholder());
+        let mut with_key = new();
+        with_key.pages[0]
+            .keys
+            .insert(0, KeyConfig::new("a", json!({})));
+        assert!(!with_key.is_placeholder());
+        let mut with_page = new();
+        with_page.pages.push(Page::new());
+        assert!(!with_page.is_placeholder());
+        let mut named = new();
+        named.pages[0].name = "Scenes".into();
+        assert!(!named.is_placeholder());
+    }
+
+    #[test]
+    fn pictures_of_pages_and_keys_are_visited() {
+        let mut p = Profile::new("Test", DeviceKind::Mk2);
+        p.pages[0].icon = Some(PathBuf::from("page.svg"));
+        let mut key = KeyConfig::new("a", json!({}));
+        key.image = Some(PathBuf::from("key.png"));
+        p.pages[0].keys.insert(0, key);
+        p.for_each_picture(|picture| {
+            *picture = picture.take().map(|path| Path::new("new").join(path));
+        });
+        assert_eq!(p.pages[0].icon, Some(Path::new("new").join("page.svg")));
+        assert_eq!(
+            p.pages[0].keys[&0].image,
+            Some(Path::new("new").join("key.png"))
+        );
     }
 
     #[test]

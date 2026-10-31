@@ -77,6 +77,51 @@ pub fn folder_id(name: &str) -> Option<String> {
     Some(uuid::Uuid::from_u128(bits).hyphenated().to_string())
 }
 
+/// Profile ids in the order the official app lists them. `value` is its
+/// `Devices` setting: Qt's `@Variant(` form as UTF-16, one unit per byte of a
+/// data stream with a map for each device. After a device's sorting key come
+/// the value's type, then the ids as one text.
+pub fn profile_order(value: &[u8]) -> Vec<String> {
+    const VARIANT_TYPE: usize = 4;
+    let stream: Vec<u8> = value
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[low, _]| *low)
+        .collect();
+    let key: Vec<u8> = "ESDProfilesSorting"
+        .encode_utf16()
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    let mut seen = HashSet::new();
+    let mut order = Vec::new();
+    let mut rest = stream.as_slice();
+    while let Some(at) = rest.windows(key.len()).position(|w| w == key) {
+        rest = rest.get(at + key.len()..).unwrap_or_default();
+        if let Some(ids) = rest.get(VARIANT_TYPE..).and_then(stream_text) {
+            order.extend(
+                ids.split(',')
+                    .filter_map(folder_id)
+                    .filter(|id| seen.insert(id.clone())),
+            );
+        }
+    }
+    order
+}
+
+/// A text in a Qt data stream: its length in bytes, then UTF-16 big-endian.
+fn stream_text(stream: &[u8]) -> Option<String> {
+    let (length, rest) = stream.split_first_chunk::<4>()?;
+    let bytes = rest.get(..u32::from_be_bytes(*length) as usize)?;
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|unit| u16::from_be_bytes(*unit))
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
 /// The model a product code in a manifest stands for.
 pub fn model_kind(code: &str) -> Option<DeviceKind> {
     Some(match code {
@@ -219,8 +264,13 @@ struct Run<'a> {
 
 impl Run<'_> {
     fn page(&mut self, id: &str, source: &Value) -> Page {
+        let picture = text(source, "Icon");
         let mut page = Page {
             id: id.to_owned(),
+            name: text(source, "Name").to_owned(),
+            icon: (!picture.is_empty())
+                .then(|| (self.image)(id, picture))
+                .flatten(),
             keys: BTreeMap::new(),
         };
         for controller in list(source, "Controllers") {
@@ -671,6 +721,65 @@ mod tests {
         assert_eq!(c.profile.device, DeviceKind::Neo);
         profile.manifest["Device"] = json!({"Model": "AI Stream Deck", "UUID": "x"});
         assert!(convert(&profile, &mut |_, _| None).is_err());
+    }
+
+    /// `Devices` as the registry holds it, with these sorting texts in it.
+    fn devices_setting(sortings: &[&str]) -> Vec<u8> {
+        let text = |s: &str| {
+            let bytes: Vec<u8> = s.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            [(bytes.len() as u32).to_be_bytes().to_vec(), bytes].concat()
+        };
+        let mut stream = b"@Variant(\0\0\0\x08".to_vec();
+        for sorting in sortings {
+            stream.extend(text("ESDProfilesPreferred"));
+            stream.extend([0, 0, 0, 10]);
+            stream.extend(text(PAGE_A));
+            stream.extend(text("ESDProfilesSorting"));
+            stream.extend([0, 0, 0, 10]);
+            stream.extend(text(sorting));
+        }
+        stream.into_iter().flat_map(|b| [b, 0]).collect()
+    }
+
+    #[test]
+    fn the_profile_order_is_read_for_every_device() {
+        let one = "b9433aac-8ce9-47ad-aa83-9bce812883f0";
+        let two = "E5A67A77-94C9-40B8-A913-0399E1C9E40A";
+        let three = "10b1491f-6147-4d97-b782-3eb82311afe6";
+        let value = devices_setting(&[&format!("{one},{two},nonsense"), &format!("{three},{one}")]);
+        assert_eq!(
+            profile_order(&value),
+            [one, &two.to_lowercase(), three].map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn a_damaged_devices_setting_gives_no_order() {
+        assert!(profile_order(b"").is_empty());
+        let mut value = devices_setting(&["b9433aac-8ce9-47ad-aa83-9bce812883f0"]);
+        // Cut inside the ids, past the length that announces them.
+        value.truncate(value.len() - 20);
+        assert!(profile_order(&value).is_empty());
+    }
+
+    #[test]
+    fn pages_keep_their_name_and_icon() {
+        let mut profile = raw(json!({}));
+        let page = profile.pages.get_mut(PAGE_A).unwrap();
+        page["Name"] = json!("Scenes");
+        page["Icon"] = json!("Images/ICON.svg");
+        let mut asked = Vec::new();
+        let mut image = |page: &str, picture: &str| {
+            asked.push((page.to_owned(), picture.to_owned()));
+            Some(PathBuf::from("kept.svg"))
+        };
+        let c = convert(&profile, &mut image).unwrap();
+        assert_eq!(c.profile.pages[0].name, "Scenes");
+        assert_eq!(c.profile.pages[0].icon, Some(PathBuf::from("kept.svg")));
+        assert_eq!(asked, [(PAGE_A.to_owned(), "Images/ICON.svg".to_owned())]);
+        // Pages without them stay as they are.
+        assert_eq!(c.profile.pages[1].name, "");
+        assert_eq!(c.profile.pages[1].icon, None);
     }
 
     #[test]

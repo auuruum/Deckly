@@ -10,23 +10,27 @@ use crate::backup;
 use crate::cropper::{Cropper, Purpose};
 use crate::logo;
 use crate::os::autostart;
+use crate::plugins;
 use crate::render::{self, Live, Renderer};
 use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use crate::transfer::{self, Job, PluginKind, SharedJob, Summary};
+use deckly_core::profile::MAX_PAGE_NAME_CHARS;
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
 use deckly_core::{
-    DeviceKind, DeviceModel, KeyConfig, KeyPress, Orientation, TitleAlign, TitleStyle,
+    DeviceKind, DeviceModel, KeyConfig, KeyPress, Orientation, Page, Profile, TitleAlign,
+    TitleStyle,
 };
 use deckly_plugin_host::Host;
 use eframe::egui::{
-    self, Align2, Color32, ColorImage, CornerRadius, Pos2, Rect, RichText, Sense, Stroke,
-    TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
+    self, Align2, Color32, ColorImage, CornerRadius, CursorIcon, Pos2, Rect, RichText, Sense,
+    Stroke, TextureHandle, TextureOptions, Ui, Vec2, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use image::RgbaImage;
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
@@ -78,6 +82,10 @@ pub struct Preferences {
     device: Option<String>,
     /// Profile selected on the Profiles tab.
     profile: Option<String>,
+    /// Page of that profile selected on the tab, instead of the profile.
+    page: Option<String>,
+    /// Profiles showing their pages in the list.
+    expanded: HashSet<String>,
     /// Profile being renamed in the list.
     renaming: Option<Rename>,
     /// Profile waiting for delete confirmation.
@@ -97,6 +105,36 @@ pub struct Preferences {
     /// The Advanced Settings window, open for this device.
     advanced: Option<(String, &'static DeviceModel)>,
     cropper: Cropper,
+}
+
+/// A profile as the Profiles tab lists it.
+struct ProfileRow {
+    id: String,
+    name: String,
+    pages: Vec<PageRow>,
+}
+
+struct PageRow {
+    id: String,
+    name: String,
+    title: String,
+    icon: Option<PathBuf>,
+}
+
+impl ProfileRow {
+    fn new(profile: &Profile) -> Self {
+        let page = |(index, page): (usize, &Page)| PageRow {
+            id: page.id.clone(),
+            name: page.name.clone(),
+            title: page.title(index),
+            icon: page.icon.clone(),
+        };
+        Self {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            pages: profile.pages.iter().enumerate().map(page).collect(),
+        }
+    }
 }
 
 /// A profile name being edited in place.
@@ -124,6 +162,8 @@ impl Preferences {
             tab: Tab::General,
             device: None,
             profile: None,
+            page: None,
+            expanded: HashSet::new(),
             renaming: None,
             confirm_delete: None,
             style: None,
@@ -781,11 +821,11 @@ impl Preferences {
 
         let (profiles, default) = {
             let s = runtime::lock(env.state);
-            let profiles: Vec<(String, String, usize)> = s
+            let profiles: Vec<ProfileRow> = s
                 .profiles
                 .iter()
                 .filter(|p| p.device == env.kind)
-                .map(|p| (p.id.clone(), p.name.clone(), p.pages.len()))
+                .map(ProfileRow::new)
                 .collect();
             // The connected device's default profile, marked in the list.
             let default = env
@@ -800,27 +840,43 @@ impl Preferences {
         };
         if !profiles
             .iter()
-            .any(|(id, ..)| Some(id) == self.profile.as_ref())
+            .any(|p| Some(&p.id) == self.profile.as_ref())
         {
-            self.profile = profiles.first().map(|(id, ..)| id.clone());
+            self.profile = profiles.first().map(|p| p.id.clone());
+        }
+        let page_exists = profiles
+            .iter()
+            .filter(|p| Some(&p.id) == self.profile.as_ref())
+            .flat_map(|p| &p.pages)
+            .any(|p| Some(&p.id) == self.page.as_ref());
+        if !page_exists {
+            self.page = None;
         }
 
         // The list; double-click a name, press F2 or right-click and pick
         // Rename to rename it. Enter or a click elsewhere keeps the new name,
-        // Escape drops it.
+        // Escape drops it. The caret shows a profile's pages, and the handle
+        // on the right moves the profile.
         let mut commit = false;
         let mut cancel = false;
         let mut start: Option<(String, String)> = None;
+        let mut reorder = None;
         let can_delete = profiles.len() > 1;
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    for (id, name, _) in &profiles {
+                    let mut headers = Vec::new();
+                    let mut moving = None;
+                    let mut dropped = false;
+                    for (index, p) in profiles.iter().enumerate() {
+                        let id = &p.id;
+                        let name = &p.name;
                         let (rect, resp) = ui
                             .allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
-                        let selected = self.profile.as_ref() == Some(id);
+                        headers.push(rect);
+                        let selected = self.profile.as_ref() == Some(id) && self.page.is_none();
                         if selected {
                             ui.painter()
                                 .rect_filled(rect, CornerRadius::ZERO, PREF_ROW_SELECTED);
@@ -828,10 +884,60 @@ impl Preferences {
                             ui.painter()
                                 .rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
                         }
+                        let open = self.expanded.contains(id);
+                        let caret = Rect::from_center_size(
+                            pos2(rect.left() + 22.0, rect.center().y),
+                            Vec2::splat(24.0),
+                        );
+                        let caret_resp =
+                            ui.interact(caret, ui.id().with(("caret", id)), Sense::click());
+                        ui.painter().text(
+                            caret.center(),
+                            Align2::CENTER_CENTER,
+                            if open {
+                                icon::CARET_DOWN
+                            } else {
+                                icon::CARET_RIGHT
+                            },
+                            font(12.0),
+                            if caret_resp.hovered() || selected {
+                                TEXT
+                            } else {
+                                TEXT_DIM
+                            },
+                        );
+                        if caret_resp.clicked() && !self.expanded.remove(id) {
+                            self.expanded.insert(id.clone());
+                        }
+                        let handle = Rect::from_center_size(
+                            pos2(rect.right() - 22.0, rect.center().y),
+                            Vec2::splat(24.0),
+                        );
+                        let grip = ui
+                            .interact(handle, ui.id().with(("handle", id)), Sense::drag())
+                            .on_hover_and_drag_cursor(CursorIcon::Grab);
+                        ui.painter().text(
+                            handle.center(),
+                            Align2::CENTER_CENTER,
+                            icon::LIST,
+                            font(15.0),
+                            if grip.hovered() || grip.dragged() || selected {
+                                TEXT
+                            } else {
+                                TEXT_DIM
+                            },
+                        );
+                        if grip.dragged() || grip.drag_stopped() {
+                            moving = Some(index);
+                            dropped = grip.drag_stopped();
+                        }
                         match &mut self.renaming {
                             Some(r) if r.id == *id => {
                                 // The field's text starts where the name was drawn.
-                                let field = rect.shrink2(vec2(6.0, 4.0));
+                                let field = Rect::from_x_y_ranges(
+                                    rect.left() + 30.0..=handle.left() - 2.0,
+                                    rect.shrink(4.0).y_range(),
+                                );
                                 let mut out = ui
                                     .scope_builder(egui::UiBuilder::new().max_rect(field), |ui| {
                                         egui::TextEdit::singleline(&mut r.text)
@@ -859,10 +965,10 @@ impl Preferences {
                                 }
                             }
                             _ => {
-                                let mut name_right = rect.right() - 12.0;
+                                let mut name_right = handle.left() - 4.0;
                                 if default.as_ref() == Some(id) {
                                     let tag = ui.painter().text(
-                                        pos2(rect.right() - 12.0, rect.center().y),
+                                        pos2(name_right, rect.center().y),
                                         Align2::RIGHT_CENTER,
                                         "Default",
                                         font(12.0),
@@ -873,7 +979,7 @@ impl Preferences {
                                 let clip =
                                     Rect::from_x_y_ranges(rect.left()..=name_right, rect.y_range());
                                 ui.painter().with_clip_rect(clip).text(
-                                    pos2(rect.left() + 16.0, rect.center().y),
+                                    pos2(rect.left() + 40.0, rect.center().y),
                                     Align2::LEFT_CENTER,
                                     name,
                                     font(13.0),
@@ -883,6 +989,7 @@ impl Preferences {
                         }
                         if resp.clicked() || resp.secondary_clicked() {
                             self.profile = Some(id.clone());
+                            self.page = None;
                             self.confirm_delete = None;
                         }
                         if resp.double_clicked() {
@@ -907,9 +1014,42 @@ impl Preferences {
                                 ui.close();
                             }
                         });
+                        if open {
+                            for (number, page) in p.pages.iter().enumerate() {
+                                self.page_row(ui, id, page, number + 1);
+                            }
+                        }
+                    }
+                    let end = ui.cursor().top();
+                    if let (Some(from), Some(pointer)) =
+                        (moving, ui.input(|i| i.pointer.latest_pos()))
+                    {
+                        let to = headers
+                            .iter()
+                            .position(|r| pointer.y < r.center().y)
+                            .unwrap_or(headers.len());
+                        let y = headers.get(to).map_or(end, |r| r.top());
+                        ui.painter()
+                            .hline(ui.max_rect().x_range(), y, Stroke::new(2.0, TEXT));
+                        // Near the edges the list scrolls along.
+                        let view = ui.clip_rect();
+                        let edge = 24.0;
+                        if pointer.y < view.top() + edge {
+                            ui.scroll_with_delta(vec2(0.0, 4.0));
+                        } else if pointer.y > view.bottom() - edge {
+                            ui.scroll_with_delta(vec2(0.0, -4.0));
+                        }
+                        if dropped {
+                            reorder = Some((from, to));
+                        }
                     }
                 });
         });
+        if let Some((from, to)) = reorder {
+            let ids = profiles.iter().map(|p| p.id.clone()).collect();
+            runtime::lock(env.state).reorder_profiles(&moved(ids, from, to));
+            let _ = env.runtime.send(Msg::Refresh);
+        }
         if commit {
             self.finish_rename(env);
         } else if cancel {
@@ -918,8 +1058,8 @@ impl Preferences {
         if self.renaming.is_none() && ui.input(|i| i.key_pressed(egui::Key::F2)) {
             start = profiles
                 .iter()
-                .find(|(id, ..)| Some(id) == self.profile.as_ref())
-                .map(|(id, name, _)| (id.clone(), name.clone()));
+                .find(|p| Some(&p.id) == self.profile.as_ref())
+                .map(|p| (p.id.clone(), p.name.clone()));
         }
         if let Some((id, name)) = start {
             self.finish_rename(env);
@@ -941,25 +1081,38 @@ impl Preferences {
             self.finish_rename(env);
             let id = runtime::lock(env.state).add_profile("New Profile", env.kind);
             self.profile = Some(id.clone());
+            self.page = None;
             self.renaming = Some(Rename::new(id, "New Profile".to_owned()));
             self.confirm_delete = None;
         }
         let minus = at(o, 45.0, 444.0, 24.0, 24.0);
-        if icon_button(ui, minus, icon::MINUS, can_delete)
+        if icon_button(ui, minus, icon::MINUS, can_delete && self.page.is_none())
             .on_hover_text("Delete profile")
             .clicked()
         {
             self.confirm_delete = self.profile.clone();
         }
 
-        // Details of the selected profile.
-        let Some((id, name, pages)) = profiles
+        // Details of the selected page or profile.
+        let Some(profile) = profiles
             .iter()
-            .find(|(id, ..)| Some(id) == self.profile.as_ref())
-            .cloned()
+            .find(|p| Some(&p.id) == self.profile.as_ref())
         else {
             return;
         };
+        let page = profile
+            .pages
+            .iter()
+            .position(|p| Some(&p.id) == self.page.as_ref());
+        if let Some((index, page)) = page.and_then(|i| Some((i, profile.pages.get(i)?))) {
+            page_details(ui, o, env, &profile.id, page, index + 1);
+            return;
+        }
+        let (id, name, pages) = (
+            profile.id.clone(),
+            profile.name.clone(),
+            profile.pages.len(),
+        );
         let x = 272.0;
         painter.text(
             o + vec2(x, 80.0),
@@ -1029,6 +1182,32 @@ impl Preferences {
             if button(ui, at(o, x + 80.0, 428.0, 70.0, 22.0), "Cancel").clicked() {
                 self.confirm_delete = None;
             }
+        }
+    }
+
+    /// A page of an open profile in the list; `number` counts from 1.
+    fn page_row(&mut self, ui: &mut Ui, profile: &str, page: &PageRow, number: usize) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+        if self.page.as_ref() == Some(&page.id) {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::ZERO, PREF_ROW_SELECTED);
+        } else if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
+        }
+        let y = rect.center().y;
+        page_glyph(ui, pos2(rect.left() + 45.0, y), 16.0, page, number);
+        ui.painter().with_clip_rect(rect).text(
+            pos2(rect.left() + 66.0, y),
+            Align2::LEFT_CENTER,
+            &page.title,
+            font(13.0),
+            TEXT,
+        );
+        if resp.clicked() {
+            self.profile = Some(profile.to_owned());
+            self.page = Some(page.id.clone());
+            self.confirm_delete = None;
         }
     }
 
@@ -1230,6 +1409,146 @@ fn rename_profile(env: &mut Env<'_>, id: &str, text: &str) {
     }
     drop(s);
     let _ = env.runtime.send(Msg::Refresh);
+}
+
+/// The ids with the one at `from` moved to just before the one at `to`.
+fn moved(mut ids: Vec<String>, from: usize, to: usize) -> Vec<String> {
+    if from < ids.len() {
+        let id = ids.remove(from);
+        ids.insert(if to > from { to - 1 } else { to }.min(ids.len()), id);
+    }
+    ids
+}
+
+/// The name and icon of a selected page, in place of the profile's details.
+fn page_details(
+    ui: &mut Ui,
+    o: Pos2,
+    env: &mut Env<'_>,
+    profile: &str,
+    page: &PageRow,
+    number: usize,
+) {
+    let (label_x, field_x) = (272.0, 352.0);
+    let text = |ui: &Ui, y: f32, text: &str| {
+        ui.painter().text(
+            o + vec2(label_x, y),
+            Align2::LEFT_CENTER,
+            text,
+            font(13.0),
+            TEXT_DIM,
+        );
+    };
+    text(ui, 80.0, "Page Name:");
+    let mut name = page.name.clone();
+    let field = at(o, field_x, 69.0, 180.0, 22.0);
+    let edited = ui.put(
+        field,
+        egui::TextEdit::singleline(&mut name)
+            .char_limit(MAX_PAGE_NAME_CHARS)
+            .hint_text(format!("Page {number}"))
+            .font(font(13.0))
+            .vertical_align(egui::Align::Center)
+            .min_size(field.size()),
+    );
+    if edited.changed() {
+        edit_page(env, profile, &page.id, |p| p.name = name);
+    }
+
+    text(ui, 126.0, "Change Icon:");
+    let area = at(o, field_x, 105.0, 42.0, 42.0);
+    let change = ui
+        .interact(area, ui.id().with("page-icon"), Sense::click())
+        .on_hover_text("Change icon")
+        .on_hover_cursor(CursorIcon::PointingHand);
+    let fill = if change.hovered() {
+        PREF_SEGMENT
+    } else {
+        PREF_FIELD
+    };
+    ui.painter().rect_filled(area, CornerRadius::same(2), fill);
+    page_glyph(ui, area.center(), 24.0, page, number);
+    if change.clicked()
+        && let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["svg", "png", "jpg", "jpeg"])
+            .pick_file()
+    {
+        edit_page(env, profile, &page.id, |p| p.icon = Some(path));
+    }
+    let reset = at(o, field_x + 48.0, 114.0, 24.0, 24.0);
+    if icon_button(
+        ui,
+        reset,
+        icon::ARROW_COUNTER_CLOCKWISE,
+        page.icon.is_some(),
+    )
+    .on_hover_text("Reset icon")
+    .clicked()
+    {
+        edit_page(env, profile, &page.id, |p| p.icon = None);
+    }
+}
+
+/// Changes a page and saves its profile.
+fn edit_page(env: &mut Env<'_>, profile: &str, page: &str, edit: impl FnOnce(&mut Page)) {
+    let mut s = runtime::lock(env.state);
+    let Some(p) = s.profile_mut(profile) else {
+        return;
+    };
+    let Some(target) = p.pages.iter_mut().find(|q| q.id == page) else {
+        return;
+    };
+    edit(target);
+    let result = store::save_profile(p);
+    if let Err(e) = result {
+        s.notify(format!("Cannot save profile: {e}"));
+    }
+    drop(s);
+    let _ = env.runtime.send(Msg::Refresh);
+}
+
+/// A page's picture, or a frame with its number.
+fn page_glyph(ui: &Ui, center: Pos2, size: f32, page: &PageRow, number: usize) {
+    let area = Rect::from_center_size(center, Vec2::splat(size));
+    let picture = page
+        .icon
+        .as_deref()
+        .and_then(|path| page_picture(ui.ctx(), path));
+    if let Some(picture) = picture {
+        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        ui.painter()
+            .image(picture.id(), area, whole, Color32::WHITE);
+    } else {
+        ui.painter().rect_stroke(
+            area,
+            CornerRadius::same(3),
+            Stroke::new(1.5, TEXT),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            center,
+            Align2::CENTER_CENTER,
+            number.to_string(),
+            font(size * 0.6),
+            TEXT,
+        );
+    }
+}
+
+/// The picture at `path` as a texture. Both windows ask every frame, so it
+/// stays in egui's memory, also when it cannot be read.
+pub(crate) fn page_picture(ctx: &egui::Context, path: &Path) -> Option<TextureHandle> {
+    let id = egui::Id::new(("page-picture", path));
+    if let Some(known) = ctx.data(|d| d.get_temp::<Option<TextureHandle>>(id)) {
+        return known;
+    }
+    let picture = plugins::decode_picture(path).ok().map(|image| {
+        let size = [image.width() as usize, image.height() as usize];
+        let pixels = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        ctx.load_texture("page-picture", pixels, TextureOptions::LINEAR)
+    });
+    ctx.data_mut(|d| d.insert_temp(id, picture.clone()));
+    picture
 }
 
 /// Show, position, size and colour controls for a title style, laid out
@@ -1512,4 +1831,25 @@ fn combo(ui: &mut Ui, rect: Rect, id: &str, selected: &str, items: impl FnOnce(&
             .width(rect.width())
             .show_ui(ui, items);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn moved_ids(from: usize, to: usize) -> Vec<String> {
+        let ids = ["a", "b", "c", "d"].map(str::to_owned).to_vec();
+        moved(ids, from, to)
+    }
+
+    #[test]
+    fn a_profile_lands_before_the_row_it_is_dropped_on() {
+        assert_eq!(moved_ids(0, 2), ["b", "a", "c", "d"]);
+        assert_eq!(moved_ids(3, 1), ["a", "d", "b", "c"]);
+        // Past the last row.
+        assert_eq!(moved_ids(1, 4), ["a", "c", "d", "b"]);
+        // On itself or just below itself it stays.
+        assert_eq!(moved_ids(1, 1), ["a", "b", "c", "d"]);
+        assert_eq!(moved_ids(1, 2), ["a", "b", "c", "d"]);
+    }
 }

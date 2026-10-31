@@ -5,7 +5,7 @@
 //! (at a larger size) and to the device (as a JPEG at the key size).
 
 use crate::actions;
-use crate::plugins::{Mark, Overlay};
+use crate::plugins::{self, Mark, Overlay, PageTile};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
     DeviceModel, ImageFormat, KeyConfig, KeyPress, Orientation, Rotation, TitleAlign, TitleStyle,
@@ -86,7 +86,8 @@ impl Renderer {
             .as_deref()
             .and_then(|p| self.custom_image(p))
             .map(|src| fit_image(src, size))
-            .or_else(|| overlay?.image.as_ref().map(|i| fit_image(&i.img, size)));
+            .or_else(|| overlay?.image.as_ref().map(|i| fit_image(&i.img, size)))
+            .or_else(|| Some(self.page_picture(overlay?.page.as_ref()?, size)));
         let mut img = match picture {
             Some(img) => img,
             None => {
@@ -167,6 +168,15 @@ impl Renderer {
         encode_key(img, model, orientation)
     }
 
+    fn page_picture(&mut self, page: &PageTile, size: u32) -> RgbaImage {
+        let icon = page
+            .icon
+            .as_deref()
+            .and_then(|path| self.custom_image(path))
+            .cloned();
+        page_tile(icon.as_ref(), page.number, self.title_font.as_ref(), size)
+    }
+
     fn custom_image(&mut self, path: &Path) -> Option<&RgbaImage> {
         self.images
             .entry(path.to_owned())
@@ -195,6 +205,57 @@ fn fit_image(src: &RgbaImage, size: u32) -> RgbaImage {
     }
     // Lanczos keeps fine edges sharp when a large picture shrinks to a key.
     imageops::resize(&flat, size, size, imageops::FilterType::Lanczos3)
+}
+
+/// A Go to Page key's picture: a white tile in the middle of the key with
+/// the page's icon on it, or its number. Icons made of white lines turn black
+/// to show on it. Sizes are the official app's, for a 72 px key.
+fn page_tile(
+    icon: Option<&RgbaImage>,
+    number: usize,
+    font: Option<&FontArc>,
+    size: u32,
+) -> RgbaImage {
+    let unit = size as f32 / 72.0;
+    let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
+    let tile = ((28.0 * unit).round() as u32).clamp(1, size);
+    let corner = (size - tile) / 2;
+    let side = tile as f32;
+    let radius = 3.0 * unit;
+    for y in 0..tile {
+        for x in 0..tile {
+            // How far past the straight edges, towards a rounded corner.
+            let past = |v: u32| (radius - v as f32 - 0.5).max(v as f32 + 0.5 - side + radius);
+            let (dx, dy) = (past(x).max(0.0), past(y).max(0.0));
+            let cover = (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            blend(
+                &mut img,
+                (corner + x) as i32,
+                (corner + y) as i32,
+                [255; 3],
+                cover,
+            );
+        }
+    }
+    let inner = ((22.0 * unit).round() as u32).clamp(1, tile);
+    if let Some(icon) = icon {
+        let mut scaled = imageops::resize(icon, inner, inner, imageops::FilterType::Lanczos3);
+        let white_lines = icon
+            .pixels()
+            .all(|p| p.0[3] < 32 || p.0[..3].iter().all(|&c| c >= 200));
+        if white_lines {
+            for px in scaled.pixels_mut() {
+                px.0[..3].fill(0);
+            }
+        }
+        let at = i64::from((size - inner) / 2);
+        imageops::overlay(&mut img, &scaled, at, at);
+    } else if let Some(font) = font {
+        let text = number.to_string();
+        let px = inner as f32 * if text.len() > 2 { 0.56 } else { 0.8 };
+        draw_centred(&mut img, font, &text, px, [0; 3]);
+    }
+    img
 }
 
 /// A held key: the whole picture, title included, at `percent` of its size
@@ -389,7 +450,7 @@ pub fn decode_file(path: &Path) -> Result<RgbaImage, String> {
 }
 
 fn decode_image(path: &Path) -> Result<RgbaImage, String> {
-    let img = decode_file(path)?;
+    let img = plugins::decode_picture(path)?;
     // Square crop from the center, like "fill".
     let (w, h) = img.dimensions();
     let side = w.min(h);
@@ -461,13 +522,18 @@ fn draw_icon_colored(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32, 
 
 /// The page number, large and centred, for Page Indicator keys.
 fn draw_number(img: &mut RgbaImage, font: &FontArc, number: usize) {
-    let size = img.width() as f32;
     let text = number.to_string();
-    let scale = PxScale::from(size * if text.len() > 2 { 0.36 } else { 0.48 });
+    let px = img.width() as f32 * if text.len() > 2 { 0.36 } else { 0.48 };
+    draw_centred(img, font, &text, px, ICON_COLOR);
+}
+
+/// Digits in the middle of the image.
+fn draw_centred(img: &mut RgbaImage, font: &FontArc, text: &str, px: f32, color: [u8; 3]) {
+    let scale = PxScale::from(px);
     let sf = font.as_scaled(scale);
     // Centre the digits' height (ascent only; digits have no descent).
-    let baseline = (size + sf.ascent() * 0.72) / 2.0;
-    draw_line(img, font, scale, &text, (0.0, baseline), ICON_COLOR);
+    let baseline = (img.width() as f32 + sf.ascent() * 0.72) / 2.0;
+    draw_line(img, font, scale, text, (0.0, baseline), color);
 }
 
 fn line_width(font: &FontArc, scale: PxScale, line: &str) -> f32 {
@@ -720,6 +786,65 @@ mod tests {
         assert!(standby_jpeg(&noise, mk2).unwrap().len() <= 194_560);
         let plus = DeviceModel::of(deckly_core::DeviceKind::Plus);
         assert!(standby_jpeg(&noise, plus).is_err());
+    }
+
+    #[test]
+    fn a_page_icon_sits_dark_on_a_white_tile() {
+        let mut icon = RgbaImage::from_pixel(32, 32, Rgba([255, 255, 255, 0]));
+        for x in 0..32 {
+            for y in 12..20 {
+                icon.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        let img = page_tile(Some(&icon), 1, None, 72);
+        assert_eq!(*img.get_pixel(2, 2), ICON_BACKGROUND);
+        // The tile above the icon's bar, and the bar itself, turned black.
+        assert_eq!(*img.get_pixel(36, 24), Rgba([255, 255, 255, 255]));
+        assert!(img.get_pixel(36, 36).0[0] < 64);
+        // A picture in colour keeps them.
+        let photo = RgbaImage::from_pixel(32, 32, Rgba([200, 30, 30, 255]));
+        assert!(page_tile(Some(&photo), 1, None, 72).get_pixel(36, 36).0[0] > 150);
+    }
+
+    #[test]
+    fn a_page_without_a_usable_icon_shows_its_number() {
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::GO_TO_PAGE, json!({"page": 2}));
+        let page = |number, icon: Option<&str>| Overlay {
+            page: Some(PageTile {
+                number,
+                icon: icon.map(PathBuf::from),
+            }),
+            ..Overlay::default()
+        };
+        let mut draw = |overlay: &Overlay| r.render(Some(&key), 72, Live::default(), Some(overlay));
+        let two = draw(&page(2, None));
+        assert_eq!(*two.get_pixel(25, 25), Rgba([255, 255, 255, 255]));
+        assert_ne!(two, draw(&page(3, None)));
+        assert_eq!(two, draw(&page(2, Some("no/such/icon.svg"))));
+    }
+
+    #[test]
+    fn a_key_with_its_own_image_shows_no_tile() {
+        let mut r = Renderer::new();
+        let dir = std::env::temp_dir().join(format!("deckly-tile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("own.png");
+        RgbaImage::from_pixel(8, 8, Rgba([10, 200, 10, 255]))
+            .save(&file)
+            .unwrap();
+        let mut key = KeyConfig::new(actions::GO_TO_PAGE, json!({"page": 2}));
+        key.image = Some(file);
+        let overlay = Overlay {
+            page: Some(PageTile {
+                number: 2,
+                icon: None,
+            }),
+            ..Overlay::default()
+        };
+        let img = r.render(Some(&key), 72, Live::default(), Some(&overlay));
+        assert!(img.get_pixel(36, 36).0[1] > 150);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

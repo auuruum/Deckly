@@ -206,6 +206,9 @@ pub struct Scan {
     pub plugins: Vec<FoundPlugin>,
     /// How many profiles replace ones imported earlier.
     pub replaces: usize,
+    /// Profile ids in the order the official app on this computer lists
+    /// them. Backups do not hold it.
+    order: Vec<String>,
 }
 
 pub struct FoundPlugin {
@@ -239,6 +242,8 @@ pub fn scan(path: &Path, official: Option<&Path>, state: &Shared) -> Result<Scan
         skipped,
         plugins: Vec::new(),
         replaces: 0,
+        order: crate::os::official_devices_setting()
+            .map_or_else(Vec::new, |value| official::profile_order(&value)),
     };
     for (raw, dirs) in raws {
         let name = official::name_of(&raw.manifest).to_owned();
@@ -425,7 +430,13 @@ pub fn commit(
     let mut report = Report::default();
     if profiles {
         match write_profiles(&scan, &mut report, state, Some(progress)) {
-            Ok(n) => summary.lines.push(count(n, "profile") + " imported."),
+            Ok(n) => {
+                let mut s = runtime::lock(state);
+                s.place_imported(&scan.order);
+                s.drop_placeholders();
+                drop(s);
+                summary.lines.push(count(n, "profile") + " imported.");
+            }
             Err(e) => summary.lines.push(format!("Profiles not imported: {e}")),
         }
         for line in &scan.skipped {

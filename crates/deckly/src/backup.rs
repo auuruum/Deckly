@@ -156,8 +156,8 @@ fn take_pictures(profile: &mut Profile) -> Vec<(PathBuf, String)> {
     let id = profile.id.clone();
     let mut names: HashMap<PathBuf, String> = HashMap::new();
     let mut files = Vec::new();
-    profile.for_each_key(|key| {
-        let Some(path) = key.image.take() else {
+    profile.for_each_picture(|picture| {
+        let Some(path) = picture.take() else {
             return;
         };
         if !names.contains_key(&path) {
@@ -168,7 +168,7 @@ fn take_pictures(profile: &mut Profile) -> Vec<(PathBuf, String)> {
             names.insert(path.clone(), name.clone());
             files.push((path.clone(), name));
         }
-        key.image = names.get(&path).map(PathBuf::from);
+        *picture = names.get(&path).map(PathBuf::from);
     });
     files
 }
@@ -346,6 +346,7 @@ pub fn restore(
         runtime::lock(state).adopt_settings(settings);
         lines.push("Settings restored.".to_owned());
     }
+    runtime::lock(state).drop_placeholders();
     let _ = runtime.send(Msg::Settings);
     let _ = runtime.send(Msg::Refresh);
 
@@ -365,17 +366,17 @@ fn restore_pictures(profile: &mut Profile, backup: &mut Reader, root: &Path) -> 
     }
     let mut done: HashMap<String, PathBuf> = HashMap::new();
     let mut failed = None;
-    profile.for_each_key(|key| {
-        let Some(name) = key.image.take().and_then(|p| Some(p.to_str()?.to_owned())) else {
+    profile.for_each_picture(|picture| {
+        let Some(name) = picture.take().and_then(|p| Some(p.to_str()?.to_owned())) else {
             return;
         };
         if let Some(to) = done.get(&name) {
-            key.image = Some(to.clone());
+            *picture = Some(to.clone());
         } else if name.starts_with(&folder) && backup.has(&name) {
             let to = root.join(&name);
             match backup.unpack(&name, &to) {
                 Ok(()) => {
-                    key.image = Some(to.clone());
+                    *picture = Some(to.clone());
                     done.insert(name, to);
                 }
                 Err(e) => failed = Some(e),
@@ -461,8 +462,11 @@ mod tests {
         let mut multi = KeyConfig::new(deckly_core::profile::MULTI_ACTION, json!({}));
         multi.groups[0].push(pictured(r"C:\pics\c.png"));
         p.pages[0].keys.insert(2, multi);
+        p.pages[0].icon = Some(r"C:\pics\page.svg".into());
         let files = take_pictures(&mut p);
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
+        let icon = p.pages[0].icon.as_ref().unwrap();
+        assert!(icon.starts_with("images/abc"));
         let keys = &p.pages[0].keys;
         assert_eq!(keys[&0].image, keys[&1].image);
         let first = keys[&0].image.as_ref().unwrap().to_str().unwrap();

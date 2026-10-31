@@ -12,7 +12,7 @@ use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
 use crate::sequence::{self, Press, Step};
 use crate::store;
-use deckly_core::profile::MAX_FOLDER_DEPTH;
+use deckly_core::profile::{DEFAULT_PROFILE_NAME, MAX_FOLDER_DEPTH};
 use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, Orientation, Page, Profile, Settings, TitleStyle,
 };
@@ -46,7 +46,8 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(profiles: Vec<Profile>, settings: Settings) -> Self {
+    pub fn new(mut profiles: Vec<Profile>, settings: Settings) -> Self {
+        settings.sort_profiles(&mut profiles);
         Self {
             profiles,
             settings,
@@ -145,7 +146,7 @@ impl State {
         if let Some(p) = self.profiles.iter().find(|p| p.device == kind) {
             return p.id.clone();
         }
-        self.add_profile("Default Profile", kind)
+        self.add_profile(DEFAULT_PROFILE_NAME, kind)
     }
 
     /// Creates and saves an empty profile; returns its id.
@@ -188,12 +189,52 @@ impl State {
             self.folders.remove(&profile.id);
             self.profiles.push(profile);
         }
-        self.profiles.sort_by_key(|p| p.name.to_lowercase());
+        self.settings.sort_profiles(&mut self.profiles);
+    }
+
+    /// The empty profiles made for devices that now have real ones.
+    fn placeholders(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|p| p.is_placeholder())
+            .filter(|p| {
+                let same_model = |q: &&Profile| q.device == p.device;
+                self.profiles
+                    .iter()
+                    .filter(same_model)
+                    .any(|q| !q.is_placeholder())
+            })
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// Deletes those profiles after an import or restore, which would else
+    /// leave an empty "Default Profile" beside the one that came in.
+    pub fn drop_placeholders(&mut self) {
+        for id in self.placeholders() {
+            self.delete_profile(&id);
+        }
+    }
+
+    /// Saves a new order for the profiles in `ids`.
+    pub fn reorder_profiles(&mut self, ids: &[String]) {
+        self.settings.reorder_profiles(&mut self.profiles, ids);
+        self.save_settings();
+    }
+
+    /// Saves imported profiles' order, behind the profiles already here.
+    pub fn place_imported(&mut self, order: &[String]) {
+        if order.is_empty() {
+            return;
+        }
+        self.settings.place_profiles_last(&mut self.profiles, order);
+        self.save_settings();
     }
 
     /// Replaces the settings with restored ones.
     pub fn adopt_settings(&mut self, settings: Settings) {
         self.settings = settings;
+        self.settings.sort_profiles(&mut self.profiles);
         self.assign_orphans();
         self.save_settings();
     }
@@ -1436,6 +1477,49 @@ mod tests {
         bench.key(&key, false);
         assert!(bench.groups.presses.is_empty());
         assert!(bench.groups.runs.is_empty());
+    }
+
+    #[test]
+    fn go_to_page_keys_show_the_page_they_lead_to() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages.push(deckly_core::Page::new());
+        profile.pages[1].name = "Scenes".into();
+        profile.pages[1].icon = Some("icon.svg".into());
+        let here = format!("{}.3", profile.pages[0].id);
+        let s = State::new(vec![profile], Settings::default());
+        let key = |page: i64| KeyConfig::new(actions::GO_TO_PAGE, json!({ "page": page }));
+
+        let named = s.overlay(&here, &key(2)).unwrap();
+        assert_eq!(named.title.as_deref(), Some("Scenes"));
+        let tile = named.page.unwrap();
+        assert_eq!((tile.number, tile.icon), (2, Some("icon.svg".into())));
+        // Without a name the key has no title; its number is on the tile.
+        let plain = s.overlay(&here, &key(1)).unwrap();
+        assert_eq!(plain.title, None);
+        let tile = plain.page.unwrap();
+        assert_eq!((tile.number, tile.icon), (1, None));
+        assert!(s.overlay(&here, &key(3)).is_none());
+        assert!(s.overlay(&here, &key(-1)).is_none());
+        assert!(s.overlay("elsewhere.3", &key(1)).is_none());
+    }
+
+    #[test]
+    fn an_empty_default_profile_gives_way_to_real_ones_of_its_model() {
+        let empty = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
+        let other_model = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mini);
+        let mut imported = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
+        imported.pages.push(deckly_core::Page::new());
+        let (empty_id, other_id) = (empty.id.clone(), other_model.id.clone());
+        let s = State::new(vec![empty, other_model, imported], Settings::default());
+        assert_eq!(s.placeholders(), [empty_id]);
+        assert!(s.profile(&other_id).is_some());
+
+        // Alone, it stays: the device needs a profile to show.
+        let alone = State::new(
+            vec![Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2)],
+            Settings::default(),
+        );
+        assert!(alone.placeholders().is_empty());
     }
 
     #[test]

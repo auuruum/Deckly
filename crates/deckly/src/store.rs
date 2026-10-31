@@ -59,7 +59,6 @@ pub fn load_profiles() -> (Vec<Profile>, Vec<String>) {
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
-    profiles.sort_by_key(|p| p.name.to_lowercase());
     (profiles, errors)
 }
 
