@@ -208,6 +208,15 @@ impl Page {
             self.name.clone()
         }
     }
+
+    /// The short form for lists and keys: its name or its number.
+    pub fn label(&self, index: usize) -> String {
+        if self.name.is_empty() {
+            (index + 1).to_string()
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 impl KeyConfig {
@@ -736,6 +745,8 @@ mod tests {
         assert_eq!(back, p);
         assert_eq!(back.pages[0].title(0), "Scenes");
         assert_eq!(back.pages[1].title(1), "Page 2");
+        assert_eq!(back.pages[0].label(0), "Scenes");
+        assert_eq!(back.pages[1].label(1), "2");
 
         p.pages[0].name = format!("  {}  ", "x".repeat(MAX_PAGE_NAME_CHARS + 5));
         p.sanitize();

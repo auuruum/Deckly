@@ -1480,6 +1480,30 @@ mod tests {
     }
 
     #[test]
+    fn go_to_page_keys_show_the_page_they_lead_to() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages.push(deckly_core::Page::new());
+        profile.pages[1].name = "Scenes".into();
+        profile.pages[1].icon = Some("icon.svg".into());
+        let here = format!("{}.3", profile.pages[0].id);
+        let s = State::new(vec![profile], Settings::default());
+        let key = |page: i64| KeyConfig::new(actions::GO_TO_PAGE, json!({ "page": page }));
+
+        let named = s.overlay(&here, &key(2)).unwrap();
+        assert_eq!(named.title.as_deref(), Some("Scenes"));
+        let tile = named.page.unwrap();
+        assert_eq!((tile.number, tile.icon), (2, Some("icon.svg".into())));
+        // Without a name the key has no title; its number is on the tile.
+        let plain = s.overlay(&here, &key(1)).unwrap();
+        assert_eq!(plain.title, None);
+        let tile = plain.page.unwrap();
+        assert_eq!((tile.number, tile.icon), (1, None));
+        assert!(s.overlay(&here, &key(3)).is_none());
+        assert!(s.overlay(&here, &key(-1)).is_none());
+        assert!(s.overlay("elsewhere.3", &key(1)).is_none());
+    }
+
+    #[test]
     fn an_empty_default_profile_gives_way_to_real_ones_of_its_model() {
         let empty = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
         let other_model = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mini);

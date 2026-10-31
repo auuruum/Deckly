@@ -1968,7 +1968,12 @@ impl App {
             .filter(|p| p.device == profile.device)
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
-        let page_count = profile.pages.len();
+        let pages: Vec<String> = profile
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, page)| page.label(i))
+            .collect();
         let Some(index) = self.selected_key else {
             hint(ui, "Select a key to edit its action.");
             return;
@@ -2081,8 +2086,12 @@ impl App {
                         .show(ui, |ui| {
                             ui.label(RichText::new("Title").color(TEXT_DIM));
                             ui.horizontal_top(|ui| {
+                                let linked = overlay.as_ref().and_then(|o| o.title.as_deref());
                                 ui.add(
                                     egui::TextEdit::multiline(&mut key.title)
+                                        .hint_text(
+                                            RichText::new(linked.unwrap_or("")).color(TEXT_FAINT),
+                                        )
                                         .desired_rows(1)
                                         .desired_width(260.0),
                                 );
@@ -2096,7 +2105,7 @@ impl App {
                                         desired_state_row(ui, key, p.states);
                                     }
                                 }
-                                None => self.action_form(ui, key, &profiles, page_count),
+                                None => self.action_form(ui, key, &profiles, &pages),
                             }
                         });
                 })
@@ -2244,7 +2253,7 @@ impl App {
         ui: &mut Ui,
         key: &mut KeyConfig,
         profiles: &[(String, String)],
-        pages: usize,
+        pages: &[String],
     ) {
         let s = &mut key.settings;
         let label = |ui: &mut Ui, text: &str| {
@@ -2355,13 +2364,21 @@ impl App {
             }
             actions::GO_TO_PAGE => {
                 label(ui, "Page");
-                let mut n = actions::int_setting(s, "page", 1).clamp(1, pages.max(1) as i64);
-                if ui
-                    .add(egui::DragValue::new(&mut n).range(1..=pages.max(1) as i64))
-                    .changed()
-                {
-                    actions::set_setting(s, "page", json!(n));
-                }
+                let current = actions::int_setting(s, "page", 1);
+                let name = usize::try_from(current - 1)
+                    .ok()
+                    .and_then(|i| pages.get(i))
+                    .map_or("Choose a page", String::as_str);
+                egui::ComboBox::from_id_salt("go-to-page")
+                    .selected_text(name)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        for (number, page) in (1i64..).zip(pages) {
+                            if ui.selectable_label(number == current, page).clicked() {
+                                actions::set_setting(s, "page", json!(number));
+                            }
+                        }
+                    });
                 ui.end_row();
             }
             actions::SWITCH_PROFILE => {

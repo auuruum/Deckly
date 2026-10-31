@@ -68,6 +68,29 @@
 - A device with no profile gets one by a step named for its initial default
   profile.
 
+### Go to Page keys
+
+Read from the code of the action in the same Ghidra session, with the owner's
+screenshot of such a key and its settings (evidence ids `ev_28f079ae…`,
+`ev_dd0fbe17…`, `ev_79a656bc…`):
+
+- A key with its own image shows that. Otherwise the app draws one: on a 72 px
+  canvas, transparent so the key's black shows, a white tile of 28 px in the
+  middle with corners of 3 px, and inside it an area of 22 px. That area holds the
+  target page's icon in black, or with no icon the page number, black, weight
+  600, sized at 0.8 of the area. Checked by
+  `render::tests::a_page_icon_sits_dark_on_a_white_tile` and
+  `a_page_without_a_usable_icon_shows_its_number`.
+- A key with no title of its own takes the page's name. A page with no name gives
+  no title at all, not its number. Checked by
+  `runtime::tests::go_to_page_keys_show_the_page_they_lead_to`.
+- If the target page does not exist, the action's own drawing stays: a framed `#`.
+- The settings list the pages by name, an unnamed one by its number, with the
+  title of the key dim in the Title field. The stored setting stays `PageIndex`,
+  counted from 1.
+- The tree on the Profiles tab is built the same way: an unnamed page is `Page N`
+  with a picture for its number (`ev_70fe5f91…`).
+
 ## Inferred
 
 - Dragging a row by its handle reorders it: the view signals a sorting change
@@ -99,6 +122,9 @@
 - The page strip of the main window shows a page's icon in place of its number,
   and its name as a tooltip. How the official window shows them was not checked.
 - Which profiles are open in the list is not saved.
+- On a Go to Page tile an icon of white lines turns black and a picture in colour
+  keeps its colours. The official code recolours icons with two colours; how they
+  are applied was not read.
 
 ## Run with real data (2026-10-31, Windows 10 22H2)
 

@@ -62,6 +62,16 @@ pub struct Overlay {
     /// Shown when the user gave the key no title of their own.
     pub title: Option<String>,
     pub mark: Option<Mark>,
+    /// The page a Go to Page key leads to.
+    pub page: Option<PageTile>,
+}
+
+/// What a Go to Page key's picture shows of its page.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PageTile {
+    /// Counted from 1; shown when the page has no icon.
+    pub number: usize,
+    pub icon: Option<PathBuf>,
 }
 
 impl Hash for Overlay {
@@ -69,6 +79,7 @@ impl Hash for Overlay {
         self.image.as_ref().map(|i| i.id).hash(h);
         self.title.hash(h);
         self.mark.hash(h);
+        self.page.hash(h);
     }
 }
 
@@ -196,8 +207,12 @@ pub fn device_info(state: &State, d: &ConnectedDevice) -> protocol::DeviceInfo {
 }
 
 impl State {
-    /// What a plugin key shows from its plugin; `None` for other keys.
+    /// What a key shows besides its configuration: a plugin key what its
+    /// plugin set, a Go to Page key its page; `None` for other keys.
     pub fn overlay(&self, context: &str, key: &KeyConfig) -> Option<Overlay> {
+        if key.action == actions::GO_TO_PAGE {
+            return self.page_overlay(context, key);
+        }
         let live = self.plugin_keys.get(context);
         let mark = live
             .and_then(|l| l.mark)
@@ -222,7 +237,32 @@ impl State {
         let title = live
             .and_then(|l| l.titles.get(state).cloned().flatten())
             .or_else(|| def.map(|d| d.title.clone()).filter(|t| !t.is_empty()));
-        Some(Overlay { image, title, mark })
+        Some(Overlay {
+            image,
+            title,
+            mark,
+            ..Overlay::default()
+        })
+    }
+
+    /// The name and icon of the page a Go to Page key leads to, in the
+    /// profile holding the page or folder the key is on.
+    fn page_overlay(&self, context: &str, key: &KeyConfig) -> Option<Overlay> {
+        let here = context.split('.').next()?;
+        let profile = self
+            .profiles
+            .iter()
+            .find(|p| p.pages.iter().chain(&p.folders).any(|page| page.id == here))?;
+        let index = usize::try_from(actions::int_setting(&key.settings, "page", 1) - 1).ok()?;
+        let page = profile.pages.get(index)?;
+        Some(Overlay {
+            title: Some(page.name.clone()).filter(|name| !name.is_empty()),
+            page: Some(PageTile {
+                number: index + 1,
+                icon: page.icon.clone(),
+            }),
+            ..Overlay::default()
+        })
     }
 
     /// Shows a short mark on a key.
