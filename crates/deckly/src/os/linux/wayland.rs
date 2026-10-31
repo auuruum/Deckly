@@ -4,7 +4,7 @@
 //! correctly whatever layout is active.
 
 use super::Failure;
-use super::keys::{Key, Layout, NOTHING, Stroke, modifier_bit};
+use super::keys::{Key, Layout, NOTHING, SHIFT, Stroke, modifier_bit};
 use rustix::fs::{MemfdFlags, memfd_create};
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -102,8 +102,12 @@ impl Sender<'_> {
     }
 
     fn stroke(&self, layout: &Layout, stroke: &Stroke) -> Result<(), Failure> {
-        let mask = stroke.mods.iter().fold(0, |m, &key| m | modifier_bit(key));
-        for &key in &stroke.mods {
+        let mut mods = stroke.mods.clone();
+        if layout.needs_shift(stroke.key) && !mods.contains(&SHIFT) {
+            mods.push(SHIFT);
+        }
+        let mask = mods.iter().fold(0, |m, &key| m | modifier_bit(key));
+        for &key in &mods {
             self.key(layout, key, PRESSED);
         }
         if mask != 0 {
@@ -117,7 +121,7 @@ impl Sender<'_> {
         self.flush()?;
         if mask != 0 {
             self.keyboard.modifiers(0, 0, 0, 0);
-            for &key in stroke.mods.iter().rev() {
+            for &key in mods.iter().rev() {
                 self.key(layout, key, RELEASED);
             }
             self.flush()?;
