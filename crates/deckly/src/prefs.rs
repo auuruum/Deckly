@@ -210,7 +210,7 @@ impl Preferences {
         }
         let builder = egui::ViewportBuilder::default()
             .with_title("Preferences - Deckly")
-            .with_icon(logo::icon(64))
+            .with_icon(logo::window_icon())
             .with_inner_size(SIZE)
             .with_min_inner_size(SIZE)
             .with_resizable(false)
@@ -240,7 +240,7 @@ impl Preferences {
         };
         let builder = egui::ViewportBuilder::default()
             .with_title("Advanced Settings - Deckly")
-            .with_icon(logo::icon(64))
+            .with_icon(logo::window_icon())
             .with_inner_size(ADVANCED_SIZE)
             .with_min_inner_size(ADVANCED_SIZE)
             .with_resizable(false)

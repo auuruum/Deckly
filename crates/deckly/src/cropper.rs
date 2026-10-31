@@ -182,7 +182,7 @@ impl Cropper {
         let job = self.job.as_mut()?;
         let builder = egui::ViewportBuilder::default()
             .with_title("Customize Image - Deckly")
-            .with_icon(logo::icon(64))
+            .with_icon(logo::window_icon())
             .with_inner_size(SIZE)
             .with_min_inner_size(SIZE)
             .with_resizable(false)

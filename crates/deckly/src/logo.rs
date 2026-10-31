@@ -3,6 +3,7 @@
 //! the same design as vector art.
 
 use eframe::egui::IconData;
+use std::sync::{Arc, OnceLock};
 
 /// The design is laid out on a 120×120 canvas, like the SVG files.
 const CANVAS: f32 = 120.0;
@@ -20,6 +21,14 @@ pub fn icon(size: u32) -> IconData {
         width: size,
         height: size,
     }
+}
+
+/// The icon of the Preferences windows, which are rebuilt every frame. egui
+/// tells icons apart by pointer, so a new one each frame would set the window's
+/// icon, and redraw its title bar, every frame.
+pub fn window_icon() -> Arc<IconData> {
+    static ICON: OnceLock<Arc<IconData>> = OnceLock::new();
+    Arc::clone(ICON.get_or_init(|| Arc::new(icon(64))))
 }
 
 /// Straight (non-premultiplied) RGBA pixels, `size`×`size`.
@@ -111,6 +120,15 @@ mod tests {
             assert_eq!((icon.width, icon.height), (size, size));
             assert_eq!(icon.rgba.len(), (size * size * 4) as usize);
         }
+    }
+
+    #[test]
+    fn rebuilding_a_window_does_not_set_its_icon_again() {
+        use eframe::egui::ViewportBuilder;
+        let frame = || ViewportBuilder::default().with_icon(window_icon());
+        let (commands, recreate) = frame().patch(frame());
+        assert!(commands.is_empty());
+        assert!(!recreate);
     }
 
     #[test]
