@@ -14,6 +14,10 @@ pub fn config_dir() -> Option<PathBuf> {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
+    // DECKLY_CONFIG_DIR runs Deckly against a throwaway folder (development).
+    if let Some(dir) = env("DECKLY_CONFIG_DIR") {
+        return Some(dir);
+    }
     let base = if cfg!(windows) {
         env("APPDATA")?
     } else if cfg!(target_os = "macos") {
