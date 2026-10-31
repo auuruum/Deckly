@@ -14,14 +14,19 @@ serde.workspace = true
 serde_json.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "wayland", "wgpu", "x11"] }
 egui-phosphor = "0.14.0"
-# Key image rendering: decode custom PNG/JPEG images, encode device JPEGs
-# (and BMPs for the Mini family).
-image = { version = "0.25.10", default-features = false, features = ["bmp", "png", "jpeg"] }
+# Key image rendering: decode custom PNG/JPEG images and the WebP and GIF
+# pictures of imported profiles, encode device JPEGs (and BMPs for the Mini
+# family).
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 ab_glyph = "0.2.32"
 # Plugins send and ship SVG key images; text in them uses system fonts.
 resvg = { version = "0.49.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 # Native file dialogs (Win32, xdg-portal, AppKit); no GTK.
 rfd = "0.17.2"
+# Backups and the official app's backup files are zip archives; already in
+# the tree through deckly-plugin-host.
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+uuid = { version = "1.29.0", features = ["v4"] }
 # The tray icon. `ksni` talks D-Bus from Rust on Linux; no GTK.
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 

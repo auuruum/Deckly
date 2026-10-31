@@ -268,6 +268,12 @@ pub fn commit(staged: Staged, plugins_dir: &Path) -> Result<String, InstallError
     if target.exists() {
         remove(plugins_dir, &uuid)?;
     }
+    // Archives and backups made on Windows carry no executable bit.
+    #[cfg(unix)]
+    if let Ok(crate::manifest::Entry::Native(program)) = staged.manifest.entry(&staged.dir) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755))?;
+    }
     retry(|| std::fs::rename(&staged.dir, &target))?;
     Ok(uuid)
 }

@@ -34,6 +34,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-30 | [Official app 7.6: tray menu](2026-10-30-tray-menu.md) | Menu groups, device heading, profile list with the active one checked |
 | 2026-10-30 | [Official app 7.6: Multi Action and Key Logic](2026-10-30-multi-actions.md) | Sequence timing and cancelling, Switch, Random, custom delays, press detection, editor layout |
 | 2026-10-31 | [Linux and macOS actions and plugins](2026-10-31-linux-macos-actions.md) | Simulated input per session, media control, command lines in Open, Windows plugins through Wine |
+| 2026-10-31 | [Official profiles, backups and plugin folders](2026-10-31-official-profiles.md) | Backup and profile files, page and key layout, action settings, model codes, where plugins and their settings live |
 
 ## Open questions
 

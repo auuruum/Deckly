@@ -2608,6 +2608,7 @@ impl App {
             renderer: &mut self.renderer,
             device,
             kind,
+            host: self.host.as_ref(),
         };
         self.prefs.show(ctx, &mut env);
     }
