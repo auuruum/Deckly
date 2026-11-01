@@ -8,6 +8,7 @@ use deckly_core::KeyConfig;
 use eframe::egui::{self, Align2, CornerRadius, RichText, Sense, pos2, vec2};
 use egui_phosphor::regular as icon;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+mod icons;
 
 pub struct Picker {
     pub context: String,
@@ -20,6 +21,7 @@ pub struct Picker {
     focus: bool,
     scroll_y: f32,
     reset_scroll: bool,
+    icons: icons::Cache,
 }
 
 pub enum Selection {
@@ -51,6 +53,7 @@ impl Picker {
             focus: true,
             scroll_y: 0.0,
             reset_scroll: true,
+            icons: icons::Cache::new(ctx),
         }
     }
 
@@ -92,6 +95,7 @@ impl Picker {
 
     pub fn show(&mut self, ctx: &egui::Context) -> Selection {
         self.receive();
+        self.icons.receive(ctx);
         let mut confirm = false;
         let mut cancel = false;
         let mut moved = false;
@@ -178,13 +182,26 @@ impl Picker {
                             },
                         );
                     }
-                    painter.text(
-                        pos2(rect.left() + 22.0, rect.center().y),
-                        Align2::CENTER_CENTER,
-                        icon::APP_WINDOW,
-                        font(24.0),
-                        ITEM_ICON,
-                    );
+                    if let Some(texture) = self.icons.texture(app) {
+                        let image_rect = egui::Rect::from_center_size(
+                            pos2(rect.left() + 22.0, rect.center().y),
+                            vec2(28.0, 28.0),
+                        );
+                        painter.image(
+                            texture,
+                            image_rect,
+                            egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    } else {
+                        painter.text(
+                            pos2(rect.left() + 22.0, rect.center().y),
+                            Align2::CENTER_CENTER,
+                            icon::APP_WINDOW,
+                            font(24.0),
+                            ITEM_ICON,
+                        );
+                    }
                     painter.text(
                         pos2(rect.left() + 46.0, rect.top() + 8.0),
                         Align2::LEFT_TOP,
@@ -315,6 +332,7 @@ mod tests {
                 target: format!("/apps/{name}.desktop"),
                 detail: "Installed application".into(),
                 keywords: String::new(),
+                icon: String::new(),
             })
             .into();
         let mut picker = Picker {
@@ -331,6 +349,7 @@ mod tests {
             focus: true,
             scroll_y: 0.0,
             reset_scroll: true,
+            icons: icons::Cache::disabled(),
         };
         picker.filter();
         picker
@@ -433,6 +452,7 @@ mod tests {
             target: "/apps/spotify.desktop".into(),
             detail: String::new(),
             keywords: String::new(),
+            icon: String::new(),
         };
         apply(&mut key, &app);
         assert_eq!(key.title, "Spotify");

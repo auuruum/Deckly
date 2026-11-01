@@ -61,6 +61,9 @@ without replacing a custom title.
 Linux desktop entries launch through `gio launch` (GIO must be installed),
 so the desktop handles arguments, terminal apps and D-Bus activation.
 The picker has been run on Linux; Windows and macOS are compile-checked.
+The list shows the installed applications' icons, loaded in the background
+for visible rows and cached while the picker is open. Missing or unreadable
+icons use Deckly's generic application symbol.
 
 All built-in actions run on Linux and macOS. Open takes a file, folder, URL,
 program or `.desktop` file, or a full command with arguments, for example

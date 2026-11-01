@@ -1,8 +1,11 @@
 //! Installed application discovery. Scanned only when the picker opens, on
 //! its worker thread; discovery never starts an application.
 
+pub mod icons;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_icons;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 #[cfg(windows)]
@@ -15,6 +18,9 @@ pub struct Application {
     pub target: String,
     pub detail: String,
     pub keywords: String,
+    /// Desktop icon name/path, or the native Shell/bundle target. Never saved
+    /// as a profile image: artwork stays in its application's installation.
+    pub icon: String,
 }
 
 impl Application {
@@ -46,6 +52,9 @@ impl Catalog {
         }
         app.detail = app.detail.chars().take(512).collect();
         app.keywords = app.keywords.chars().take(1024).collect();
+        if app.icon.len() > 8192 || app.icon.contains('\0') {
+            app.icon.clear();
+        }
         self.applications.push(app);
     }
 }
@@ -119,6 +128,7 @@ mod tests {
             target: "/apps/spotify.desktop".into(),
             detail: "Music Player".into(),
             keywords: "Audio;streaming;".into(),
+            icon: String::new(),
         };
         assert!(app.matches("spotify"));
         assert!(app.matches("music spotify"));
@@ -134,6 +144,7 @@ mod tests {
             target: "/music.desktop".into(),
             detail: "d".repeat(5000),
             keywords: "k".repeat(5000),
+            icon: String::new(),
         };
         for _ in 0..=MAX_APPLICATIONS {
             catalog.add(app.clone());

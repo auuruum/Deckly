@@ -33,6 +33,7 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Registry",
     "Win32_System_Com",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -56,8 +57,11 @@ rustix = { version = "1.1.5", default-features = false, features = ["std", "even
 [target.'cfg(target_os = "macos")'.dependencies]
 # Simulated input through Quartz events; already in the tree through winit.
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGRemoteOperation"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "objc2-core-graphics"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSGeometry"] }
+# Autorelease pools for native icon previews on the background worker; already
+# in the dependency tree through AppKit and winit.
+objc2 = { version = "0.6.5", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

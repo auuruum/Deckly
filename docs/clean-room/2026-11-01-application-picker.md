@@ -64,7 +64,9 @@
   nonblocking reads for Linux desktop entries, and an explicit list-limit notice.
 - Preserve XDG root precedence and visibility rules. Do not interpret Exec
   command lines or field codes in the picker; GIO owns those semantics.
-- Use Deckly's existing Phosphor icon set for picker rows, without copying
-  application artwork. Native Windows COM is isolated to its platform module.
+- Picker rows now read installed application icons at runtime; Deckly's
+  existing Phosphor icon is the fallback. No application artwork is committed.
+  See `2026-11-01-application-icons.md`. Native Windows COM is isolated to its
+  platform module.
 - If GIO cannot start, report the missing launcher instead of opening the
   desktop entry as a text document.

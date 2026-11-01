@@ -37,6 +37,7 @@ fn discover_in(roots: &[PathBuf]) -> Catalog {
                             .parent()
                             .map_or_else(String::new, |p| p.display().to_string()),
                         keywords: String::new(),
+                        icon: target.into(),
                     });
                 }
                 // Do not expose helper applications inside a bundle.
@@ -47,6 +48,40 @@ fn discover_in(roots: &[PathBuf]) -> Catalog {
     }
     catalog.truncated |= budget == 0;
     catalog
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn icon(target: &str) -> Option<image::RgbaImage> {
+    use objc2::{AnyThread, rc::autoreleasepool};
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+    use objc2_core_graphics::CGImage;
+    use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+
+    autoreleasepool(|_| {
+        let image = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(target));
+        let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(64.0, 64.0));
+        // SAFETY: rect is a live writable rectangle; no graphics context or
+        // hints are supplied. The retained image stays on this worker thread.
+        let cg = unsafe { image.CGImageForProposedRect_context_hints(&mut rect, None, None)? };
+        if CGImage::width(Some(&cg)) > 2048 || CGImage::height(Some(&cg)) > 2048 {
+            return None;
+        }
+        let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg);
+        // SAFETY: an empty, correctly typed properties dictionary uses the
+        // system encoder defaults; bitmap and returned data stay alive here.
+        let png = unsafe {
+            bitmap.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )?
+        };
+        if png.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        // SAFETY: AppKit returned immutable NSData, retained for the entire
+        // decode; nothing mutates its bytes while the borrowed slice is used.
+        super::icons::decode(unsafe { png.as_bytes_unchecked() })
+    })
 }
 
 #[cfg(test)]

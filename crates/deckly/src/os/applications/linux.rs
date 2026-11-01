@@ -188,6 +188,7 @@ fn parse(
             get("Exec"),
             get("Comment")
         ),
+        icon: display_text(&localized("Icon")),
     })
 }
 
