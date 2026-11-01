@@ -4,6 +4,7 @@
 //! own module; a platform without an implementation returns an error instead
 //! of silently doing nothing.
 
+pub mod applications;
 pub mod autostart;
 pub mod instance;
 pub mod tray;

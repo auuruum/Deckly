@@ -58,9 +58,12 @@ fn open_path(path: &Path) -> io::Result<()> {
         // Most file managers' handling; xdg-open would show the file's text.
         let mut command = Command::new("gio");
         command.arg("launch").arg(path);
-        if launch(command).is_ok() {
-            return Ok(());
-        }
+        return launch(command).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("starting a desktop application requires GIO (gio launch): {e}"),
+            )
+        });
     }
     if is_program(path) {
         let mut command = Command::new(path);
@@ -217,5 +220,26 @@ mod tests {
         assert!(!is_program(&dir));
         assert!(is_program(&script(&dir, "run", "true")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires installed GIO; launches a temporary stand-in application"]
+    fn desktop_launcher_preserves_arguments_and_expands_field_codes() {
+        let dir = scratch("desktop");
+        let out = dir.join("out");
+        let tool = script(
+            &dir,
+            "player",
+            &format!("printf '%s|' \"$@\" > {}", out.display()),
+        );
+        let desktop = dir.join("Music Player.desktop");
+        std::fs::write(&desktop, format!(
+            "[Desktop Entry]\nType=Application\nName=Music Player\nExec={} --name=\"Desk Music\" %U\nTerminal=false\n",
+            tool.display()
+        )).unwrap();
+        open(desktop.to_str().unwrap()).unwrap();
+        assert_eq!(wait_for(&out), "--name=Desk Music|");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -210,6 +210,7 @@ pub struct App {
     /// settings pages.
     owner_set: bool,
     recording_hotkey: bool,
+    app_picker: Option<crate::app_picker::Picker>,
     clipboard: Option<KeyClipboard>,
     pending_paste: Option<PendingPaste>,
     history: History,
@@ -257,6 +258,7 @@ impl App {
             plugin_page_placed: None,
             owner_set: false,
             recording_hotkey: false,
+            app_picker: None,
             clipboard: None,
             pending_paste: None,
             history: History::default(),
@@ -1975,13 +1977,23 @@ impl App {
             .map(|(i, page)| page.label(i))
             .collect();
         let Some(index) = self.selected_key else {
+            self.app_picker = None;
             hint(ui, "Select a key to edit its action.");
             return;
         };
         let group = self.group;
+        let context = edited_context(&page_id, index, group);
+        if self
+            .app_picker
+            .as_ref()
+            .is_some_and(|p| p.context != context)
+        {
+            self.app_picker = None;
+        }
         let in_sequence = group.is_some_and(|g| g.member.is_some())
             && self.group_holder.as_deref() != Some(actions::KEY_LOGIC);
         let Some(key) = edited_key(profile, view, index, group) else {
+            self.app_picker = None;
             let text = if group.is_some() {
                 "Drag an action from the list onto this slot."
             } else {
@@ -1991,9 +2003,11 @@ impl App {
             return;
         };
         let before = key.clone();
+        if key.action != actions::OPEN {
+            self.app_picker = None;
+        }
         let defaults = self.renderer.title_defaults;
         let def = actions::find(&key.action);
-        let context = edited_context(&page_id, index, group);
         let (overlay, plugin) = {
             let s = runtime::lock(&self.state);
             let plugin = s.catalog.action(&key.action).map(|(p, a)| PluginView {
@@ -2105,7 +2119,7 @@ impl App {
                                         desired_state_row(ui, key, p.states);
                                     }
                                 }
-                                None => self.action_form(ui, key, &profiles, &pages),
+                                None => self.action_form(ui, key, &profiles, &pages, &context),
                             }
                         });
                 })
@@ -2254,6 +2268,7 @@ impl App {
         key: &mut KeyConfig,
         profiles: &[(String, String)],
         pages: &[String],
+        context: &str,
     ) {
         let s = &mut key.settings;
         let label = |ui: &mut Ui, text: &str| {
@@ -2299,20 +2314,63 @@ impl App {
             }
             actions::OPEN => {
                 label(ui, "App / File");
-                ui.horizontal(|ui| {
+                let mut selected_app = None;
+                ui.vertical(|ui| {
+                    let name = actions::str_setting(s, "application_name");
+                    if !name.is_empty() {
+                        ui.label(RichText::new(name).strong());
+                    }
                     let mut path = actions::str_setting(s, "path").to_owned();
                     if ui
-                        .add(egui::TextEdit::singleline(&mut path).desired_width(260.0))
+                        .add(
+                            egui::TextEdit::singleline(&mut path)
+                                .hint_text("Application, file or command")
+                                .desired_width(320.0),
+                        )
                         .changed()
                     {
                         actions::set_setting(s, "path", json!(path));
+                        actions::set_setting(s, "application_name", json!(""));
                     }
-                    if ui.button("Choose…").clicked()
-                        && let Some(p) = rfd::FileDialog::new().pick_file()
-                    {
-                        actions::set_setting(s, "path", json!(p.to_string_lossy()));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(format!("{}  Applications…", icon::APP_WINDOW))
+                            .clicked()
+                        {
+                            self.app_picker =
+                                Some(crate::app_picker::Picker::new(ui.ctx(), context.to_owned()));
+                        }
+                        if ui.button("File…").clicked()
+                            && let Some(p) = rfd::FileDialog::new()
+                                .set_title("Choose a file or program")
+                                .pick_file()
+                        {
+                            actions::set_setting(s, "path", json!(p.to_string_lossy()));
+                            actions::set_setting(s, "application_name", json!(""));
+                        }
+                        if ui.button("Folder…").clicked()
+                            && let Some(p) = rfd::FileDialog::new()
+                                .set_title("Choose a folder")
+                                .pick_folder()
+                        {
+                            actions::set_setting(s, "path", json!(p.to_string_lossy()));
+                            actions::set_setting(s, "application_name", json!(""));
+                        }
+                    });
+                    if let Some(picker) = &mut self.app_picker {
+                        match picker.show(ui.ctx()) {
+                            crate::app_picker::Selection::Pending => {}
+                            crate::app_picker::Selection::Cancelled => self.app_picker = None,
+                            crate::app_picker::Selection::Application(app) => {
+                                selected_app = Some(app);
+                                self.app_picker = None;
+                            }
+                        }
                     }
                 });
+                if let Some(app) = selected_app {
+                    crate::app_picker::apply(key, &app);
+                }
                 ui.end_row();
             }
             actions::WEBSITE => {
@@ -3588,6 +3646,7 @@ mod clipboard_tests {
             plugin_page_placed: None,
             owner_set: false,
             recording_hotkey: false,
+            app_picker: None,
             clipboard: None,
             pending_paste: None,
             history: History::default(),
@@ -3931,6 +3990,87 @@ mod clipboard_tests {
         assert_eq!(profile.pages[0].keys[&1], key);
         assert_eq!(profile.pages[0].keys[&0], key);
         assert!(app.dirty.contains(&profile.id));
+    }
+
+    #[test]
+    fn opening_and_cancelling_application_picker_keeps_the_action() {
+        fn inspector_frame(
+            ctx: &egui::Context,
+            app: &mut App,
+            profile: &mut Profile,
+            events: Vec<egui::Event>,
+        ) -> Vec<egui::epaint::ClippedShape> {
+            let view = View {
+                page: 0,
+                path: Vec::new(),
+                live: Live::default(),
+            };
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(852.0, 742.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.inspector(ui, profile, &view),
+            );
+            output.textures_delta.clear();
+            output.shapes
+        }
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages[0].keys.insert(
+            0,
+            KeyConfig::new(actions::OPEN, json!({"path":"existing command"})),
+        );
+        let before = profile.clone();
+        let shapes = inspector_frame(&ctx, &mut app, &mut profile, Vec::new());
+        let pos = shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.job.text.contains("Applications…")
+                {
+                    Some(text.pos + text.galley.size() / 2.0)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        for pressed in [true, false] {
+            inspector_frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(app.app_picker.is_some());
+        inspector_frame(&ctx, &mut app, &mut profile, Vec::new());
+        inspector_frame(
+            &ctx,
+            &mut app,
+            &mut profile,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.app_picker.is_none());
+        assert_eq!(profile, before);
+        assert!(app.dirty.is_empty());
     }
 }
 

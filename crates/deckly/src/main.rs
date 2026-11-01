@@ -5,6 +5,7 @@
 
 mod actions;
 mod app;
+mod app_picker;
 mod background;
 mod backup;
 mod clipboard;

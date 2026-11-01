@@ -49,6 +49,19 @@ Deckly as before.
 
 ## Linux and macOS
 
+In an Open action, use **Applications…** to search installed applications by
+name, then press Enter or double-click a result. Linux lists XDG desktop
+entries, including Flatpak and Snap exports; Windows uses the system's
+Applications folder (desktop and Store apps); macOS lists bundles in
+`~/Applications`, `/Applications` and `/System/Applications`. Discovery runs
+in the background. **File…** and **Folder…** select other targets, and the
+text field still accepts commands. Choosing an app fills an empty key title
+without replacing a custom title.
+
+Linux desktop entries launch through `gio launch` (GIO must be installed),
+so the desktop handles arguments, terminal apps and D-Bus activation.
+The picker has been run on Linux; Windows and macOS are compile-checked.
+
 All built-in actions run on Linux and macOS. Open takes a file, folder, URL,
 program or `.desktop` file, or a full command with arguments, for example
 `/path/to/python /path/to/script.py toggle "Desk Lamp"`. A command runs
