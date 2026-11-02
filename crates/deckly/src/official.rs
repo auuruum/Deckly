@@ -11,8 +11,8 @@ use crate::actions;
 use crate::os::{Hotkey, MediaKey};
 use deckly_core::profile::{self, MAX_FOLDERS, MAX_GROUP_ACTIONS, MAX_PAGES, group_count};
 use deckly_core::{
-    ActionDelays, DeviceKind, DeviceModel, ELGATO_VENDOR_ID, KeyConfig, Page, Profile, TitleAlign,
-    TitleStyle,
+    ActionDelays, AutoExit, DeviceKind, DeviceModel, ELGATO_VENDOR_ID, KeyConfig, Page, Profile,
+    TitleAlign, TitleStyle,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
@@ -370,6 +370,7 @@ impl Run<'_> {
         let settings = settings.unwrap_or(&empty);
         let (action, settings) = self.action(text(source, "UUID"), settings);
         let mut key = KeyConfig::new(action, settings);
+        key.auto_exit = source.get("AutoExit").and_then(auto_exit);
         if !in_group {
             self.fill_groups(&mut key, source, page);
         }
@@ -564,6 +565,17 @@ impl Run<'_> {
         }
         settings
     }
+}
+
+/// This belongs to the action itself, outside plugin-specific `Settings`.
+fn auto_exit(source: &Value) -> Option<AutoExit> {
+    let enabled = source.get("Enabled")?.as_bool()?;
+    let delay = source
+        .get("Delay")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(AutoExit::default().delay))
+        .min(u64::from(AutoExit::MAX_DELAY)) as u8;
+    Some(AutoExit { enabled, delay })
 }
 
 fn title_style(state: &Value) -> TitleStyle {
@@ -932,6 +944,94 @@ mod tests {
         assert_eq!(
             c.report.plugins["com.example.plugin"],
             ("Example".into(), 1)
+        );
+    }
+
+    #[test]
+    fn folder_exit_and_action_overrides_are_imported_and_survive_saving() {
+        let mut raw = raw(json!({
+            "0,0": {"UUID": "com.elgato.streamdeck.profile.openchild",
+                "Settings": {"ProfileUUID": FOLDER}}
+        }));
+        let actions = &mut raw.pages.get_mut(FOLDER).unwrap()["Controllers"][0]["Actions"];
+        actions["0,0"]["AutoExit"] = json!({"Enabled": true, "Delay": 3});
+        actions["4,2"]["AutoExit"] = json!({"Enabled": false, "Delay": 10});
+        let converted = convert(&raw, &mut |_, _| None).unwrap();
+        let folder = converted.profile.folder(FOLDER).unwrap();
+        assert_eq!(
+            folder.keys[&0].auto_exit,
+            Some(AutoExit {
+                enabled: true,
+                delay: 3
+            })
+        );
+        assert_eq!(
+            folder.keys[&14].auto_exit,
+            Some(AutoExit {
+                enabled: false,
+                delay: 10
+            })
+        );
+        assert_eq!(folder.keys[&14].settings, json!({"a": 1}));
+        assert_eq!(
+            Profile::from_json(&converted.profile.to_json().unwrap()).unwrap(),
+            converted.profile
+        );
+    }
+
+    #[test]
+    fn auto_exit_import_keeps_zero_and_bounds_excessive_delays() {
+        for delay in [0, 1, 2, 3, 5, 10, 60, 255, u64::MAX] {
+            let key = one(json!({"UUID": "com.example.plugin.action",
+                "AutoExit": {"Enabled": true, "Delay": delay},
+                "Settings": {"AutoExit": {"Enabled": false, "Delay": 50}}}));
+            assert_eq!(
+                key.auto_exit,
+                Some(AutoExit {
+                    enabled: true,
+                    delay: delay.min(u64::from(AutoExit::MAX_DELAY)) as u8,
+                })
+            );
+            assert_eq!(key.settings["AutoExit"]["Enabled"], false);
+        }
+    }
+
+    #[test]
+    fn absent_or_malformed_auto_exit_does_not_enable_exit() {
+        let legacy = one(json!({"UUID": "com.elgato.streamdeck.profile.backtoparent"}));
+        assert_eq!(legacy.auto_exit, None);
+        for value in [
+            Value::Null,
+            json!(true),
+            json!([]),
+            json!({}),
+            json!({"Enabled": "true", "Delay": 3}),
+            json!({"Delay": 3}),
+        ] {
+            let key = one(json!({"UUID": "com.example.plugin.action", "AutoExit": value}));
+            assert_eq!(key.auto_exit, None);
+        }
+        for delay in [Value::Null, json!(-1), json!("3"), json!(2.5), json!({})] {
+            let key = one(json!({"UUID": "com.example.plugin.action",
+                "AutoExit": {"Enabled": false, "Delay": delay}}));
+            assert_eq!(key.auto_exit, Some(AutoExit::default()));
+        }
+        let key = one(json!({"UUID": "com.example.plugin.action",
+            "AutoExit": {"Enabled": false, "Delay": 5}}));
+        assert_eq!(
+            key.auto_exit,
+            Some(AutoExit {
+                enabled: false,
+                delay: 5
+            })
+        );
+        let key = one(json!({"UUID": "com.example.plugin.action", "AutoExit": {"Enabled": true}}));
+        assert_eq!(
+            key.auto_exit,
+            Some(AutoExit {
+                enabled: true,
+                delay: 1
+            })
         );
     }
 

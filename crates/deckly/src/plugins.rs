@@ -208,7 +208,8 @@ pub fn device_info(state: &State, d: &ConnectedDevice) -> protocol::DeviceInfo {
 
 impl State {
     /// What a key shows besides its configuration: a plugin key what its
-    /// plugin set, a Go to Page key its page; `None` for other keys.
+    /// plugin set, a Go to Page key its page, any other key how its action
+    /// ended; `None` when there is nothing to show.
     pub fn overlay(&self, context: &str, key: &KeyConfig) -> Option<Overlay> {
         if key.action == actions::GO_TO_PAGE {
             return self.page_overlay(context, key);
@@ -218,14 +219,13 @@ impl State {
             .and_then(|l| l.mark)
             .filter(|(_, until)| *until > Instant::now())
             .map(|(m, _)| m);
-        // Multi Action keys show how their run ended.
-        if !key.groups.is_empty() {
+        let plugin = self.catalog.action(&key.action);
+        let Some((_, action)) = plugin.filter(|_| key.groups.is_empty()) else {
             return mark.map(|mark| Overlay {
                 mark: Some(mark),
                 ..Overlay::default()
             });
-        }
-        let (_, action) = self.catalog.action(&key.action)?;
+        };
         let state = live
             .map_or(0, |l| l.state)
             .min(action.states.len().saturating_sub(1));
@@ -267,12 +267,13 @@ impl State {
 
     /// Shows a short mark on a key.
     pub fn mark_key(&mut self, context: &str, mark: Mark) {
-        self.plugin_key(context, 1).mark = Some((mark, Instant::now() + MARK_TIME));
+        let key = self.plugin_keys.entry(context.to_owned()).or_default();
+        key.mark = Some((mark, Instant::now() + MARK_TIME));
     }
 
     /// Ends a Multi Action run on the key at `context`: a finished run shows
-    /// OK and moves a switch to its other side, and a cancelled one does
-    /// neither.
+    /// OK, or an Alert when a step failed, and moves a switch to its other
+    /// side. A cancelled run does neither.
     pub fn finish_run(&mut self, context: &str, cancelled: bool) {
         let Some(key) = self
             .key_at(context)
@@ -283,7 +284,9 @@ impl State {
         if cancelled {
             return;
         }
-        self.mark_key(context, Mark::Ok);
+        let failed = self.plugin_keys.get(context).and_then(|k| k.mark);
+        let failed = matches!(failed, Some((Mark::Alert, _)));
+        self.mark_key(context, if failed { Mark::Alert } else { Mark::Ok });
         if key.action != actions::MULTI_ACTION_SWITCH {
             return;
         }

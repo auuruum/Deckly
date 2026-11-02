@@ -1174,6 +1174,90 @@ mod tests {
     }
 
     #[test]
+    fn auto_exit_survives_official_profile_backup_and_folder_imports() {
+        use deckly_core::{AutoExit, Settings};
+        use serde_json::json;
+        const FOLDER: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let root =
+            std::env::temp_dir().join(format!("deckly-auto-exit-import-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("ProfilesV3");
+        let files = [
+            (
+                "manifest.json".to_owned(),
+                json!({"Name": "Scenes", "Device": {"Model": "20GBA9901"},
+                    "Pages": {"Current": PAGE, "Pages": [PAGE]}}),
+            ),
+            (
+                format!("Profiles/{PAGE}/manifest.json"),
+                json!({"Controllers": [{"Type": "Keypad", "Actions": {
+                    "0,0": {"UUID": "com.elgato.streamdeck.profile.openchild",
+                        "Settings": {"ProfileUUID": FOLDER}}
+                }}]}),
+            ),
+            (
+                format!("Profiles/{FOLDER}/manifest.json"),
+                json!({"Controllers": [{"Type": "Keypad", "Actions": {
+                    "0,0": {"UUID": "com.elgato.streamdeck.profile.backtoparent",
+                        "AutoExit": {"Enabled": true, "Delay": 3}},
+                    "1,0": {"UUID": "com.example.action", "Settings": {"value": 42},
+                        "AutoExit": {"Enabled": false, "Delay": 0}}
+                }}]}),
+            ),
+        ];
+        let profile_dir = format!("{PROFILE}.sdProfile");
+        for (name, contents) in &files {
+            let path = directory.join(&profile_dir).join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents.to_string()).unwrap();
+        }
+        let profile_file = root.join("Scenes.streamDeckProfile");
+        let backup_file = root.join("Scenes.streamDeckProfilesBackup");
+        for (path, prefix) in [
+            (&profile_file, profile_dir.clone()),
+            (&backup_file, format!("Profiles/{profile_dir}")),
+        ] {
+            let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+            for (name, contents) in &files {
+                zip.start_file(format!("{prefix}/{name}"), SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(contents.to_string().as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let state = Arc::new(Mutex::new(runtime::State::new(vec![], Settings::default())));
+        for source in [&directory, &profile_file, &backup_file] {
+            let read = scan(source, None, &state).unwrap();
+            assert!(read.skipped.is_empty());
+            assert_eq!(read.profiles.len(), 1);
+            let profile = &read.profiles[0].profile;
+            assert_eq!(profile.pages[0].keys[&0].folder(), Some(FOLDER));
+            let folder = profile.folder(FOLDER).unwrap();
+            assert_eq!(folder.keys[&0].action, crate::actions::PARENT_FOLDER);
+            assert_eq!(
+                folder.keys[&0].auto_exit,
+                Some(AutoExit {
+                    enabled: true,
+                    delay: 3
+                })
+            );
+            assert_eq!(
+                folder.keys[&1].auto_exit,
+                Some(AutoExit {
+                    enabled: false,
+                    delay: 0
+                })
+            );
+            assert_eq!(folder.keys[&1].settings, json!({"value": 42}));
+            assert_eq!(
+                Profile::from_json(&profile.to_json().unwrap()).unwrap(),
+                *profile
+            );
+            assert!(read.images.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn actions_without_a_plugin_name_count_for_their_plugin() {
         let mut report = Report::default();
         report
