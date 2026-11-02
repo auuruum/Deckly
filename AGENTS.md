@@ -81,7 +81,9 @@ Deckly is a clean-room reimplementation: study features and behavior, document f
 ### Branches and human approval
 
 - `main` is the stable branch; `dev` is the integration branch, initially created from `main`. If `dev` does not exist, ask the owner for explicit permission to create it from `main` and publish it. Do not silently use `main` as the base for new tasks.
-- Start each new task on a separate `codex/<short-task-name>` branch based on the latest `origin/dev` after fetching. Continue related work on that task branch; keep unrelated work in separate branches.
+- Start each new task on a separate branch based on the latest `origin/dev` after fetching. Continue related work on that task branch; keep unrelated work in separate branches.
+- Name a branch `<kind>/<short-task-name>` after the work it holds: `feature/` for new behavior, `fix/` for a bug fix, `docs/` for documentation, `refactor/` for code that keeps its behavior, `chore/` for everything else (dependencies, CI, tooling). Never put the name of an agent, tool, or model in a branch name.
+- Create the branch with `git switch --no-track -c <kind>/<short-task-name> origin/dev`, so that it does not track `origin/dev` and a plain push cannot reach `dev`.
 - Within the authorized task, agents may edit, test, commit, and push the task branch without asking for confirmation at each step. Push explicitly to the task branch; never include `dev` or `main` in a blanket push.
 - Once the task is complete, report the changes and validation results. The agent may then ask whether to merge that task branch into `dev`. Wait for explicit human approval before merging and publishing the merge to `dev`.
 - Without explicit human approval for the specific operation and target, agents must not change either local or remote `dev` or `main`: no direct commits, merges, cherry-picks, rebases, resets, pushes, force-pushes, deletions, or other branch updates. Fetching and reading these branches, creating a task branch from `origin/dev`, and incorporating `origin/dev` into a task branch are allowed because they do not update the protected branches.
