@@ -11,6 +11,7 @@ mod backup;
 mod clipboard;
 mod cropper;
 mod history;
+mod image_editor;
 mod logo;
 mod official;
 mod os;

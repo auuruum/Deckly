@@ -457,7 +457,7 @@ fn decode_image(path: &Path) -> Result<RgbaImage, String> {
     Ok(imageops::crop_imm(&img, (w - side) / 2, (h - side) / 2, side, side).to_image())
 }
 
-fn load_title_font() -> Option<FontArc> {
+pub(crate) fn load_title_font() -> Option<FontArc> {
     let candidates: &[&str] = if cfg!(windows) {
         &[
             r"C:\Windows\Fonts\segoeuib.ttf",
@@ -646,6 +646,45 @@ mod tests {
         key.image = Some("does/not/exist.png".into());
         let img = r.render(Some(&key), 72, Live::default(), None);
         assert_eq!(img.get_pixel(0, 0), &ICON_BACKGROUND);
+    }
+
+    #[test]
+    fn resetting_custom_image_restores_builtin_and_live_plugin_pixels() {
+        let path = std::env::temp_dir().join(format!("deckly-reset-{}.png", uuid::Uuid::new_v4()));
+        RgbaImage::from_pixel(288, 288, Rgba([150, 30, 40, 255]))
+            .save(&path)
+            .unwrap();
+        let mut renderer = Renderer::new();
+        for action in [actions::HOTKEY, "test.plugin.action"] {
+            let mut key = KeyConfig::new(action, json!({"keep":"settings"}));
+            let plugin = (action == "test.plugin.action").then(|| Overlay {
+                image: Some(std::sync::Arc::new(plugins::KeyImage {
+                    id: 17,
+                    img: RgbaImage::from_pixel(72, 72, Rgba([10, 60, 200, 255])),
+                })),
+                ..Default::default()
+            });
+            let default = renderer.render(Some(&key), 72, Live::default(), plugin.as_ref());
+            let default_hash = renderer.key_hash(Some(&key), Live::default(), plugin.as_ref());
+            key.image = Some(path.clone());
+            let custom = renderer.render(Some(&key), 72, Live::default(), plugin.as_ref());
+            assert_ne!(custom, default);
+            assert_ne!(
+                renderer.key_hash(Some(&key), Live::default(), plugin.as_ref()),
+                default_hash
+            );
+            key.image = None;
+            assert_eq!(
+                renderer.render(Some(&key), 72, Live::default(), plugin.as_ref()),
+                default
+            );
+            assert_eq!(
+                renderer.key_hash(Some(&key), Live::default(), plugin.as_ref()),
+                default_hash
+            );
+            assert_eq!(key.settings, json!({"keep":"settings"}));
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

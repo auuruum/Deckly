@@ -211,6 +211,7 @@ pub struct App {
     owner_set: bool,
     recording_hotkey: bool,
     app_picker: Option<crate::app_picker::Picker>,
+    image_editor: Option<crate::image_editor::Editor>,
     clipboard: Option<KeyClipboard>,
     pending_paste: Option<PendingPaste>,
     history: History,
@@ -259,6 +260,7 @@ impl App {
             owner_set: false,
             recording_hotkey: false,
             app_picker: None,
+            image_editor: None,
             clipboard: None,
             pending_paste: None,
             history: History::default(),
@@ -1958,6 +1960,7 @@ impl App {
 
     fn inspector(&mut self, ui: &mut Ui, profile: &mut Profile, view: &View) {
         let panel = ui.max_rect();
+        let profile_id = profile.id.clone();
         let page_id = view
             .path
             .last()
@@ -1978,11 +1981,13 @@ impl App {
             .collect();
         let Some(index) = self.selected_key else {
             self.app_picker = None;
+            self.image_editor = None;
             hint(ui, "Select a key to edit its action.");
             return;
         };
         let group = self.group;
         let context = edited_context(&page_id, index, group);
+        let image_context = format!("{profile_id}/{context}");
         if self
             .app_picker
             .as_ref()
@@ -1994,6 +1999,7 @@ impl App {
             && self.group_holder.as_deref() != Some(actions::KEY_LOGIC);
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;
+            self.image_editor = None;
             let text = if group.is_some() {
                 "Drag an action from the list onto this slot."
             } else {
@@ -2002,6 +2008,13 @@ impl App {
             hint(ui, text);
             return;
         };
+        if self
+            .image_editor
+            .as_ref()
+            .is_some_and(|editor| !editor.matches(&image_context, key))
+        {
+            self.image_editor = None;
+        }
         let before = key.clone();
         if key.action != actions::OPEN {
             self.app_picker = None;
@@ -2080,14 +2093,38 @@ impl App {
                         .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
                 );
                 ui.add_space(6.0);
-                if ui.button(format!("{}  Image…", icon::IMAGE)).clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Images", &["png", "jpg", "jpeg"])
-                        .pick_file()
+                ui.menu_button(format!("{}  Image…", icon::IMAGE), |ui| {
+                    use crate::image_editor::{Editor, Mode};
+                    for (glyph, label, mode, upload) in [
+                        (icon::UPLOAD_SIMPLE, "Upload image…", Mode::Create, true),
+                        (icon::SQUARES_FOUR, "Icon library…", Mode::Library, false),
+                        (icon::PAINT_BRUSH, "Create image…", Mode::Create, false),
+                    ] {
+                        if ui.button(format!("{glyph}  {label}")).clicked() {
+                            let mut editor = Editor::new(image_context.clone(), key, mode);
+                            if !upload || editor.upload(ui.ctx()) {
+                                self.image_editor = Some(editor);
+                            }
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(key.image.is_some(), egui::Button::new("Reset to default"))
+                        .clicked()
+                    {
+                        key.image = None;
+                        ui.close();
+                    }
+                });
+                if ui
+                    .add_enabled(
+                        key.image.is_some(),
+                        egui::Button::new(format!("{}  Reset", icon::ARROW_COUNTER_CLOCKWISE)),
+                    )
+                    .on_hover_text("Restore the action's default image")
+                    .clicked()
                 {
-                    key.image = Some(path);
-                }
-                if key.image.is_some() && ui.button("Reset image").clicked() {
                     key.image = None;
                 }
             });
@@ -2126,6 +2163,17 @@ impl App {
                 .response
                 .rect;
         });
+        if let Some(editor) = &mut self.image_editor {
+            use crate::image_editor::Selection;
+            match editor.show(ui.ctx(), &profile_id) {
+                Selection::Image(path) => {
+                    key.image = Some(path);
+                    self.image_editor = None;
+                }
+                Selection::Cancelled => self.image_editor = None,
+                Selection::Pending => {}
+            }
+        }
         // A plugin's settings page fills the rest of the panel, framed and
         // labelled so it is clear this part is the plugin's own web page.
         if let Some(p) = plugin
@@ -3621,6 +3669,122 @@ mod tray_tests {
 }
 
 #[cfg(test)]
+mod key_image_tests {
+    use super::*;
+
+    fn frame(
+        ctx: &egui::Context,
+        app: &mut App,
+        profile: &mut Profile,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let mut view = View {
+            page: 0,
+            path: Vec::new(),
+            live: Live::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(852.0, 742.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let original = profile.clone();
+                let location = view.location(app.selected_key);
+                app.inspector(ui, profile, &view);
+                app.finish_edit(ctx, profile, &mut view, &original, location, None);
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    #[test]
+    fn reset_button_preserves_action_and_is_undoable() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = super::clipboard_tests::editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let mut key = KeyConfig::new(actions::WEBSITE, json!({"url":"https://example.com"}));
+        key.image = Some("custom-key.png".into());
+        key.title = "Keep title".into();
+        profile.pages[0].keys.insert(0, key.clone());
+        let before = profile.clone();
+        frame(&ctx, &mut app, &mut profile, Vec::new());
+        let shapes = frame(&ctx, &mut app, &mut profile, Vec::new());
+        let pos = shapes
+            .iter()
+            .find_map(|s| {
+                if let egui::Shape::Text(text) = &s.shape
+                    && text.galley.job.text.ends_with("  Reset")
+                {
+                    Some(text.pos + text.galley.size() / 2.0)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        for pressed in [true, false] {
+            frame(
+                &ctx,
+                &mut app,
+                &mut profile,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        key.image = None;
+        assert_eq!(profile.pages[0].keys[&0], key);
+        assert!(app.dirty.contains(&profile.id));
+        let (restored, _) = app
+            .history
+            .step(&profile, Direction::Undo)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, before);
+        assert_eq!(
+            app.history
+                .step(&restored, Direction::Redo)
+                .unwrap()
+                .unwrap()
+                .0,
+            profile
+        );
+    }
+
+    #[test]
+    fn image_editor_closes_when_selection_changes_and_keeps_profile() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = super::clipboard_tests::editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let key = KeyConfig::new(actions::WEBSITE, json!({}));
+        profile.pages[0].keys.insert(0, key.clone());
+        let context = format!("{}/{}.0", profile.id, profile.pages[0].id);
+        app.image_editor = Some(crate::image_editor::Editor::new(
+            context,
+            &key,
+            crate::image_editor::Mode::Create,
+        ));
+        let original = profile.clone();
+        frame(&ctx, &mut app, &mut profile, Vec::new());
+        assert!(app.image_editor.is_some());
+        app.selected_key = None;
+        frame(&ctx, &mut app, &mut profile, Vec::new());
+        assert!(app.image_editor.is_none());
+        assert_eq!(profile, original);
+    }
+}
+
+#[cfg(test)]
 mod clipboard_tests {
     use super::*;
 
@@ -3647,6 +3811,7 @@ mod clipboard_tests {
             owner_set: false,
             recording_hotkey: false,
             app_picker: None,
+            image_editor: None,
             clipboard: None,
             pending_paste: None,
             history: History::default(),

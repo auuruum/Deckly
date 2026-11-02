@@ -119,6 +119,32 @@ The Parent Folder key stays protected. Shortcuts in text fields continue
 to copy and paste text, and action shortcuts are disabled during hotkey
 recording and confirmation dialogs.
 
+## Key images
+
+Select a key, then use **Image…** to upload a picture, browse the offline
+Phosphor icon library, or open **Create image…**. The library searches the
+bundled icons by name and can show only logos. Change its background and
+icon colors, then press **Set image**, or continue in the creator.
+
+The creator combines up to eight text, icon and picture layers. Drag the
+selected layer in the preview or edit its position and size; **Back** and
+**Front** change the layer order. You can combine several uploaded logos
+and add text on a background color. **Set image** applies the result to the
+selected key; Cancel or Escape leaves it unchanged. **Reset** restores the
+action's default image, including live plugin images. These key edits are
+covered by Undo and Redo.
+
+Uploads accept PNG, JPEG, WebP, GIF and BMP (the first frame), up to 16 MiB
+and 4096 pixels per edge. Imported pictures keep their aspect ratio. The
+creator saves a flattened 288 × 288 PNG into the profile's image folder;
+the original file is no longer needed, and backups include the result.
+Layer drafts last while the dialog is open. **Add current key image** starts
+further work from the previously applied PNG as one picture layer.
+
+The catalog, creator and renderer use shared Rust/egui code on Linux,
+Windows and macOS; only file selection uses a native dialog. Windows and
+macOS are compile-checked; visual acceptance of this workflow is pending.
+
 ## Undo and redo
 
 Ctrl+Z undoes the last edit in the current profile; Ctrl+Y redoes it.

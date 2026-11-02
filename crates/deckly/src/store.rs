@@ -75,6 +75,47 @@ pub fn save_profile(profile: &Profile) -> Result<(), String> {
     profile.save(&path).map_err(|e| e.to_string())
 }
 
+/// Immutable pictures keep rendering caches and editor undo valid. Both
+/// created and imported key images are owned by the profile and backed up.
+pub fn save_key_image(profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    let root = config_dir().ok_or("no configuration folder")?;
+    write_key_image(&root, profile, image)
+}
+
+fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    if profile.is_empty()
+        || !profile
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        || profile.len() > 128
+    {
+        return Err("invalid profile id".into());
+    }
+    if image.width() == 0 || image.height() == 0 || image.width().max(image.height()) > 512 {
+        return Err("invalid key image size".into());
+    }
+    let dir = root.join("images").join(profile);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        let mut output = std::io::BufWriter::new(file);
+        image
+            .write_to(&mut output, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        std::io::Write::flush(&mut output).map_err(|e| e.to_string())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
+}
+
 pub fn delete_profile(id: &str) -> Result<(), String> {
     let path = profile_path(id).ok_or("invalid profile id")?;
     // Imported and restored pictures live in a folder per profile.
@@ -182,5 +223,31 @@ mod tests {
         assert_eq!(serial_file_name("../x/y"), "xy");
         assert!(serial_file_name("..//").starts_with("device-"));
         assert_eq!(serial_file_name(&"z".repeat(500)).len(), 64);
+    }
+
+    #[test]
+    fn key_images_are_owned_immutable_pngs_and_profile_roundtrips() {
+        let root = std::env::temp_dir().join(format!("deckly-key-images-{}", uuid::Uuid::new_v4()));
+        let image = RgbaImage::from_pixel(288, 288, image::Rgba([12, 34, 56, 255]));
+        let first = write_key_image(&root, "test-profile", &image).unwrap();
+        let second = write_key_image(&root, "test-profile", &image).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            first.parent(),
+            Some(root.join("images/test-profile").as_path())
+        );
+        assert_eq!(crate::render::decode_file(&first).unwrap(), image);
+        let mut profile = Profile::new("Test", deckly_core::DeviceKind::Mk2);
+        let mut key = deckly_core::KeyConfig::new(crate::actions::WEBSITE, serde_json::json!({}));
+        key.image = Some(first.clone());
+        profile.pages[0].keys.insert(0, key);
+        let file = root.join("profile.json");
+        profile.save(&file).unwrap();
+        assert_eq!(Profile::load(&file).unwrap(), profile);
+        assert!(write_key_image(&root, "../escape", &image).is_err());
+        assert!(write_key_image(&root, "", &image).is_err());
+        assert!(write_key_image(&root, "safe", &RgbaImage::new(513, 1)).is_err());
+        assert!(write_key_image(&root, "safe", &RgbaImage::new(0, 0)).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
