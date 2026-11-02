@@ -38,6 +38,8 @@ pub struct Settings {
     /// Profile ids in the order lists show them. Profiles not on it follow,
     /// by name.
     pub profile_order: Vec<String>,
+    /// While the computer is locked, keys cannot act on the machine.
+    pub lock_keys: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +51,7 @@ impl Default for Settings {
             title_style: TitleStyle::default(),
             key_press: KeyPress::default(),
             profile_order: Vec::new(),
+            lock_keys: true,
         }
     }
 }
@@ -407,8 +410,18 @@ mod tests {
             size: 70,
         };
         s.profile_order = strings(&["p2", "p1"]);
+        s.lock_keys = false;
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn older_settings_files_lock_the_keys() {
+        assert!(
+            Settings::from_json(r#"{"brightness":50}"#)
+                .unwrap()
+                .lock_keys
+        );
     }
 
     #[test]

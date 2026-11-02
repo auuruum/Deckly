@@ -250,6 +250,30 @@ pub fn listed(uuid: &str, holder: Option<&str>) -> bool {
     }
 }
 
+/// Whether an action may run while the computer is locked: what stays inside
+/// Deckly and the device, and sequences, whose steps each answer for
+/// themselves. Anything else, plugin actions and unknown ones included, could
+/// act on the machine.
+pub fn runs_while_locked(uuid: &str) -> bool {
+    matches!(
+        uuid,
+        NEXT_PAGE
+            | PREVIOUS_PAGE
+            | GO_TO_PAGE
+            | SWITCH_PROFILE
+            | CREATE_FOLDER
+            | PARENT_FOLDER
+            | PAGE_INDICATOR
+            | BRIGHTNESS
+            | SLEEP
+            | DELAY
+            | MULTI_ACTION
+            | MULTI_ACTION_SWITCH
+            | RANDOM_ACTION
+            | KEY_LOGIC
+    )
+}
+
 pub fn find(uuid: &str) -> Option<&'static ActionDef> {
     ACTIONS.iter().chain(PLACED).find(|a| a.uuid == uuid)
 }
@@ -556,6 +580,18 @@ mod tests {
         );
         assert!(names(None).contains(&"Multi Action"));
         assert!(!names(None).contains(&"Delay"));
+    }
+
+    #[test]
+    fn only_device_actions_run_while_locked() {
+        let blocked: Vec<&str> = ACTIONS
+            .iter()
+            .chain(PLACED)
+            .filter(|a| !runs_while_locked(a.uuid))
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(blocked, ["Website", "Hotkey", "Open", "Text", "Multimedia"]);
+        assert!(!runs_while_locked("com.example.plugin"));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! it cancels the run. [`Press`] tells apart the presses of a Key Logic key.
 
 use crate::actions;
+use crate::lock_gate::Gate;
 use crate::runtime::Msg;
 use deckly_core::{ActionDelays, KeyConfig};
 use deckly_device::Handle;
@@ -140,13 +141,15 @@ pub fn timing(key: &KeyConfig) -> (Duration, Duration) {
     )
 }
 
-/// Runs `steps` in order, then reports [`Msg::RunDone`] for `context`.
+/// Runs `steps` in order, then reports [`Msg::RunDone`] for `context`. Steps
+/// the gate blocks are passed over, and the run then counts as cancelled.
 /// Returns what cancels the run; `None` if no thread could be started.
 pub fn start(
     steps: Vec<Step>,
     handle: Handle,
     context: String,
     results: Sender<Msg>,
+    gate: Gate,
 ) -> Option<Sender<()>> {
     let (cancel, cancelled) = channel::<()>();
     let waited = move |wait: Duration| {
@@ -156,11 +159,19 @@ pub fn start(
         let mut finished = true;
         for step in &steps {
             let (hold, next) = timing(&step.key);
-            press(step, true, handle, &results);
+            // Decided once: a plugin that heard the press hears the release
+            // even if the computer locks in between.
+            let open = !gate.blocks(&step.key.action);
+            finished &= open;
+            if open {
+                press(step, true, handle, &results);
+            }
             let stay = waited(hold);
             // The release goes out even when cancelled: a plugin must not
             // be left with its key down.
-            press(step, false, handle, &results);
+            if open {
+                press(step, false, handle, &results);
+            }
             if !stay || !waited(next) {
                 finished = false;
                 break;
@@ -325,7 +336,7 @@ mod tests {
             step(actions::DELAY, None, false),
             step(actions::PREVIOUS_PAGE, quick, false),
         ];
-        let _cancel = start(steps, 7, "page.0".into(), tx).unwrap();
+        let _cancel = start(steps, 7, "page.0".into(), tx, Gate::default()).unwrap();
         let mut seen = Vec::new();
         for msg in rx.iter() {
             match msg {
@@ -356,7 +367,7 @@ mod tests {
             step("com.example.plugin", held, true),
             step(actions::NEXT_PAGE, None, false),
         ];
-        let cancel = start(steps, 1, "page.0".into(), tx).unwrap();
+        let cancel = start(steps, 1, "page.0".into(), tx, Gate::default()).unwrap();
         assert!(matches!(
             rx.recv(),
             Ok(Msg::PluginStep { pressed: true, .. })
@@ -372,6 +383,51 @@ mod tests {
                 cancelled: true,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn a_locked_computer_passes_over_steps_that_act_on_the_machine() {
+        let (tx, rx) = channel();
+        let quick = Some(ActionDelays { press: 1, next: 1 });
+        let gate = Gate::new(true);
+        gate.set_locked(true);
+        let steps = vec![
+            // No key is recorded, so even a failure types nothing.
+            step(actions::HOTKEY, quick, false),
+            step("com.example.plugin", quick, true),
+            step(actions::NEXT_PAGE, quick, false),
+        ];
+        let _cancel = start(steps, 7, "page.0".into(), tx, gate).unwrap();
+        assert!(matches!(
+            rx.recv(),
+            Ok(Msg::Outcome(7, Ok(actions::Outcome::NextPage)))
+        ));
+        // Counted as cancelled: no OK mark, and a switch keeps its side.
+        assert!(matches!(
+            rx.recv(),
+            Ok(Msg::RunDone {
+                cancelled: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_plugin_pressed_before_the_lock_still_hears_the_release() {
+        let (tx, rx) = channel();
+        let held = Some(ActionDelays { press: 50, next: 1 });
+        let gate = Gate::new(true);
+        let steps = vec![step("com.example.plugin", held, true)];
+        let _cancel = start(steps, 1, "page.0".into(), tx, gate.clone()).unwrap();
+        assert!(matches!(
+            rx.recv(),
+            Ok(Msg::PluginStep { pressed: true, .. })
+        ));
+        gate.set_locked(true);
+        assert!(matches!(
+            rx.recv(),
+            Ok(Msg::PluginStep { pressed: false, .. })
         ));
     }
 }

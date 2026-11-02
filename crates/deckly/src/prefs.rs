@@ -617,12 +617,34 @@ impl Preferences {
             self.scan(ui.ctx(), env, path, None);
         }
 
-        label(ui, o, 234.0, 22.0, "About:");
+        self.lock_keys(ui, o, env);
+
+        label(ui, o, 287.0, 22.0, "About:");
         let text = "Deckly is an independent app. It is not made, approved or \
                     supported by Elgato or Corsair.";
-        value_dim(ui, o, VALUE_X, 237.0, 440.0, text);
+        value_dim(ui, o, VALUE_X, 290.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
+    }
+
+    /// Whether keys stop acting on the machine on the lock screen.
+    fn lock_keys(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        label(ui, o, 215.0, 22.0, "Lock Screen:");
+        let mut s = runtime::lock(env.state);
+        let mut on = s.settings.lock_keys;
+        let text = "Lock keys while the computer is locked";
+        if checkbox(ui, at(o, VALUE_X, 216.0, 280.0, 20.0), &mut on, text).changed() {
+            s.settings.lock_keys = on;
+            s.save_settings();
+            let _ = env.runtime.send(Msg::Settings);
+        }
+        let note = if s.gate.undetected() {
+            "This system does not report its lock screen, so keys stay active there."
+        } else {
+            "Text, Hotkey, Open, Website, Multimedia and plugin keys do nothing until \
+             you unlock. Page, folder, profile and device keys keep working."
+        };
+        value_dim(ui, o, VALUE_X, 240.0, 440.0, note);
     }
 
     fn create_backup(&mut self, ctx: &egui::Context, env: &Env<'_>) {

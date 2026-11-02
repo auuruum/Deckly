@@ -7,7 +7,8 @@
 //! the runtime re-renders only keys whose image changed.
 
 use crate::actions::{self, Outcome};
-use crate::os::tray;
+use crate::lock_gate::Gate;
+use crate::os::{screen_lock, tray};
 use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
 use crate::sequence::{self, Press, Step};
@@ -43,12 +44,15 @@ pub struct State {
     pub plugin_keys: HashMap<String, plugins::PluginKey>,
     /// The profile a device showed before its current one, by serial.
     pub previous: HashMap<String, String>,
+    /// Holds actions back while the computer is locked.
+    pub gate: Gate,
 }
 
 impl State {
     pub fn new(mut profiles: Vec<Profile>, settings: Settings) -> Self {
         settings.sort_profiles(&mut profiles);
         Self {
+            gate: Gate::new(settings.lock_keys),
             profiles,
             settings,
             devices: Vec::new(),
@@ -465,6 +469,8 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
     let device_tx = tx.clone();
     let action_tx = tx.clone();
     let step_tx = tx.clone();
+    let gate = lock(&state).gate.clone();
+    screen_lock::watch(gate.clone());
     let run = move || {
         // DECKLY_NO_DEVICES=1 runs the editor without opening any device,
         // e.g. while the official app owns it.
@@ -475,10 +481,11 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 let _ = device_tx.send(Msg::Device(e));
             }))
         };
-        let actions = start_action_worker(action_tx);
+        let actions = start_action_worker(action_tx, gate.clone());
         let mut renderer = Renderer::new();
         let mut links: Links = HashMap::new();
         let mut groups = Groups::default();
+        let mut held_back = HashSet::new();
         // DECKLY_DEBUG=1 prints device events and action results to stderr.
         let debug = std::env::var_os("DECKLY_DEBUG").is_some();
         loop {
@@ -560,6 +567,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                         .collect();
                     drop(s);
                     groups.presses.retain(|_, p| p.handle != handle);
+                    held_back.retain(|&(h, _)| h != handle);
                     let link = links.remove(&handle);
                     if let (Some(host), Some(link)) = (&host, link) {
                         for shown in link.shown.iter().flatten().chain(link.members.values()) {
@@ -576,7 +584,9 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     key,
                     pressed,
                 }) => {
-                    match key_event(&state, &devices, &mut links, handle, key, pressed) {
+                    let hit = key_event(&state, &devices, &mut links, handle, key, pressed)
+                        .filter(|hit| admitted(&gate, &mut held_back, handle, hit, pressed));
+                    match hit {
                         Some(hit) if !hit.config.groups.is_empty() => {
                             let tools = Tools {
                                 state: &state,
@@ -697,6 +707,7 @@ fn connect(state: &Shared, info: &ConnectedDevice) {
 /// Changing preferences also wakes a sleeping device.
 fn apply_settings(state: &Shared, devices: &DeviceManager, links: &mut Links) {
     let s = lock(state);
+    s.gate.set_enabled(s.settings.lock_keys);
     for (&handle, link) in links.iter_mut() {
         let prefs = s.settings.device(&link.serial);
         if !prefs.enabled {
@@ -770,6 +781,29 @@ fn key_event(
     }
     s.pressed.insert((handle, key));
     s.key(&link.serial, key).map(|c| hit(&s, c))
+}
+
+/// Whether a key's action hears this change. Decided at the press and kept
+/// through the release: a plugin must hear the release of a press it heard
+/// and only that, whatever the lock did in between.
+fn admitted(
+    gate: &Gate,
+    held_back: &mut HashSet<(Handle, u8)>,
+    handle: Handle,
+    hit: &KeyHit,
+    pressed: bool,
+) -> bool {
+    let key = (handle, hit.index);
+    if !pressed {
+        return !held_back.remove(&key);
+    }
+    if gate.blocks(&hit.config.action) {
+        held_back.insert(key);
+        return false;
+    }
+    // A release lost to a page change must not silence a later one.
+    held_back.remove(&key);
+    true
 }
 
 /// Sends a plugin key's press or release to its plugin. An action with
@@ -884,8 +918,10 @@ fn start_run(tools: &Tools, groups: &mut Groups, handle: Handle, hit: &KeyHit) {
             })
         })
         .collect();
+    let gate = s.gate.clone();
     drop(s);
-    if let Some(run) = sequence::start(steps, handle, hit.context.clone(), tools.results.clone()) {
+    let results = tools.results.clone();
+    if let Some(run) = sequence::start(steps, handle, hit.context.clone(), results, gate) {
         groups.runs.insert(hit.context.clone(), run);
     }
 }
@@ -945,6 +981,7 @@ fn trigger(
         lock(tools.state).mark_key(context, plugins::Mark::Alert);
         return;
     };
+    let gate = lock(tools.state).gate.clone();
     if slot == sequence::SINGLE {
         step.key.delays = Some(deckly_core::ActionDelays {
             press: sequence::TAP,
@@ -955,8 +992,14 @@ fn trigger(
             handle,
             context.to_owned(),
             tools.results.clone(),
+            gate,
         ) {
             groups.runs.insert(context.to_owned(), run);
+        }
+    } else if gate.blocks(&step.key.action) {
+        // Its release must not reach a plugin that never heard the press.
+        if let Some(pending) = groups.presses.get_mut(context) {
+            pending.press.take_down();
         }
     } else if step.plugin {
         plugin_step(tools.state, tools.host, tools.links, handle, &step, true);
@@ -1173,11 +1216,15 @@ fn sleep_after(settings: &Settings, serial: &str) -> Option<Duration> {
 }
 
 /// Runs actions off the runtime thread: opening a program can take a while
-/// and must not delay key images or other key presses.
-fn start_action_worker(results: Sender<Msg>) -> Sender<(Handle, KeyConfig)> {
+/// and must not delay key images or other key presses. The gate is asked here
+/// too, for the computer locking while an action waits in the queue.
+fn start_action_worker(results: Sender<Msg>, gate: Gate) -> Sender<(Handle, KeyConfig)> {
     let (tx, rx) = channel::<(Handle, KeyConfig)>();
     let run = move || {
         while let Ok((handle, key)) = rx.recv() {
+            if gate.blocks(&key.action) {
+                continue;
+            }
             let outcome = actions::run(&key);
             if results.send(Msg::Outcome(handle, outcome)).is_err() {
                 return;
@@ -1522,6 +1569,118 @@ mod tests {
         bench.key(&key, false);
         assert!(bench.groups.presses.is_empty());
         assert!(bench.groups.runs.is_empty());
+    }
+
+    fn hit(action: &str) -> KeyHit {
+        KeyHit {
+            config: KeyConfig::new(action, json!({})),
+            index: 0,
+            plugin: false,
+            context: "p.0".into(),
+        }
+    }
+
+    #[test]
+    fn a_press_held_back_stays_held_back_through_its_release() {
+        let gate = Gate::new(true);
+        let mut held = HashSet::new();
+        let plugin = hit("com.example.plugin");
+        gate.set_locked(true);
+        assert!(!admitted(&gate, &mut held, 1, &plugin, true));
+        gate.set_locked(false);
+        assert!(!admitted(&gate, &mut held, 1, &plugin, false));
+        // Unlocked, the same key works in full again.
+        assert!(admitted(&gate, &mut held, 1, &plugin, true));
+        assert!(admitted(&gate, &mut held, 1, &plugin, false));
+    }
+
+    #[test]
+    fn a_release_after_locking_still_reaches_a_press_heard_before() {
+        let gate = Gate::new(true);
+        let mut held = HashSet::new();
+        let plugin = hit("com.example.plugin");
+        assert!(admitted(&gate, &mut held, 1, &plugin, true));
+        gate.set_locked(true);
+        assert!(admitted(&gate, &mut held, 1, &plugin, false));
+    }
+
+    #[test]
+    fn a_lost_release_does_not_silence_the_next_one() {
+        let gate = Gate::new(true);
+        let mut held = HashSet::new();
+        let plugin = hit("com.example.plugin");
+        gate.set_locked(true);
+        admitted(&gate, &mut held, 1, &plugin, true);
+        gate.set_locked(false);
+        // The page changed under the key, so its release never came here.
+        assert!(admitted(&gate, &mut held, 1, &plugin, true));
+        assert!(admitted(&gate, &mut held, 1, &plugin, false));
+    }
+
+    #[test]
+    fn device_keys_and_sequences_are_admitted_while_locked() {
+        let gate = Gate::new(true);
+        let mut held = HashSet::new();
+        gate.set_locked(true);
+        for action in [
+            actions::NEXT_PAGE,
+            actions::MULTI_ACTION,
+            actions::KEY_LOGIC,
+        ] {
+            assert!(
+                admitted(&gate, &mut held, 1, &hit(action), true),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_action_worker_passes_over_what_the_gate_blocks() {
+        let (results, outcomes) = channel();
+        let gate = Gate::new(true);
+        gate.set_locked(true);
+        let worker = start_action_worker(results, gate.clone());
+        // No key is recorded, so even a failure types nothing.
+        let blocked = KeyConfig::new(actions::HOTKEY, json!({}));
+        worker.send((1, blocked.clone())).unwrap();
+        worker
+            .send((1, KeyConfig::new(actions::NEXT_PAGE, json!({}))))
+            .unwrap();
+        assert!(matches!(
+            outcomes.recv(),
+            Ok(Msg::Outcome(1, Ok(Outcome::NextPage)))
+        ));
+        gate.set_locked(false);
+        worker.send((1, blocked)).unwrap();
+        assert!(matches!(outcomes.recv(), Ok(Msg::Outcome(1, Err(_)))));
+    }
+
+    #[test]
+    fn key_logic_holds_back_a_blocked_slot_and_its_release() {
+        let mut bench = Bench::new();
+        let mut key = KeyConfig::new(actions::KEY_LOGIC, json!({}));
+        key.groups[sequence::DOUBLE].push(KeyConfig::new(actions::HOTKEY, json!({})));
+        lock(&bench.state).gate.set_locked(true);
+        for pressed in [true, false, true] {
+            bench.key(&key, pressed);
+        }
+        assert!(bench.actions_rx.try_recv().is_err());
+        assert!(bench.groups.presses.is_empty());
+        bench.key(&key, false);
+        assert!(bench.groups.presses.is_empty());
+    }
+
+    #[test]
+    fn key_logic_still_runs_device_actions_while_locked() {
+        let mut bench = Bench::new();
+        let mut key = KeyConfig::new(actions::KEY_LOGIC, json!({}));
+        key.groups[sequence::DOUBLE].push(KeyConfig::new(actions::NEXT_PAGE, json!({})));
+        lock(&bench.state).gate.set_locked(true);
+        for pressed in [true, false, true] {
+            bench.key(&key, pressed);
+        }
+        let (_, member) = bench.actions_rx.try_recv().unwrap();
+        assert_eq!(member.action, actions::NEXT_PAGE);
     }
 
     #[test]
