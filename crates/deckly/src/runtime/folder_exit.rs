@@ -483,7 +483,7 @@ mod tests {
                 assert_eq!(lock(&state).folder_exit.deadline(), None);
             }
         }
-        assert_eq!(rx.try_recv().unwrap().1.action, actions::BRIGHTNESS);
+        assert_eq!(rx.try_recv().unwrap().2.action, actions::BRIGHTNESS);
         assert!(lock(&state).expire_folder_exits(Instant::now()));
     }
 }

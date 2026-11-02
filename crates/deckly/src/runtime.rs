@@ -20,7 +20,7 @@ use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, LockLook, Orientation, Page, Profile, Settings, TitleStyle,
 };
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
-use deckly_plugin_host::{Host, Instance, protocol};
+use deckly_plugin_host::{Host, Instance, Status, protocol};
 use image::RgbaImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
@@ -416,6 +416,12 @@ impl State {
         self.notice = Some((text.into(), Instant::now()));
     }
 
+    /// An action failed: the editor says why, its key shows that it did.
+    fn fail(&mut self, context: &str, why: impl Into<String>) {
+        self.notify(why);
+        self.mark_key(context, plugins::Mark::Alert);
+    }
+
     fn key(&self, serial: &str, key: u8) -> Option<KeyConfig> {
         let profile = self.assigned(serial)?;
         self.shown(profile)?.keys.get(&key).cloned()
@@ -449,7 +455,8 @@ pub enum Msg {
     /// Another application reached the foreground, or that cannot be known
     /// here.
     ActiveWindow(Result<Vec<String>, String>),
-    Outcome(Handle, Result<Outcome, String>),
+    /// An action ended; the context is of the key that shows a failure.
+    Outcome(Handle, String, Result<Outcome, String>),
     /// A sequence pressed or released a plugin action.
     PluginStep {
         handle: Handle,
@@ -471,6 +478,10 @@ pub enum Msg {
 }
 
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
+
+/// An action to run: the device, the context of the key that shows a failure,
+/// and the action.
+type Job = (Handle, String, KeyConfig);
 
 /// What the runtime knows about one connected device.
 struct Link {
@@ -639,7 +650,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
             if debug {
                 match &msg {
                     Msg::Device(e) => eprintln!("deckly: {e:?}"),
-                    Msg::Outcome(h, r) => eprintln!("deckly: device {h} action result {r:?}"),
+                    Msg::Outcome(h, _, r) => eprintln!("deckly: device {h} action result {r:?}"),
                     _ => {}
                 }
             }
@@ -730,7 +741,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                             plugin_key(&state, host.as_ref(), &links, handle, &hit, pressed);
                         }
                         Some(hit) if pressed => {
-                            let _ = actions.send((handle, hit.config));
+                            let _ = actions.send((handle, hit.context, hit.config));
                         }
                         _ => {}
                     }
@@ -774,15 +785,15 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     lock(&state).follower.set_error(e);
                     repaint();
                 }
-                Msg::Outcome(handle, Ok(Outcome::Sleep)) => {
+                Msg::Outcome(handle, _, Ok(Outcome::Sleep)) => {
                     let awake = links.get(&handle).is_some_and(|l| l.enabled && !l.asleep);
                     if awake {
                         put_to_sleep(&state, &devices, &mut links, vec![handle]);
                     }
                     repaint();
                 }
-                Msg::Outcome(handle, result) => {
-                    apply_outcome(&state, &devices, handle, result);
+                Msg::Outcome(handle, context, result) => {
+                    apply_outcome(&state, &devices, handle, &context, result);
                     refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
@@ -1024,13 +1035,17 @@ fn plugin_key(
     };
     let mut s = lock(state);
     let context = &hit.context;
-    let Some((plugin, states, automatic)) = s
-        .catalog
-        .action(&hit.config.action)
-        .map(|(p, a)| (p.id.clone(), a.states.len(), a.automatic_states))
+    let Some((plugin, states, automatic, running)) =
+        s.catalog.action(&hit.config.action).map(|(p, a)| {
+            let running = p.status == Status::Running;
+            (p.id.clone(), a.states.len(), a.automatic_states, running)
+        })
     else {
         return;
     };
+    if pressed && !running {
+        s.mark_key(context, plugins::Mark::Alert);
+    }
     let mut instance = s.instance(context, &hit.config);
     instance.device = protocol::device_id(&link.serial);
     host.send(
@@ -1079,7 +1094,7 @@ fn plugin_step(
 /// What a Multi Action or Key Logic key needs from the runtime.
 struct Tools<'a> {
     state: &'a Shared,
-    actions: &'a Sender<(Handle, KeyConfig)>,
+    actions: &'a Sender<Job>,
     host: Option<&'a Host>,
     links: &'a Links,
     results: &'a Sender<Msg>,
@@ -1106,7 +1121,11 @@ fn start_run(tools: &Tools, groups: &mut Groups, handle: Handle, hit: &KeyHit) {
         lock(tools.state).mark_key(&hit.context, plugins::Mark::Alert);
         return;
     };
-    let s = lock(tools.state);
+    let mut s = lock(tools.state);
+    // An Alert from an earlier run says nothing about this one.
+    if let Some(key) = s.plugin_keys.get_mut(&hit.context) {
+        key.mark = None;
+    }
     let steps = members
         .into_iter()
         .filter_map(|i| {
@@ -1239,7 +1258,7 @@ fn trigger(
     } else if step.plugin {
         plugin_step(tools.state, tools.host, tools.links, handle, &step, true);
     } else {
-        let _ = tools.actions.send((handle, step.key));
+        let _ = tools.actions.send((handle, context.to_owned(), step.key));
     }
 }
 
@@ -1459,15 +1478,18 @@ fn sleep_after(settings: &Settings, serial: &str) -> Option<Duration> {
 /// Runs actions off the runtime thread: opening a program can take a while
 /// and must not delay key images or other key presses. The gate is asked here
 /// too, for the computer locking while an action waits in the queue.
-fn start_action_worker(results: Sender<Msg>, gate: Gate) -> Sender<(Handle, KeyConfig)> {
-    let (tx, rx) = channel::<(Handle, KeyConfig)>();
+fn start_action_worker(results: Sender<Msg>, gate: Gate) -> Sender<Job> {
+    let (tx, rx) = channel::<Job>();
     let run = move || {
-        while let Ok((handle, key)) = rx.recv() {
+        while let Ok((handle, context, key)) = rx.recv() {
             if gate.blocks(&key.action) {
                 continue;
             }
             let outcome = actions::run(&key);
-            if results.send(Msg::Outcome(handle, outcome)).is_err() {
+            if results
+                .send(Msg::Outcome(handle, context, outcome))
+                .is_err()
+            {
                 return;
             }
         }
@@ -1485,6 +1507,7 @@ fn apply_outcome(
     state: &Shared,
     devices: &DeviceManager,
     handle: Handle,
+    context: &str,
     result: Result<Outcome, String>,
 ) {
     let mut s = lock(state);
@@ -1519,7 +1542,7 @@ fn apply_outcome(
                 path.push(id);
                 s.set_folder_path(&profile_id, path);
             } else {
-                s.notify("Folder: this folder cannot be opened");
+                s.fail(context, "Folder: this folder cannot be opened");
             }
         }
         Ok(Outcome::ParentFolder) => {
@@ -1530,7 +1553,7 @@ fn apply_outcome(
             if s.profile(&id).is_some() {
                 s.assign(&serial, id);
             } else {
-                s.notify("Switch Profile: that profile no longer exists");
+                s.fail(context, "Switch Profile: that profile no longer exists");
             }
         }
         Ok(Outcome::Brightness(change)) => {
@@ -1540,7 +1563,7 @@ fn apply_outcome(
             devices.set_brightness(handle, brightness);
             s.save_settings();
         }
-        Err(e) => s.notify(e),
+        Err(e) => s.fail(context, e),
     }
 }
 
@@ -1720,8 +1743,8 @@ mod tests {
 
     struct Bench {
         state: Shared,
-        actions: Sender<(Handle, KeyConfig)>,
-        actions_rx: std::sync::mpsc::Receiver<(Handle, KeyConfig)>,
+        actions: Sender<Job>,
+        actions_rx: std::sync::mpsc::Receiver<Job>,
         results: Sender<Msg>,
         results_rx: std::sync::mpsc::Receiver<Msg>,
         links: Links,
@@ -1799,6 +1822,71 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_action_shows_an_alert_on_any_kind_of_key() {
+        let (state, devices, _) = one_device(Settings::default());
+        {
+            let mut s = lock(&state);
+            let (id, model) = (s.profiles[0].id.clone(), s.profiles[0].model());
+            s.devices.push(ConnectedDevice {
+                handle: 1,
+                model,
+                serial: "S1".into(),
+                firmware: None,
+            });
+            s.settings.assignments.insert("S1".into(), id);
+        }
+        let empty_url = KeyConfig::new(actions::WEBSITE, json!({"url": "https://"}));
+        let gone = KeyConfig::new(actions::SWITCH_PROFILE, json!({"profile": "gone"}));
+        let empty_text = KeyConfig::new(actions::TEXT, json!({}));
+        for (context, key) in [("p.0", empty_url), ("p.1", gone), ("p.2", empty_text)] {
+            apply_outcome(&state, &devices, 1, context, actions::run(&key));
+            let mut s = lock(&state);
+            assert_eq!(
+                s.overlay(context, &key).and_then(|o| o.mark),
+                Some(plugins::Mark::Alert)
+            );
+            assert!(s.notice.take().is_some());
+        }
+        // A key that worked shows nothing.
+        let fine = KeyConfig::new(actions::NEXT_PAGE, json!({}));
+        apply_outcome(&state, &devices, 1, "p.3", actions::run(&fine));
+        assert!(lock(&state).overlay("p.3", &fine).is_none());
+    }
+
+    #[test]
+    fn a_run_with_a_failed_step_ends_on_an_alert_until_the_next_run() {
+        let mut bench = Bench::new();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let mut key = KeyConfig::new(actions::MULTI_ACTION, json!({}));
+        key.groups[0].push(KeyConfig::new(actions::NEXT_PAGE, json!({})));
+        profile.pages[0].keys.insert(0, key.clone());
+        let context = plugins::context(&profile.pages[0].id, 0);
+        lock(&bench.state).profiles.push(profile);
+        let mark = |state: &Shared| lock(state).overlay(&context, &key).and_then(|o| o.mark);
+        lock(&bench.state).fail(&context, "step failed");
+        lock(&bench.state).finish_run(&context, false);
+        assert_eq!(mark(&bench.state), Some(plugins::Mark::Alert));
+        let tools = Tools {
+            state: &bench.state,
+            actions: &bench.actions,
+            host: None,
+            links: &bench.links,
+            results: &bench.results,
+        };
+        let hit = KeyHit {
+            config: key.clone(),
+            index: 0,
+            plugin: false,
+            context: context.clone(),
+            exit: None,
+        };
+        start_run(&tools, &mut bench.groups, 1, &hit);
+        assert_eq!(mark(&bench.state), None);
+        lock(&bench.state).finish_run(&context, false);
+        assert_eq!(mark(&bench.state), Some(plugins::Mark::Ok));
+    }
+
+    #[test]
     fn key_logic_runs_the_action_of_a_double_press() {
         let mut bench = Bench::new();
         let mut key = KeyConfig::new(actions::KEY_LOGIC, json!({}));
@@ -1806,7 +1894,7 @@ mod tests {
         for pressed in [true, false, true] {
             bench.key(&key, pressed);
         }
-        let (_, member) = bench.actions_rx.try_recv().unwrap();
+        let (_, _, member) = bench.actions_rx.try_recv().unwrap();
         assert_eq!(member.action, actions::NEXT_PAGE);
         bench.key(&key, false);
         assert!(bench.groups.presses.is_empty());
@@ -2120,17 +2208,19 @@ mod tests {
         let worker = start_action_worker(results, gate.clone());
         // No key is recorded, so even a failure types nothing.
         let blocked = KeyConfig::new(actions::HOTKEY, json!({}));
-        worker.send((1, blocked.clone())).unwrap();
-        worker
-            .send((1, KeyConfig::new(actions::NEXT_PAGE, json!({}))))
-            .unwrap();
+        worker.send((1, "p.0".into(), blocked.clone())).unwrap();
+        let next = KeyConfig::new(actions::NEXT_PAGE, json!({}));
+        worker.send((1, "p.1".into(), next)).unwrap();
         assert!(matches!(
             outcomes.recv(),
-            Ok(Msg::Outcome(1, Ok(Outcome::NextPage)))
+            Ok(Msg::Outcome(1, _, Ok(Outcome::NextPage)))
         ));
         gate.set_locked(false);
-        worker.send((1, blocked)).unwrap();
-        assert!(matches!(outcomes.recv(), Ok(Msg::Outcome(1, Err(_)))));
+        worker.send((1, "p.0".into(), blocked)).unwrap();
+        assert!(matches!(
+            outcomes.recv(),
+            Ok(Msg::Outcome(1, context, Err(_))) if context == "p.0"
+        ));
     }
 
     #[test]
@@ -2157,7 +2247,7 @@ mod tests {
         for pressed in [true, false, true] {
             bench.key(&key, pressed);
         }
-        let (_, member) = bench.actions_rx.try_recv().unwrap();
+        let (_, _, member) = bench.actions_rx.try_recv().unwrap();
         assert_eq!(member.action, actions::NEXT_PAGE);
     }
 
