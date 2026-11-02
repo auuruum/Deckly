@@ -236,6 +236,8 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, background: Rc<Background>) -> Self {
         apply(&cc.egui_ctx);
+        let prefs = Preferences::new();
+        prefs.offer_import(&cc.egui_ctx, &background.state);
         Self {
             state: background.state.clone(),
             runtime: background.runtime.clone(),
@@ -267,7 +269,7 @@ impl App {
             history_shortcut: None,
             dirty: HashSet::new(),
             last_edit: Instant::now(),
-            prefs: Preferences::new(),
+            prefs,
             rename: None,
             folder_nav: None,
             split: DEFAULT_SPLIT,

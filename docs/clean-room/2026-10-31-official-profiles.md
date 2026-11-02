@@ -110,8 +110,25 @@
   over. They begin `@ByteArray(`, and what follows is not JSON and differs in its
   first byte from plugin to plugin. They were not decoded further.
 
+### Devices setting (read 2026-11-02, same app and host)
+
+- The registry value `Devices` holds a map per device, keyed by the device id
+  above for real devices and by a UUID for virtual ones, then the top-level key
+  `PreferredDevice` with a real device's id as its value. Each device's map has
+  `DeviceName` and may have `ESDProfilesInfo`, which holds `ESDProfilesPreferred`
+  (one profile UUID in lowercase), `ESDProfilesSorting` and `ESDProfilesExpanded`.
+  Beside it are `map_dev_brightness`, `map_dev_orientation`, `map_dev_enabled`
+  and `map_dev_sleep_wallpaper_path`.
+- The serial in a real device's id equals the serial Deckly reads from that
+  device: compared on the owner's MK.2, without printing it.
+- Checked by `official::tests::each_real_device_keeps_its_profile`, on invented
+  data.
+
 ## Inferred
 
+- `ESDProfilesPreferred` is the profile the app shows on that device. It was
+  read only, and on the one real device it is also first in the sorting, so
+  the meaning rests on the name.
 - `PageIndex` counts from 1: keys in three profiles of two pages hold 2.
 - `actionIdx` follows the order the code loads the list in: Previous Track, Play
   / Pause, Next Track, Stop, Mute, Increase Volume, Decrease Volume. A missing
@@ -140,6 +157,10 @@
   installed, so the key works once it is. Official built-in actions without a
   Deckly counterpart (Close, Timer, Play Audio and others) are kept the same way
   and listed in the result.
+- A device takes the official app's `ESDProfilesPreferred` profile only if it
+  shows nothing of the user's yet and the profile is for its model, so importing
+  again later moves no device. Checked by
+  `runtime::tests::a_device_takes_its_official_profile_unless_it_has_one_of_the_users`.
 - A website address without a scheme gets `https://`.
 - Pictures are copied to `images/<profile>/<page>/` in the settings folder and
   removed with the profile.
@@ -174,8 +195,22 @@
 - General tab, import dialog and result dialog seen in the running app, with
   `DECKLY_NO_DEVICES=1`.
 
+## Run with real data (2026-11-02, Windows 10 22H2)
+
+- The first start's scan of the data folder through a temporary test, against an
+  empty settings folder with an empty profile on the owner's MK.2: 114 ms in a
+  debug build, 7 profiles, 717 keys and 24 plugins offered. After the import, with
+  plugins left out, the device was on its `ESDProfilesPreferred` profile and the
+  empty one was gone.
+- The welcome window rendered off screen. It was not seen in the running app.
+
 ## Unknowns and next steps
 
+- Whether the official app and Deckly agree on `ESDProfilesPreferred`: it was
+  not compared with what the official app shows after switching profiles.
+- `Devices` is read on Windows only, so on macOS a device starts on the first
+  profile for its model.
+- Brightness, orientation and device names in `Devices` are not imported.
 - Not run: an import or backup with plugins through the running app's plugin
   host, and restoring on Linux or macOS. Those platforms were compile-checked.
 - The macOS data folder is taken from the public plugin documentation and

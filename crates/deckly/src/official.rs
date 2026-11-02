@@ -77,26 +77,39 @@ pub fn folder_id(name: &str) -> Option<String> {
     Some(uuid::Uuid::from_u128(bits).hyphenated().to_string())
 }
 
-/// Profile ids in the order the official app lists them. `value` is its
-/// `Devices` setting: Qt's `@Variant(` form as UTF-16, one unit per byte of a
-/// data stream with a map for each device. After a device's sorting key come
-/// the value's type, then the ids as one text.
-pub fn profile_order(value: &[u8]) -> Vec<String> {
-    const VARIANT_TYPE: usize = 4;
-    let stream: Vec<u8> = value
+/// Bytes between a key in the `Devices` setting and the text it holds.
+const VARIANT_TYPE: usize = 4;
+
+/// The data stream in the official app's `Devices` setting: Qt's `@Variant(`
+/// form as UTF-16, one unit per byte of a stream with a map for each device.
+fn devices_stream(value: &[u8]) -> Vec<u8> {
+    value
         .as_chunks::<2>()
         .0
         .iter()
         .map(|[low, _]| *low)
-        .collect();
-    let key: Vec<u8> = "ESDProfilesSorting"
-        .encode_utf16()
-        .flat_map(u16::to_be_bytes)
-        .collect();
+        .collect()
+}
+
+/// A text as it stands in the stream, without its length.
+fn stream_bytes(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(u16::to_be_bytes).collect()
+}
+
+fn find(stream: &[u8], bytes: &[u8]) -> Option<usize> {
+    stream.windows(bytes.len()).position(|w| w == bytes)
+}
+
+/// Profile ids in the order the official app lists them. `value` is its
+/// `Devices` setting. After a device's sorting key come the value's type,
+/// then the ids as one text.
+pub fn profile_order(value: &[u8]) -> Vec<String> {
+    let stream = devices_stream(value);
+    let key = stream_bytes("ESDProfilesSorting");
     let mut seen = HashSet::new();
     let mut order = Vec::new();
     let mut rest = stream.as_slice();
-    while let Some(at) = rest.windows(key.len()).position(|w| w == key) {
+    while let Some(at) = find(rest, &key) {
         rest = rest.get(at + key.len()..).unwrap_or_default();
         if let Some(ids) = rest.get(VARIANT_TYPE..).and_then(stream_text) {
             order.extend(
@@ -107,6 +120,56 @@ pub fn profile_order(value: &[u8]) -> Vec<String> {
         }
     }
     order
+}
+
+/// A real device and the profile the official app keeps for it.
+pub struct Preferred {
+    pub serial: String,
+    pub kind: DeviceKind,
+    pub profile: String,
+}
+
+/// The profile of each real device, from the same `Devices` setting. A map
+/// follows the device's id and holds the profile as `ESDProfilesPreferred`.
+/// The id comes again as the value of `PreferredDevice`, behind the maps of
+/// all real devices, so a device's first map counts.
+pub fn preferred_profiles(value: &[u8]) -> Vec<Preferred> {
+    const MAX_SERIAL_BYTES: usize = 64;
+    let stream = devices_stream(value);
+    let device = stream_bytes("@(1)[");
+    let key = stream_bytes("ESDProfilesPreferred");
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    let mut rest = stream.as_slice();
+    while let Some(at) = find(rest, &device) {
+        // The length of the id comes right before it.
+        let id = at
+            .checked_sub(4)
+            .and_then(|start| rest.get(start..))
+            .and_then(stream_text);
+        rest = rest.get(at + device.len()..).unwrap_or_default();
+        let map = find(rest, &device).map_or(Some(rest), |end| rest.get(..end));
+        let profile = map
+            .and_then(|map| map.get(find(map, &key)? + key.len() + VARIANT_TYPE..))
+            .and_then(stream_text)
+            .and_then(|text| folder_id(&text));
+        let (Some(id), Some(profile)) = (id, profile) else {
+            continue;
+        };
+        if let Some((kind, serial)) = device_from_id(&id)
+            && !serial.is_empty()
+            && serial.len() <= MAX_SERIAL_BYTES
+            && seen.insert(serial.to_owned())
+        {
+            let serial = serial.to_owned();
+            found.push(Preferred {
+                serial,
+                kind,
+                profile,
+            });
+        }
+    }
+    found
 }
 
 /// A text in a Qt data stream: its length in bytes, then UTF-16 big-endian.
@@ -140,15 +203,15 @@ pub fn model_kind(code: &str) -> Option<DeviceKind> {
 
 /// A real device's id reads `@(1)[vendor/product/serial]`, which names the
 /// exact model; files for any device of a kind have a UUID or nothing.
-fn device_from_id(id: &str) -> Option<DeviceKind> {
+fn device_from_id(id: &str) -> Option<(DeviceKind, &str)> {
     let inner = id.split_once('[')?.1.strip_suffix(']')?;
     let mut parts = inner.split('/');
     let vendor: u16 = parts.next()?.parse().ok()?;
     let product: u16 = parts.next()?.parse().ok()?;
-    (vendor == ELGATO_VENDOR_ID)
+    let model = (vendor == ELGATO_VENDOR_ID)
         .then(|| DeviceModel::from_product_id(product))
-        .flatten()
-        .map(|m| m.kind)
+        .flatten()?;
+    Some((model.kind, parts.next().unwrap_or_default()))
 }
 
 fn text<'a>(v: &'a Value, field: &str) -> &'a str {
@@ -177,6 +240,7 @@ pub fn convert(
     let device = raw.manifest.get("Device").unwrap_or(&Value::Null);
     let code = text(device, "Model");
     let kind = device_from_id(text(device, "UUID"))
+        .map(|(kind, _)| kind)
         .or_else(|| model_kind(code))
         .ok_or_else(|| format!("device model \"{code}\" is not supported"))?;
     let page_list = raw.manifest.get("Pages").unwrap_or(&Value::Null);
@@ -761,6 +825,64 @@ mod tests {
         // Cut inside the ids, past the length that announces them.
         value.truncate(value.len() - 20);
         assert!(profile_order(&value).is_empty());
+    }
+
+    #[test]
+    fn each_real_device_keeps_its_profile() {
+        let one = "b9433aac-8ce9-47ad-aa83-9bce812883f0";
+        let two = "e5a67a77-94c9-40b8-a913-0399e1c9e40a";
+        let virtual_deck = "10b1491f-6147-4d97-b782-3eb82311afe6";
+        let text = |s: &str| {
+            let bytes = stream_bytes(s);
+            [(bytes.len() as u32).to_be_bytes().to_vec(), bytes].concat()
+        };
+        let preferred = |id: &str| {
+            let variant = [0, 0, 0, 10];
+            [
+                text("ESDProfilesPreferred"),
+                variant.to_vec(),
+                text(id),
+                vec![0; 8],
+            ]
+            .concat()
+        };
+        let stream = [
+            text("@(0)[]"),
+            preferred(one),
+            text("@(1)[4057/128/SERIALONE]"),
+            preferred(one),
+            // A model Deckly does not know, and a device with no profile.
+            text("@(1)[4057/1/SERIALOLD]"),
+            preferred(one),
+            text("@(1)[4057/128/NOPROFILE]"),
+            text("@(1)[4057/108/SERIALTWO]"),
+            preferred(two),
+            // The value of `PreferredDevice`, then a virtual device.
+            text("PreferredDevice"),
+            text("@(1)[4057/128/SERIALONE]"),
+            text("a96f2ce6-92b8-4281-aa07-8853f2df5c40"),
+            preferred(virtual_deck),
+        ]
+        .concat();
+        let value: Vec<u8> = stream.into_iter().flat_map(|b| [b, 0]).collect();
+        let found = preferred_profiles(&value);
+        let found: Vec<_> = found
+            .iter()
+            .map(|p| (p.serial.as_str(), p.kind, p.profile.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("SERIALONE", DeviceKind::Mk2, one),
+                ("SERIALTWO", DeviceKind::Xl, two)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_damaged_devices_setting_keeps_no_profile() {
+        assert!(preferred_profiles(b"").is_empty());
+        assert!(preferred_profiles(&devices_setting(&["x"])).is_empty());
     }
 
     #[test]

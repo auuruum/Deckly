@@ -4,8 +4,9 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## First run
 
-- [ ] Find the official app on first start and offer a one-click import. The
-      import exists already ("Import Everything…" in Preferences).
+- [x] Find the official app on first start and offer a one-click import.
+      Done: while Deckly holds nothing of the user's, a welcome window offers
+      everything it found. "Import Everything…" in Preferences stays for later.
 
 ## Profiles
 
