@@ -11,6 +11,6 @@ pub use device::{
     DeviceKind, DeviceModel, ELGATO_VENDOR_ID, ImageFormat, KeyRect, Protocol, Rotation, Screen,
 };
 pub use profile::{
-    ActionDelays, AppRule, KeyConfig, Page, Profile, ProfileError, TitleAlign, TitleStyle,
+    ActionDelays, AppRule, AutoExit, KeyConfig, Page, Profile, ProfileError, TitleAlign, TitleStyle,
 };
 pub use settings::{DeviceSettings, KeyPress, LockLook, Orientation, Settings, Turn};

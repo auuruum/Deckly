@@ -18,7 +18,7 @@ use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
 use deckly_core::profile::{self, MAX_FOLDER_DEPTH, MAX_GROUP_ACTIONS};
-use deckly_core::{ActionDelays, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
+use deckly_core::{ActionDelays, AutoExit, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
 use deckly_plugin_host::{Host, Status};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
@@ -1989,6 +1989,7 @@ impl App {
         };
         let group = self.group;
         let context = edited_context(&page_id, index, group);
+        let top_level = group.is_none_or(|group| group.member.is_none());
         let image_context = format!("{profile_id}/{context}");
         if self
             .app_picker
@@ -1999,6 +2000,21 @@ impl App {
         }
         let in_sequence = group.is_some_and(|g| g.member.is_some())
             && self.group_holder.as_deref() != Some(actions::KEY_LOGIC);
+        let folder_exit = view.path.last().and_then(|id| {
+            profile.folder(id)?.keys.values().find_map(|key| {
+                (key.action == actions::PARENT_FOLDER).then(|| key.auto_exit.unwrap_or_default())
+            })
+        });
+        let folder_overrides = view
+            .path
+            .last()
+            .and_then(|id| profile.folder(id))
+            .is_some_and(|folder| {
+                folder
+                    .keys
+                    .values()
+                    .any(|key| key.action != actions::PARENT_FOLDER && key.auto_exit.is_some())
+            });
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;
             self.image_editor = None;
@@ -2039,6 +2055,7 @@ impl App {
             (s.overlay(&context, key), plugin)
         };
         let mut remove = false;
+        let mut reset_folder_exit = false;
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -2140,11 +2157,30 @@ impl App {
                                             RichText::new(linked.unwrap_or("")).color(TEXT_FAINT),
                                         )
                                         .desired_rows(1)
-                                        .desired_width(260.0),
+                                        .desired_width(
+                                            if top_level
+                                                && key.action != actions::PARENT_FOLDER
+                                                && folder_exit.is_some()
+                                            {
+                                                228.0
+                                            } else {
+                                                260.0
+                                            },
+                                        ),
                                 );
                                 title_style_button(ui, &mut key.title_style, defaults);
+                                if top_level
+                                    && key.action != actions::PARENT_FOLDER
+                                    && let Some(folder_exit) = folder_exit
+                                {
+                                    folder_exit_button(ui, &mut key.auto_exit, folder_exit);
+                                }
                             });
                             ui.end_row();
+                            if key.action == actions::PARENT_FOLDER {
+                                reset_folder_exit =
+                                    parent_auto_exit_rows(ui, &mut key.auto_exit, folder_overrides);
+                            }
                             match &plugin {
                                 Some(p) => {
                                     self.plugin_form(ui, p);
@@ -2182,7 +2218,10 @@ impl App {
             );
             self.plugin_page(ui, area, p);
         }
-        let changed = *key != before;
+        let mut changed = *key != before;
+        if reset_folder_exit && let Some(folder) = view.path.last() {
+            changed |= reset_folder_auto_exit(profile, folder);
+        }
         if remove {
             self.remove_edited(profile, view);
         } else if changed {
@@ -3270,6 +3309,150 @@ fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: Tit
     }
 }
 
+/// The folder's Exit key controls the default for every action in it.
+fn parent_auto_exit_rows(ui: &mut Ui, setting: &mut Option<AutoExit>, has_overrides: bool) -> bool {
+    let mut value = setting.unwrap_or_default();
+    let before = value;
+    let mut reset = false;
+    ui.label(RichText::new("Auto Exit").color(TEXT_DIM));
+    ui.horizontal(|ui| {
+        auto_exit_toggle(ui, &mut value.enabled)
+            .on_hover_text("Return to the parent folder after executing an action in this folder");
+        let response = ui
+            .add_enabled_ui(has_overrides, |ui| {
+                icon_button(
+                    ui,
+                    icon::ARROW_COUNTER_CLOCKWISE,
+                    "Reset all actions to folder Auto Exit settings",
+                )
+            })
+            .inner;
+        egui::Popup::from_toggle_button_response(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .align(egui::RectAlign::BOTTOM_END)
+            .gap(4.0)
+            .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(14)))
+            .show(|ui| {
+                ui.set_width(260.0);
+                ui.label(RichText::new("Reset action overrides?").font(bold(13.0)));
+                ui.label("All actions in this folder will follow the folder's Auto Exit settings.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        ui.close();
+                    }
+                    if ui.button("Reset").clicked() {
+                        reset = true;
+                        ui.close();
+                    }
+                });
+            });
+    });
+    ui.end_row();
+    auto_exit_delay_row(ui, &mut value);
+    if value != before {
+        *setting = Some(value);
+    }
+    reset
+}
+
+fn reset_folder_auto_exit(profile: &mut Profile, folder: &str) -> bool {
+    let Some(folder) = profile.folder_mut(folder) else {
+        return false;
+    };
+    let mut changed = false;
+    for key in folder
+        .keys
+        .values_mut()
+        .filter(|key| key.action != actions::PARENT_FOLDER)
+    {
+        changed |= key.auto_exit.take().is_some();
+    }
+    changed
+}
+
+/// An individual action can follow its folder, opt out, or use its own delay.
+fn folder_exit_button(ui: &mut Ui, setting: &mut Option<AutoExit>, inherited: AutoExit) {
+    let response = icon_button(ui, icon::ARROW_BEND_LEFT_UP, "Folder Exit");
+    egui::Popup::from_toggle_button_response(&response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(4.0)
+        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(14)))
+        .show(|ui| {
+            ui.set_width(240.0);
+            ui.label(RichText::new("Folder Exit").font(bold(13.0)));
+            ui.separator();
+            let mut follow = setting.is_none();
+            if ui.checkbox(&mut follow, "Follow folder settings").changed() {
+                *setting = (!follow).then_some(inherited);
+            }
+            ui.add_space(4.0);
+            let mut value = setting.unwrap_or(inherited);
+            let before = value;
+            ui.add_enabled_ui(!follow, |ui| {
+                egui::Grid::new("action-auto-exit")
+                    .num_columns(2)
+                    .spacing(vec2(14.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Auto Exit").color(TEXT_DIM));
+                        auto_exit_toggle(ui, &mut value.enabled);
+                        ui.end_row();
+                        auto_exit_delay_row(ui, &mut value);
+                    });
+            });
+            if !follow && value != before {
+                *setting = Some(value);
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Returns one folder up after this action is executed.")
+                    .small()
+                    .color(TEXT_DIM),
+            );
+        });
+}
+
+fn auto_exit_delay_row(ui: &mut Ui, value: &mut AutoExit) {
+    ui.label(RichText::new("Exit after").color(TEXT_DIM));
+    ui.add_enabled(
+        value.enabled,
+        egui::DragValue::new(&mut value.delay)
+            .range(0..=AutoExit::MAX_DELAY)
+            .suffix(" s"),
+    )
+    .on_hover_text("0 seconds returns immediately after executing the action");
+    ui.end_row();
+}
+
+/// A drawn switch, matching the switches in Preferences.
+fn auto_exit_toggle(ui: &mut Ui, value: &mut bool) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(30.0, 20.0), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            ui.is_enabled(),
+            *value,
+            "Auto Exit",
+        )
+    });
+    let t = ui.ctx().animate_bool(response.id, *value);
+    let track = Rect::from_center_size(rect.center(), vec2(30.0, 16.0));
+    ui.painter().rect_filled(
+        track,
+        CornerRadius::same(8),
+        PREF_SEGMENT.lerp_to_gamma(PREF_CHECK, t),
+    );
+    let x = egui::lerp(track.left() + 8.0..=track.right() - 8.0, t);
+    ui.painter()
+        .circle_filled(pos2(x, track.center().y), 6.0, TEXT);
+    response
+}
+
 /// Preview of what is being dragged.
 fn drag_preview(ctx: &egui::Context) {
     let Some(payload) = egui::DragAndDrop::payload::<DragPayload>(ctx) else {
@@ -3627,6 +3810,351 @@ mod tray_tests {
         assert!(pass(&mut app, &ctx, false).contains(&ViewportCommand::Close));
         // eframe answers that command with a close request.
         assert!(pass(&mut app, &ctx, true).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod auto_exit_tests {
+    use super::*;
+
+    type Shapes = Vec<egui::epaint::ClippedShape>;
+
+    fn frame(
+        ctx: &egui::Context,
+        setting: &mut Option<AutoExit>,
+        parent: bool,
+        events: Vec<egui::Event>,
+    ) -> Shapes {
+        frame_result(ctx, setting, parent, events).0
+    }
+
+    fn frame_result(
+        ctx: &egui::Context,
+        setting: &mut Option<AutoExit>,
+        parent: bool,
+        events: Vec<egui::Event>,
+    ) -> (Shapes, bool) {
+        let mut reset = false;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(554.0, 310.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                if parent {
+                    egui::Grid::new("parent-form")
+                        .show(ui, |ui| reset = parent_auto_exit_rows(ui, setting, true));
+                } else {
+                    folder_exit_button(
+                        ui,
+                        setting,
+                        AutoExit {
+                            enabled: true,
+                            delay: 3,
+                        },
+                    );
+                }
+            },
+        );
+        output.textures_delta.clear();
+        (output.shapes, reset)
+    }
+
+    fn text_position(shapes: &Shapes, label: &str) -> egui::Pos2 {
+        shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn toggle_position(shapes: &Shapes) -> egui::Pos2 {
+        shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle) if circle.radius == 6.0 => Some(circle.center),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn click(
+        ctx: &egui::Context,
+        setting: &mut Option<AutoExit>,
+        parent: bool,
+        pos: egui::Pos2,
+    ) -> Shapes {
+        click_result(ctx, setting, parent, pos).0
+    }
+
+    fn click_result(
+        ctx: &egui::Context,
+        setting: &mut Option<AutoExit>,
+        parent: bool,
+        pos: egui::Pos2,
+    ) -> (Shapes, bool) {
+        let mut shapes = Vec::new();
+        let mut reset = false;
+        for pressed in [true, false] {
+            let result = frame_result(
+                ctx,
+                setting,
+                parent,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            shapes = result.0;
+            reset |= result.1;
+        }
+        (shapes, reset)
+    }
+
+    #[test]
+    fn parent_auto_exit_reset_requires_confirmation_and_keeps_folder_settings() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut setting = Some(AutoExit {
+            enabled: false,
+            delay: 7,
+        });
+        frame(&ctx, &mut setting, true, Vec::new());
+        let shapes = frame(&ctx, &mut setting, true, Vec::new());
+        let pos = toggle_position(&shapes);
+        let shapes = click(&ctx, &mut setting, true, pos);
+        assert_eq!(
+            setting,
+            Some(AutoExit {
+                enabled: true,
+                delay: 7
+            })
+        );
+        let pos = text_position(&shapes, icon::ARROW_COUNTER_CLOCKWISE);
+        assert!(!click_result(&ctx, &mut setting, true, pos).1);
+        let shapes = frame(&ctx, &mut setting, true, Vec::new());
+        let pos = text_position(&shapes, "Cancel");
+        assert!(!click_result(&ctx, &mut setting, true, pos).1);
+        assert_eq!(
+            setting,
+            Some(AutoExit {
+                enabled: true,
+                delay: 7
+            })
+        );
+        let shapes = frame(&ctx, &mut setting, true, Vec::new());
+        let pos = text_position(&shapes, icon::ARROW_COUNTER_CLOCKWISE);
+        click(&ctx, &mut setting, true, pos);
+        let shapes = frame(&ctx, &mut setting, true, Vec::new());
+        let pos = text_position(&shapes, "Reset");
+        assert!(click_result(&ctx, &mut setting, true, pos).1);
+        assert_eq!(
+            setting,
+            Some(AutoExit {
+                enabled: true,
+                delay: 7
+            })
+        );
+    }
+
+    #[test]
+    fn individual_action_can_override_and_follow_its_folder_again() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut setting = None;
+        frame(&ctx, &mut setting, false, Vec::new());
+        let shapes = frame(&ctx, &mut setting, false, Vec::new());
+        let pos = text_position(&shapes, icon::ARROW_BEND_LEFT_UP);
+        click(&ctx, &mut setting, false, pos);
+        let shapes = frame(&ctx, &mut setting, false, Vec::new());
+        assert_eq!(setting, None);
+        let pos = text_position(&shapes, "Follow folder settings");
+        let shapes = click(&ctx, &mut setting, false, pos);
+        assert_eq!(
+            setting,
+            Some(AutoExit {
+                enabled: true,
+                delay: 3
+            })
+        );
+        let pos = toggle_position(&shapes);
+        let shapes = click(&ctx, &mut setting, false, pos);
+        assert_eq!(
+            setting,
+            Some(AutoExit {
+                enabled: false,
+                delay: 3
+            })
+        );
+        let pos = text_position(&shapes, "Follow folder settings");
+        click(&ctx, &mut setting, false, pos);
+        assert_eq!(setting, None);
+    }
+
+    #[test]
+    fn a_group_key_has_its_own_folder_exit_control_but_members_do_not() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = super::clipboard_tests::editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages[0]
+            .keys
+            .insert(0, new_key(actions::CREATE_FOLDER));
+        profile.normalize_folders();
+        let folder = profile.pages[0].keys[&0].folder().unwrap().to_owned();
+        let mut key = new_key(actions::MULTI_ACTION);
+        key.groups[0].push(new_key(actions::WEBSITE));
+        profile.folder_mut(&folder).unwrap().keys.insert(1, key);
+        app.selected_key = Some(1);
+        let view = View {
+            page: 0,
+            path: vec![folder],
+            live: Live::default(),
+        };
+        for member in [None, Some(0)] {
+            app.group = Some(GroupEdit { list: 0, member });
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(852.0, 742.0))),
+                    ..Default::default()
+                },
+                |ui| app.inspector(ui, &mut profile, &view),
+            );
+            output.textures_delta.clear();
+            let shown = output.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.job.text==icon::ARROW_BEND_LEFT_UP)
+            });
+            assert_eq!(shown, member.is_none());
+        }
+    }
+
+    #[test]
+    fn resetting_folder_overrides_is_local_cancelable_and_undoable() {
+        fn frame(
+            ctx: &egui::Context,
+            app: &mut App,
+            profile: &mut Profile,
+            view: &mut View,
+            events: Vec<egui::Event>,
+        ) -> Shapes {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(852.0, 742.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let original = profile.clone();
+                    let location = view.location(app.selected_key);
+                    app.inspector(ui, profile, view);
+                    app.finish_edit(ctx, profile, view, &original, location, None);
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes
+        }
+        fn click(
+            ctx: &egui::Context,
+            app: &mut App,
+            profile: &mut Profile,
+            view: &mut View,
+            pos: egui::Pos2,
+        ) {
+            for pressed in [true, false] {
+                frame(
+                    ctx,
+                    app,
+                    profile,
+                    view,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        }
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut app = super::clipboard_tests::editor();
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages[0]
+            .keys
+            .insert(0, new_key(actions::CREATE_FOLDER));
+        profile.normalize_folders();
+        let outer = profile.pages[0].keys[&0].folder().unwrap().to_owned();
+        let mut action = new_key(actions::WEBSITE);
+        action.auto_exit = Some(AutoExit {
+            enabled: false,
+            delay: 11,
+        });
+        let mut inner_key = new_key(actions::CREATE_FOLDER);
+        inner_key.auto_exit = action.auto_exit;
+        let folder = profile.folder_mut(&outer).unwrap();
+        folder.keys.get_mut(&0).unwrap().auto_exit = Some(AutoExit {
+            enabled: true,
+            delay: 7,
+        });
+        folder.keys.insert(1, action.clone());
+        folder.keys.insert(2, inner_key);
+        profile.normalize_folders();
+        let inner = profile.folder(&outer).unwrap().keys[&2]
+            .folder()
+            .unwrap()
+            .to_owned();
+        profile.folder_mut(&inner).unwrap().keys.insert(1, action);
+        let original = profile.clone();
+        let mut view = View {
+            page: 0,
+            path: vec![outer.clone()],
+            live: Live::default(),
+        };
+        frame(&ctx, &mut app, &mut profile, &mut view, Vec::new());
+        let shapes = frame(&ctx, &mut app, &mut profile, &mut view, Vec::new());
+        let pos = text_position(&shapes, icon::ARROW_COUNTER_CLOCKWISE);
+        click(&ctx, &mut app, &mut profile, &mut view, pos);
+        let shapes = frame(&ctx, &mut app, &mut profile, &mut view, Vec::new());
+        let pos = text_position(&shapes, "Cancel");
+        click(&ctx, &mut app, &mut profile, &mut view, pos);
+        assert_eq!(profile, original);
+        let shapes = frame(&ctx, &mut app, &mut profile, &mut view, Vec::new());
+        let pos = text_position(&shapes, icon::ARROW_COUNTER_CLOCKWISE);
+        click(&ctx, &mut app, &mut profile, &mut view, pos);
+        let shapes = frame(&ctx, &mut app, &mut profile, &mut view, Vec::new());
+        let pos = text_position(&shapes, "Reset");
+        click(&ctx, &mut app, &mut profile, &mut view, pos);
+        let folder = profile.folder(&outer).unwrap();
+        assert_eq!(
+            folder.keys[&0].auto_exit,
+            original.folder(&outer).unwrap().keys[&0].auto_exit
+        );
+        assert_eq!(folder.keys[&1].auto_exit, None);
+        assert_eq!(folder.keys[&2].auto_exit, None);
+        assert_eq!(profile.folder(&inner), original.folder(&inner));
+        assert!(app.dirty.contains(&profile.id));
+        assert_eq!(
+            app.history
+                .step(&profile, Direction::Undo)
+                .unwrap()
+                .unwrap()
+                .0,
+            original
+        );
     }
 }
 

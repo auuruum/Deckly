@@ -155,6 +155,10 @@ pub struct KeyConfig {
     /// Action-specific settings.
     #[serde(default)]
     pub settings: serde_json::Value,
+    /// Folder exit behavior after this key runs. `None` follows the folder's
+    /// parent key; on that parent key it means automatic exit is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_exit: Option<AutoExit>,
     /// The actions a Multi Action, Multi Action Switch, Random Action or
     /// Key Logic key holds, one list per [`group_count`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -174,6 +178,31 @@ pub struct ActionDelays {
     pub press: u32,
     /// From the release to the next action.
     pub next: u32,
+}
+
+/// Automatic return to the enclosing folder after an action, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoExit {
+    pub enabled: bool,
+    pub delay: u8,
+}
+
+impl Default for AutoExit {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delay: 1,
+        }
+    }
+}
+
+impl AutoExit {
+    pub const MAX_DELAY: u8 = 60;
+
+    pub fn sanitize(&mut self) {
+        self.delay = self.delay.min(Self::MAX_DELAY);
+    }
 }
 
 impl Default for ActionDelays {
@@ -291,6 +320,7 @@ impl KeyConfig {
             title_style: None,
             image: None,
             settings,
+            auto_exit: None,
             groups,
             delays: None,
             desired_state: None,
@@ -601,6 +631,9 @@ impl Profile {
 }
 
 fn sanitize_title(key: &mut KeyConfig) {
+    if let Some(auto_exit) = &mut key.auto_exit {
+        auto_exit.sanitize();
+    }
     if key.title.chars().count() > MAX_TITLE_CHARS {
         key.title = key.title.chars().take(MAX_TITLE_CHARS).collect();
     }
@@ -705,6 +738,120 @@ impl std::error::Error for ProfileError {}
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn auto_exit_defaults_to_inheritance_and_preserves_explicit_settings() {
+        let legacy: KeyConfig = serde_json::from_value(json!({
+            "action": "com.example.action", "settings": {}
+        }))
+        .unwrap();
+        assert_eq!(legacy.auto_exit, None);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("auto_exit")
+                .is_none()
+        );
+        assert_eq!(
+            AutoExit::default(),
+            AutoExit {
+                enabled: false,
+                delay: 1
+            }
+        );
+
+        let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
+        for (index, auto_exit) in [
+            None,
+            Some(AutoExit {
+                enabled: false,
+                delay: 9,
+            }),
+            Some(AutoExit {
+                enabled: true,
+                delay: 0,
+            }),
+            Some(AutoExit {
+                enabled: true,
+                delay: 60,
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut key = legacy.clone();
+            key.auto_exit = auto_exit;
+            profile.pages[0].keys.insert(index as u8, key);
+        }
+        assert_eq!(
+            Profile::from_json(&profile.to_json().unwrap()).unwrap(),
+            profile
+        );
+    }
+
+    #[test]
+    fn auto_exit_delays_are_bounded_on_keys_and_group_members() {
+        let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
+        let mut key = KeyConfig::new(MULTI_ACTION, json!({}));
+        key.auto_exit = Some(AutoExit {
+            enabled: true,
+            delay: 255,
+        });
+        let mut member = KeyConfig::new("com.example.action", json!({}));
+        member.auto_exit = Some(AutoExit {
+            enabled: false,
+            delay: 101,
+        });
+        key.groups[0].push(member);
+        profile.pages[0].keys.insert(1, key);
+
+        let loaded = Profile::from_json(&profile.to_json().unwrap()).unwrap();
+        let key = &loaded.pages[0].keys[&1];
+        assert_eq!(
+            key.auto_exit,
+            Some(AutoExit {
+                enabled: true,
+                delay: 60
+            })
+        );
+        assert_eq!(
+            key.groups[0][0].auto_exit,
+            Some(AutoExit {
+                enabled: false,
+                delay: 60
+            })
+        );
+    }
+
+    #[test]
+    fn copied_and_normalized_folders_keep_auto_exit_preferences() {
+        let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
+        profile.pages[0]
+            .keys
+            .insert(1, KeyConfig::new(FOLDER_ACTION, json!({})));
+        profile.normalize_folders();
+        let folder = &mut profile.folders[0];
+        folder.keys.get_mut(&0).unwrap().auto_exit = Some(AutoExit {
+            enabled: true,
+            delay: 3,
+        });
+        let mut member = KeyConfig::new("com.example.action", json!({}));
+        member.auto_exit = Some(AutoExit {
+            enabled: false,
+            delay: 12,
+        });
+        folder.keys.insert(1, member);
+        let expected = folder.keys.clone();
+
+        let copy = profile.duplicate("Copy".into());
+        assert_eq!(copy.folders[0].keys, expected);
+        // Pasting the folder key makes an independent folder with the same settings.
+        let pasted = profile.pages[0].keys[&1].clone();
+        profile.pages[0].keys.insert(2, pasted);
+        profile.normalize_folders();
+        assert_eq!(profile.folders.len(), 2);
+        assert!(profile.folders.iter().all(|folder| folder.keys == expected));
+    }
 
     #[test]
     fn copies_keep_pages_actions_and_their_own_folder_links() {

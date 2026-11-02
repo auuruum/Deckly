@@ -27,6 +27,8 @@ use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+mod folder_exit;
+
 pub type Shared = Arc<Mutex<State>>;
 
 pub struct State {
@@ -50,6 +52,7 @@ pub struct State {
     pub gate: Gate,
     /// Shows profiles by the application in the foreground.
     pub follower: Follower,
+    folder_exit: folder_exit::Timers,
 }
 
 impl State {
@@ -68,6 +71,7 @@ impl State {
             catalog: plugins::Catalog::default(),
             plugin_keys: HashMap::new(),
             previous: HashMap::new(),
+            folder_exit: folder_exit::Timers::default(),
         }
     }
 
@@ -79,6 +83,11 @@ impl State {
     }
 
     fn choose(&mut self, serial: &str, id: String) {
+        if let Some(old) = self.assigned(serial).map(|p| p.id.clone())
+            && old != id
+        {
+            self.folder_exit.invalidate(&old);
+        }
         let shown = self.follower.manual(serial);
         let old = self
             .settings
@@ -102,6 +111,9 @@ impl State {
             return false;
         };
         self.previous.insert(serial.to_owned(), before);
+        if let Some(old) = self.previous.get(serial) {
+            self.folder_exit.invalidate(old);
+        }
         true
     }
 
@@ -137,6 +149,9 @@ impl State {
     pub fn set_page(&mut self, profile_id: &str, page: usize) {
         if let Some(p) = self.profile(profile_id) {
             let page = page.min(p.pages.len().saturating_sub(1));
+            if self.page(p) != page {
+                self.folder_exit.invalidate(profile_id);
+            }
             self.pages.insert(profile_id.to_owned(), page);
         }
     }
@@ -153,6 +168,15 @@ impl State {
 
     pub fn set_folder_path(&mut self, profile_id: &str, mut path: Vec<String>) {
         path.truncate(MAX_FOLDER_DEPTH);
+        if self
+            .folders
+            .get(profile_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            != path
+        {
+            self.folder_exit.invalidate(profile_id);
+        }
         if path.is_empty() {
             self.folders.remove(profile_id);
         } else {
@@ -204,6 +228,7 @@ impl State {
         self.profiles.retain(|p| p.id != id);
         self.pages.remove(id);
         self.folders.remove(id);
+        self.folder_exit.invalidate(id);
         self.follower.forget_profile(id);
         if let Err(e) = store::delete_profile(id) {
             self.notify(format!("Cannot delete profile: {e}"));
@@ -264,6 +289,7 @@ impl State {
             self.profiles.retain(|p| p.id != profile.id);
             self.pages.remove(&profile.id);
             self.folders.remove(&profile.id);
+            self.folder_exit.invalidate(&profile.id);
             self.profiles.push(profile);
         }
         self.settings.sort_profiles(&mut self.profiles);
@@ -467,6 +493,8 @@ struct Link {
     shown: Vec<Option<Shown>>,
     /// Plugin actions inside the keys shown, by context.
     members: HashMap<String, Shown>,
+    /// The press owns its release, even if navigation changed the visible keys.
+    held: HashMap<u8, KeyHit>,
 }
 
 /// A plugin key as its plugin last heard of it.
@@ -492,6 +520,7 @@ impl Link {
             active_at: Instant::now(),
             shown: vec![None; usize::from(info.model.key_count())],
             members: HashMap::new(),
+            held: HashMap::new(),
         }
     }
 
@@ -516,6 +545,7 @@ struct Pending {
     press: Press,
     handle: Handle,
     key: KeyConfig,
+    exit: Option<folder_exit::Source>,
 }
 
 /// What Multi Action and Key Logic keys are doing, by context.
@@ -526,6 +556,7 @@ struct Groups {
     /// Pressed to cancel a run; the release must not start another.
     cancelling: HashSet<String>,
     presses: HashMap<String, Pending>,
+    exits: HashMap<String, folder_exit::Source>,
 }
 
 pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg> {
@@ -569,7 +600,9 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 results: &step_tx,
             };
             let followed = follow_window(&state, &links);
-            if press_timers(&tools, &mut groups) || followed {
+            let pressed = press_timers(&tools, &mut groups);
+            let exited = lock(&state).expire_folder_exits(Instant::now());
+            if pressed || followed || exited {
                 refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                 repaint();
             }
@@ -584,6 +617,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 .into_iter()
                 .chain(mark_end)
                 .chain(settled)
+                .chain(lock(&state).folder_exit.deadline())
                 .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
                 .min();
             let msg = match wake {
@@ -636,6 +670,9 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 }
                 Msg::Device(Event::Disconnected(handle)) => {
                     let mut s = lock(&state);
+                    if let Some(serial) = s.device(handle).map(|d| d.serial.clone()) {
+                        s.cancel_device_folder_exit(&serial);
+                    }
                     s.devices.retain(|d| d.handle != handle);
                     s.pressed.retain(|&(h, _)| h != handle);
                     let all = s
@@ -662,8 +699,22 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     key,
                     pressed,
                 }) => {
-                    let hit = key_event(&state, &devices, &mut links, handle, key, pressed)
+                    let mut hit = key_event(&state, &devices, &mut links, handle, key, pressed)
                         .filter(|hit| admitted(&gate, &mut held_back, handle, hit, pressed));
+                    if pressed && let Some(hit) = hit.as_mut() {
+                        if let Some(source) = hit.exit.as_mut() {
+                            lock(&state).pause_folder_exit(source);
+                        }
+                        if let Some(held) =
+                            links.get_mut(&handle).and_then(|l| l.held.get_mut(&key))
+                        {
+                            *held = hit.clone();
+                        }
+                    }
+                    let exit = hit
+                        .as_ref()
+                        .filter(|h| h.config.groups.is_empty() && !pressed)
+                        .and_then(|h| h.exit.clone());
                     match hit {
                         Some(hit) if !hit.config.groups.is_empty() => {
                             let tools = Tools {
@@ -682,6 +733,9 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                             let _ = actions.send((handle, hit.config));
                         }
                         _ => {}
+                    }
+                    if let Some(source) = exit {
+                        lock(&state).arm_folder_exit(source, Instant::now());
                     }
                     // Shows the held key smaller (or normal again), and the
                     // keys a screensaver covered.
@@ -738,8 +792,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     pressed,
                 } => plugin_step(&state, host.as_ref(), &links, handle, &step, pressed),
                 Msg::RunDone { context, cancelled } => {
-                    groups.runs.remove(&context);
-                    lock(&state).finish_run(&context, cancelled);
+                    finish_group_run(&state, &mut groups, &context, cancelled, Instant::now());
                     refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
@@ -872,6 +925,7 @@ fn follow_window(state: &Shared, links: &Links) -> bool {
 }
 
 /// A key change that reaches an action.
+#[derive(Clone)]
 struct KeyHit {
     config: KeyConfig,
     /// Key index as the user sees it.
@@ -879,6 +933,7 @@ struct KeyHit {
     /// A plugin action, which hears releases too.
     plugin: bool,
     context: String,
+    exit: Option<folder_exit::Source>,
 }
 
 /// Handles a key change; returns the key whose action should hear of it.
@@ -896,6 +951,7 @@ fn key_event(
     let hit = |s: &State, config: KeyConfig| KeyHit {
         plugin: s.catalog.action(&config.action).is_some(),
         context: s.context(&link.serial, key).unwrap_or_default(),
+        exit: s.folder_exit_source(&link.serial, key, &config),
         config,
         index: key,
     };
@@ -903,13 +959,10 @@ fn key_event(
     // disabled with a key down. Plugins hear the release of a press they
     // heard, and Multi Actions run on it.
     if !pressed {
-        if !s.pressed.remove(&(handle, key)) {
-            return None;
-        }
-        return s
-            .key(&link.serial, key)
-            .map(|c| hit(&s, c))
-            .filter(|h| h.plugin || !h.config.groups.is_empty());
+        let hit = link.held.remove(&physical);
+        s.pressed
+            .remove(&(handle, hit.as_ref().map_or(key, |h| h.index)));
+        return hit;
     }
     if !link.enabled {
         return None;
@@ -925,7 +978,11 @@ fn key_event(
         return None;
     }
     s.pressed.insert((handle, key));
-    s.key(&link.serial, key).map(|c| hit(&s, c))
+    let found = s.key(&link.serial, key).map(|c| hit(&s, c));
+    if let Some(hit) = &found {
+        link.held.insert(physical, hit.clone());
+    }
+    found
 }
 
 /// Whether a key's action hears this change. Decided at the press and kept
@@ -966,9 +1023,7 @@ fn plugin_key(
         return;
     };
     let mut s = lock(state);
-    let Some(context) = s.context(&link.serial, hit.index) else {
-        return;
-    };
+    let context = &hit.context;
     let Some((plugin, states, automatic)) = s
         .catalog
         .action(&hit.config.action)
@@ -976,14 +1031,14 @@ fn plugin_key(
     else {
         return;
     };
-    let mut instance = s.instance(&context, &hit.config);
+    let mut instance = s.instance(context, &hit.config);
     instance.device = protocol::device_id(&link.serial);
     host.send(
         &plugin,
         instance.event(if pressed { "keyDown" } else { "keyUp" }),
     );
     if !pressed && automatic && states > 1 {
-        let key = s.plugin_key(&context, states);
+        let key = s.plugin_key(context, states);
         key.state = (key.state + 1) % states;
     }
 }
@@ -1067,8 +1122,28 @@ fn start_run(tools: &Tools, groups: &mut Groups, handle: Handle, hit: &KeyHit) {
     drop(s);
     let results = tools.results.clone();
     if let Some(run) = sequence::start(steps, handle, hit.context.clone(), results, gate) {
+        if let Some(source) = &hit.exit {
+            groups.exits.insert(hit.context.clone(), source.clone());
+        }
         groups.runs.insert(hit.context.clone(), run);
     }
+}
+
+fn finish_group_run(
+    state: &Shared,
+    groups: &mut Groups,
+    context: &str,
+    cancelled: bool,
+    now: Instant,
+) {
+    groups.runs.remove(context);
+    let mut s = lock(state);
+    if let Some(source) = groups.exits.remove(context)
+        && !cancelled
+    {
+        s.arm_folder_exit(source, now);
+    }
+    s.finish_run(context, cancelled);
 }
 
 fn key_logic(tools: &Tools, groups: &mut Groups, handle: Handle, hit: KeyHit, pressed: bool) {
@@ -1080,19 +1155,27 @@ fn key_logic(tools: &Tools, groups: &mut Groups, handle: Handle, hit: KeyHit, pr
             press: Press::default(),
             handle,
             key: hit.config,
+            exit: hit.exit.clone(),
         });
+    if pressed {
+        pending.exit = hit.exit;
+    }
     let slot = if pressed {
         pending.press.down(now)
     } else {
         let held = pending.press.take_down();
         if let Some(slot) = held {
             release_slot(tools, handle, &pending.key, &hit.context, slot);
+            if let Some(source) = pending.exit.clone() {
+                lock(tools.state).arm_folder_exit(source, now);
+            }
         }
         pending.press.up(now)
     };
     if let Some(slot) = slot {
         let key = pending.key.clone();
-        trigger(tools, groups, handle, &key, &hit.context, slot);
+        let exit = pending.exit.clone();
+        trigger(tools, groups, handle, &key, &hit.context, slot, exit);
     }
     if groups
         .presses
@@ -1121,9 +1204,13 @@ fn trigger(
     key: &KeyConfig,
     context: &str,
     slot: usize,
+    exit: Option<folder_exit::Source>,
 ) {
     let Some(mut step) = member_step(tools.state, key, context, slot) else {
         lock(tools.state).mark_key(context, plugins::Mark::Alert);
+        if let Some(pending) = groups.presses.get_mut(context) {
+            pending.press.take_down();
+        }
         return;
     };
     let gate = lock(tools.state).gate.clone();
@@ -1139,6 +1226,9 @@ fn trigger(
             tools.results.clone(),
             gate,
         ) {
+            if let Some(source) = exit {
+                groups.exits.insert(context.to_owned(), source);
+            }
             groups.runs.insert(context.to_owned(), run);
         }
     } else if gate.blocks(&step.key.action) {
@@ -1164,18 +1254,24 @@ fn release_slot(tools: &Tools, handle: Handle, key: &KeyConfig, context: &str, s
 /// Decides Key Logic presses whose time ran out; returns whether any was.
 fn press_timers(tools: &Tools, groups: &mut Groups) -> bool {
     let now = Instant::now();
-    let due: Vec<(String, Handle, KeyConfig, usize)> = groups
+    let due: Vec<_> = groups
         .presses
         .iter_mut()
         .filter_map(|(context, p)| {
             let slot = p.press.tick(now)?;
-            Some((context.clone(), p.handle, p.key.clone(), slot))
+            Some((
+                context.clone(),
+                p.handle,
+                p.key.clone(),
+                slot,
+                p.exit.clone(),
+            ))
         })
         .collect();
     groups.presses.retain(|_, p| !p.press.idle());
     let fired = !due.is_empty();
-    for (context, handle, key, slot) in due {
-        trigger(tools, groups, handle, &key, &context, slot);
+    for (context, handle, key, slot, exit) in due {
+        trigger(tools, groups, handle, &key, &context, slot, exit);
     }
     fired
 }
@@ -1660,6 +1756,7 @@ mod tests {
                 index: 0,
                 plugin: false,
                 context: "p.0".into(),
+                exit: None,
             };
             group_key(&tools, &mut self.groups, 1, hit, pressed);
         }
@@ -1722,6 +1819,7 @@ mod tests {
             index: 0,
             plugin: false,
             context: "p.0".into(),
+            exit: None,
         }
     }
 
