@@ -164,13 +164,13 @@ pub fn start(
             let open = !gate.blocks(&step.key.action);
             finished &= open;
             if open {
-                press(step, true, handle, &results);
+                press(step, true, handle, &context, &results);
             }
             let stay = waited(hold);
             // The release goes out even when cancelled: a plugin must not
             // be left with its key down.
             if open {
-                press(step, false, handle, &results);
+                press(step, false, handle, &context, &results);
             }
             if !stay || !waited(next) {
                 finished = false;
@@ -190,7 +190,7 @@ pub fn start(
     Some(cancel)
 }
 
-fn press(step: &Step, pressed: bool, handle: Handle, results: &Sender<Msg>) {
+fn press(step: &Step, pressed: bool, handle: Handle, context: &str, results: &Sender<Msg>) {
     if step.key.action == actions::DELAY {
         return;
     }
@@ -201,7 +201,8 @@ fn press(step: &Step, pressed: bool, handle: Handle, results: &Sender<Msg>) {
             pressed,
         }
     } else if pressed {
-        Msg::Outcome(handle, actions::run(&step.key))
+        // A failure shows on the key that runs the sequence.
+        Msg::Outcome(handle, context.to_owned(), actions::run(&step.key))
     } else {
         return;
     };
@@ -340,7 +341,10 @@ mod tests {
         let mut seen = Vec::new();
         for msg in rx.iter() {
             match msg {
-                Msg::Outcome(7, Ok(o)) => seen.push(format!("{o:?}")),
+                Msg::Outcome(7, context, Ok(o)) => {
+                    assert_eq!(context, "page.0");
+                    seen.push(format!("{o:?}"));
+                }
                 Msg::PluginStep { pressed, .. } => seen.push(format!("plugin {pressed}")),
                 Msg::RunDone { context, cancelled } => {
                     assert_eq!(context, "page.0");
@@ -401,7 +405,7 @@ mod tests {
         let _cancel = start(steps, 7, "page.0".into(), tx, gate).unwrap();
         assert!(matches!(
             rx.recv(),
-            Ok(Msg::Outcome(7, Ok(actions::Outcome::NextPage)))
+            Ok(Msg::Outcome(7, _, Ok(actions::Outcome::NextPage)))
         ));
         // Counted as cancelled: no OK mark, and a switch keeps its side.
         assert!(matches!(

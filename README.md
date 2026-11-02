@@ -106,6 +106,18 @@ name, the importer chooses a free name using `copy`, `copy 1`, and so on.
 Profiles with the same id are replaced, as shown before import; their links
 from other profiles keep working.
 
+## Folder Auto Exit
+
+Open a folder and select its Parent Folder key to enable Auto Exit and set
+the delay from 0 to 60 seconds. It returns one level after an action is
+executed; 0 returns immediately. Opening the folder alone starts no timer.
+
+The Folder Exit icon next to an action's title lets it follow the folder
+rule, use its own delay, or stay in the folder. The reset icon beside the
+folder rule restores all its actions to inheritance after confirmation.
+These settings are saved with profiles and carried over when importing
+original Stream Deck profiles and backups.
+
 ## Linux and macOS
 
 In an Open action, use **Applications…** to search installed applications by

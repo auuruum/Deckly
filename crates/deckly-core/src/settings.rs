@@ -49,6 +49,8 @@ pub struct Settings {
     /// The user answered the first start's offer to import the official
     /// app's setup.
     pub import_offered: bool,
+    /// Ask before replacing a folder's individual Auto Exit settings.
+    pub confirm_folder_auto_exit_reset: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +66,7 @@ impl Default for Settings {
             lock_look: LockLook::default(),
             switch_by_window: true,
             import_offered: false,
+            confirm_folder_auto_exit_reset: true,
         }
     }
 }

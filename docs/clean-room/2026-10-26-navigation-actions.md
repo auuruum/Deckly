@@ -52,8 +52,8 @@
 ## Inferred
 
 - The Parent Folder settings identifiers (an "enabled" flag and a "delay")
-  suggest an option to return to the parent folder automatically after a
-  time. Not implemented.
+  suggested automatic folder exit. This was investigated and implemented on
+  2026-11-02; see [Folder Auto Exit](2026-11-02-folder-auto-exit.md).
 - Opening a folder replaces the keys on the device with the folder's keys;
   Parent Folder returns to the page or folder it was opened from.
 

@@ -448,6 +448,9 @@ pub fn run(key: &KeyConfig) -> Result<Outcome, String> {
             if bool_setting(s, "enter") {
                 text.push('\n');
             }
+            if text.is_empty() {
+                return Err("no text entered".into());
+            }
             os::type_text(&text).map(|_| Outcome::Done)
         }
         MULTIMEDIA => {
