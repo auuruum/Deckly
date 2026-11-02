@@ -147,7 +147,27 @@ mod tests {
     use super::*;
     use crate::actions;
     use std::time::{Duration, Instant};
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, PostMessageW,
+    };
+
+    /// This process's window. A Deckly running on this machine has one of the
+    /// same class, and must not hear these test messages.
+    fn own_window() -> Option<HWND> {
+        let mut after = None;
+        // SAFETY: the class name is static and `owner` outlives the call.
+        unsafe {
+            while let Ok(window) = FindWindowExW(None, after, CLASS, PCWSTR::null()) {
+                let mut owner = 0;
+                GetWindowThreadProcessId(window, Some(&mut owner));
+                if owner == std::process::id() {
+                    return Some(window);
+                }
+                after = Some(window);
+            }
+        }
+        None
+    }
 
     #[test]
     fn only_lock_events_change_the_state() {
@@ -177,11 +197,10 @@ mod tests {
         watch(gate.clone());
         let started = Instant::now();
         let window = loop {
-            // SAFETY: the class name is a static string.
-            match unsafe { FindWindowW(CLASS, None) } {
-                Ok(window) => break window,
-                Err(e) => assert!(started.elapsed() < Duration::from_secs(5), "{e}"),
+            if let Some(window) = own_window() {
+                break window;
             }
+            assert!(started.elapsed() < Duration::from_secs(5));
             std::thread::yield_now();
         };
         let post = |event: u32| {

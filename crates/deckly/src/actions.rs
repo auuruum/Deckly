@@ -253,7 +253,7 @@ pub fn listed(uuid: &str, holder: Option<&str>) -> bool {
 /// Whether an action may run while the computer is locked: what stays inside
 /// Deckly and the device, and sequences, whose steps each answer for
 /// themselves. Anything else, plugin actions and unknown ones included, could
-/// act on the machine.
+/// act on the machine. Brightness would light a device the lock put to sleep.
 pub fn runs_while_locked(uuid: &str) -> bool {
     matches!(
         uuid,
@@ -264,7 +264,6 @@ pub fn runs_while_locked(uuid: &str) -> bool {
             | CREATE_FOLDER
             | PARENT_FOLDER
             | PAGE_INDICATOR
-            | BRIGHTNESS
             | SLEEP
             | DELAY
             | MULTI_ACTION
@@ -590,7 +589,17 @@ mod tests {
             .filter(|a| !runs_while_locked(a.uuid))
             .map(|a| a.name)
             .collect();
-        assert_eq!(blocked, ["Website", "Hotkey", "Open", "Text", "Multimedia"]);
+        assert_eq!(
+            blocked,
+            [
+                "Website",
+                "Hotkey",
+                "Open",
+                "Text",
+                "Multimedia",
+                "Brightness"
+            ]
+        );
         assert!(!runs_while_locked("com.example.plugin"));
     }
 

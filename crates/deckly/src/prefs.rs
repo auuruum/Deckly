@@ -20,7 +20,7 @@ use crate::transfer::{self, Job, PluginKind, SharedJob, Summary};
 use deckly_core::profile::{MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_NAME_CHARS};
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
 use deckly_core::{
-    DeviceKind, DeviceModel, KeyConfig, KeyPress, Orientation, Page, Profile, TitleAlign,
+    DeviceKind, DeviceModel, KeyConfig, KeyPress, LockLook, Orientation, Page, Profile, TitleAlign,
     TitleStyle,
 };
 use deckly_plugin_host::Host;
@@ -619,32 +619,49 @@ impl Preferences {
 
         self.lock_keys(ui, o, env);
 
-        label(ui, o, 287.0, 22.0, "About:");
+        label(ui, o, 322.0, 22.0, "About:");
         let text = "Deckly is an independent app. It is not made, approved or \
                     supported by Elgato or Corsair.";
-        value_dim(ui, o, VALUE_X, 290.0, 440.0, text);
+        value_dim(ui, o, VALUE_X, 325.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
     }
 
-    /// Whether keys stop acting on the machine on the lock screen.
+    /// Whether keys stop on the lock screen, and what devices show then.
     fn lock_keys(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
         label(ui, o, 215.0, 22.0, "Lock Screen:");
         let mut s = runtime::lock(env.state);
         let mut on = s.settings.lock_keys;
         let text = "Lock keys while the computer is locked";
-        if checkbox(ui, at(o, VALUE_X, 216.0, 280.0, 20.0), &mut on, text).changed() {
+        checkbox(ui, at(o, VALUE_X, 216.0, 280.0, 20.0), &mut on, text);
+        label(ui, o, 241.0, 30.0, "While Locked:");
+        let mut look = s.settings.lock_look;
+        ui.add_enabled_ui(on, |ui| {
+            combo(
+                ui,
+                at(o, VALUE_X + 1.0, 243.0, 163.0, 25.0),
+                "pref-lock-look",
+                look.label(),
+                |ui| {
+                    for choice in LockLook::ALL {
+                        ui.selectable_value(&mut look, choice, choice.label());
+                    }
+                },
+            );
+        });
+        if on != s.settings.lock_keys || look != s.settings.lock_look {
             s.settings.lock_keys = on;
+            s.settings.lock_look = look;
             s.save_settings();
             let _ = env.runtime.send(Msg::Settings);
         }
         let note = if s.gate.undetected() {
             "This system does not report its lock screen, so keys stay active there."
         } else {
-            "Text, Hotkey, Open, Website, Multimedia and plugin keys do nothing until \
-             you unlock. Page, folder, profile and device keys keep working."
+            "Keys do nothing until you unlock. Sleep turns the keys off or shows the \
+             screensaver; Standby Screen shows the picture stored on the device."
         };
-        value_dim(ui, o, VALUE_X, 240.0, 440.0, note);
+        value_dim(ui, o, VALUE_X, 279.0, 440.0, note);
     }
 
     fn create_backup(&mut self, ctx: &egui::Context, env: &Env<'_>) {

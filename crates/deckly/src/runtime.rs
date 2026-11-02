@@ -15,7 +15,7 @@ use crate::sequence::{self, Press, Step};
 use crate::store;
 use deckly_core::profile::{DEFAULT_PROFILE_NAME, MAX_FOLDER_DEPTH};
 use deckly_core::{
-    DeviceKind, DeviceModel, KeyConfig, Orientation, Page, Profile, Settings, TitleStyle,
+    DeviceKind, DeviceModel, KeyConfig, LockLook, Orientation, Page, Profile, Settings, TitleStyle,
 };
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
 use deckly_plugin_host::{Host, Instance, protocol};
@@ -362,6 +362,8 @@ pub enum Msg {
     PluginStarted(String),
     /// Device preferences or the global title style changed.
     Settings,
+    /// The computer locked or unlocked.
+    ScreenLock,
     Outcome(Handle, Result<Outcome, String>),
     /// A sequence pressed or released a plugin action.
     PluginStep {
@@ -398,6 +400,8 @@ struct Link {
     asleep: bool,
     /// The keys show the screensaver (only while asleep).
     screensaver: bool,
+    /// The computer locking put it to sleep; unlocking wakes it.
+    locked_asleep: bool,
     /// Last key press, for Sleep After.
     active_at: Instant,
     /// The plugin key shown on each key, as its plugin was told.
@@ -425,6 +429,7 @@ impl Link {
             orientation: Orientation::Standard,
             asleep: false,
             screensaver: false,
+            locked_asleep: false,
             active_at: Instant::now(),
             shown: vec![None; usize::from(info.model.key_count())],
             members: HashMap::new(),
@@ -470,6 +475,10 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
     let action_tx = tx.clone();
     let step_tx = tx.clone();
     let gate = lock(&state).gate.clone();
+    let lock_tx = tx.clone();
+    gate.on_change(move || {
+        let _ = lock_tx.send(Msg::ScreenLock);
+    });
     screen_lock::watch(gate.clone());
     let run = move || {
         // DECKLY_NO_DEVICES=1 runs the editor without opening any device,
@@ -553,6 +562,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     // Deckly's back.
                     devices.set_sleep_timer(info.handle, 0);
                     apply_settings(&state, &devices, &mut links);
+                    follow_lock(&state, &devices, &mut links);
                     refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
@@ -627,7 +637,13 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 }
                 Msg::Settings => {
                     apply_settings(&state, &devices, &mut links);
+                    follow_lock(&state, &devices, &mut links);
                     refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                }
+                Msg::ScreenLock => {
+                    follow_lock(&state, &devices, &mut links);
+                    refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
+                    repaint();
                 }
                 Msg::Outcome(handle, Ok(Outcome::Sleep)) => {
                     let awake = links.get(&handle).is_some_and(|l| l.enabled && !l.asleep);
@@ -729,6 +745,40 @@ fn apply_settings(state: &Shared, devices: &DeviceManager, links: &mut Links) {
     }
 }
 
+/// Keeps devices asleep while the computer is locked, so their keys show
+/// nothing of the profile, and wakes the ones this put to sleep once it
+/// unlocks.
+fn follow_lock(state: &Shared, devices: &DeviceManager, links: &mut Links) {
+    let s = lock(state);
+    if s.gate.locked_out() {
+        let look = s.settings.lock_look;
+        drop(s);
+        let mut awake = Vec::new();
+        for (&handle, link) in links.iter_mut() {
+            if link.enabled && !link.asleep {
+                link.locked_asleep = true;
+                if look == LockLook::Standby {
+                    // Like a screensaver, it keeps the keys until waking.
+                    devices.reset(handle);
+                    link.asleep = true;
+                    link.screensaver = true;
+                } else {
+                    awake.push(handle);
+                }
+            }
+        }
+        put_to_sleep(state, devices, links, awake);
+        return;
+    }
+    for (&handle, link) in links.iter_mut() {
+        if std::mem::take(&mut link.locked_asleep) && link.enabled {
+            link.wake();
+            link.active_at = Instant::now();
+            devices.set_brightness(handle, s.settings.device(&link.serial).brightness);
+        }
+    }
+}
+
 /// A key change that reaches an action.
 struct KeyHit {
     config: KeyConfig,
@@ -773,10 +823,13 @@ fn key_event(
         return None;
     }
     link.active_at = Instant::now();
-    // The first press only wakes a sleeping device.
+    // The first press only wakes a sleeping device, and the lock screen
+    // keeps it asleep.
     if link.asleep {
-        link.wake();
-        devices.set_brightness(handle, s.settings.device(&link.serial).brightness);
+        if !s.gate.locked_out() {
+            link.wake();
+            devices.set_brightness(handle, s.settings.device(&link.serial).brightness);
+        }
         return None;
     }
     s.pressed.insert((handle, key));
@@ -1578,6 +1631,112 @@ mod tests {
             plugin: false,
             context: "p.0".into(),
         }
+    }
+
+    fn one_device(settings: Settings) -> (Shared, DeviceManager, Links) {
+        let profile = Profile::new("Test", DeviceKind::Mk2);
+        let info = ConnectedDevice {
+            handle: 1,
+            model: profile.model(),
+            serial: "S1".into(),
+            firmware: None,
+        };
+        let state = Arc::new(Mutex::new(State::new(vec![profile], settings)));
+        let links = Links::from([(1, Link::new(&info))]);
+        (state, DeviceManager::disabled(), links)
+    }
+
+    #[test]
+    fn locking_puts_devices_to_sleep_and_unlocking_wakes_them() {
+        let (state, devices, mut links) = one_device(Settings::default());
+        let gate = lock(&state).gate.clone();
+        gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        assert!(links[&1].asleep);
+        gate.set_locked(false);
+        follow_lock(&state, &devices, &mut links);
+        assert!(!links[&1].asleep);
+    }
+
+    #[test]
+    fn the_standby_look_gives_the_keys_back_on_unlocking() {
+        let settings = Settings {
+            lock_look: LockLook::Standby,
+            ..Settings::default()
+        };
+        let (state, devices, mut links) = one_device(settings);
+        links.get_mut(&1).unwrap().sent[0] = Some(7);
+        let gate = lock(&state).gate.clone();
+        gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        assert!(links[&1].asleep && links[&1].screensaver);
+        gate.set_locked(false);
+        follow_lock(&state, &devices, &mut links);
+        assert!(!links[&1].asleep && !links[&1].screensaver);
+        // Its pictures were replaced, so they all go out again.
+        assert_eq!(links[&1].sent[0], None);
+    }
+
+    #[test]
+    fn a_press_does_not_wake_a_device_while_locked() {
+        let (state, devices, mut links) = one_device(Settings::default());
+        let gate = lock(&state).gate.clone();
+        gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        assert!(key_event(&state, &devices, &mut links, 1, 0, true).is_none());
+        assert!(links[&1].asleep);
+        // A release after unlocking leaves nothing behind.
+        assert!(key_event(&state, &devices, &mut links, 1, 0, false).is_none());
+    }
+
+    #[test]
+    fn a_device_asleep_before_the_lock_stays_asleep_after_it() {
+        let (state, devices, mut links) = one_device(Settings::default());
+        links.get_mut(&1).unwrap().asleep = true;
+        let gate = lock(&state).gate.clone();
+        gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        gate.set_locked(false);
+        follow_lock(&state, &devices, &mut links);
+        assert!(links[&1].asleep);
+        // Its first press wakes it as usual.
+        assert!(key_event(&state, &devices, &mut links, 1, 0, true).is_none());
+        assert!(!links[&1].asleep);
+    }
+
+    #[test]
+    fn with_the_setting_off_locking_leaves_devices_awake() {
+        let settings = Settings {
+            lock_keys: false,
+            ..Settings::default()
+        };
+        let (state, devices, mut links) = one_device(settings);
+        lock(&state).gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        assert!(!links[&1].asleep);
+    }
+
+    #[test]
+    fn a_disabled_device_stays_out_of_the_lock() {
+        let (state, devices, mut links) = one_device(Settings::default());
+        links.get_mut(&1).unwrap().enabled = false;
+        lock(&state).gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        assert!(!links[&1].asleep);
+    }
+
+    #[test]
+    fn settings_applied_while_locked_leave_the_device_asleep() {
+        let (state, devices, mut links) = one_device(Settings::default());
+        let gate = lock(&state).gate.clone();
+        gate.set_locked(true);
+        follow_lock(&state, &devices, &mut links);
+        apply_settings(&state, &devices, &mut links);
+        follow_lock(&state, &devices, &mut links);
+        assert!(links[&1].asleep);
+        gate.set_locked(false);
+        follow_lock(&state, &devices, &mut links);
+        assert!(!links[&1].asleep);
     }
 
     #[test]

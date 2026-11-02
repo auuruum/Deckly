@@ -15,7 +15,8 @@ Planned features, chosen by the project owner on 2026-11-02.
 - [ ] Conditions in Multi Actions: if window X is open, do Y.
 - [x] Lock the keys while the computer is locked, so Text and Hotkey cannot
       fire on the lock screen.
-      Done: Preferences > General > Lock Screen, on by default.
+      Done: Preferences > General > Lock Screen, with Sleep or Standby Screen
+      on the device while locked.
 
 ## Actions
 

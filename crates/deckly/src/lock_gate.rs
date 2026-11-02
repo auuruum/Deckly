@@ -7,17 +7,20 @@
 //! state, so keys stay usable where the lock screen cannot be detected.
 
 use crate::actions;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Debug, Default)]
+type Notify = Box<dyn Fn() + Send + Sync>;
+
+#[derive(Clone, Default)]
 pub struct Gate(Arc<Flags>);
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Flags {
     enabled: AtomicBool,
     locked: AtomicBool,
     undetected: AtomicBool,
+    changed: OnceLock<Notify>,
 }
 
 impl Gate {
@@ -32,7 +35,16 @@ impl Gate {
     }
 
     pub fn set_locked(&self, locked: bool) {
-        self.0.locked.store(locked, Ordering::Relaxed);
+        let was = self.0.locked.swap(locked, Ordering::Relaxed);
+        if let (true, Some(changed)) = (was != locked, self.0.changed.get()) {
+            changed();
+        }
+    }
+
+    /// Calls `changed` whenever the lock state changes, on the watcher's
+    /// thread. Set it once, before the watcher starts.
+    pub fn on_change(&self, changed: impl Fn() + Send + Sync + 'static) {
+        let _ = self.0.changed.set(Box::new(changed));
     }
 
     /// This system cannot tell Deckly when it locks.
@@ -44,11 +56,14 @@ impl Gate {
         self.0.undetected.load(Ordering::Relaxed)
     }
 
+    /// Whether the computer is locked and the setting applies.
+    pub fn locked_out(&self) -> bool {
+        self.0.enabled.load(Ordering::Relaxed) && self.0.locked.load(Ordering::Relaxed)
+    }
+
     /// Whether an action must not run now.
     pub fn blocks(&self, action: &str) -> bool {
-        self.0.enabled.load(Ordering::Relaxed)
-            && self.0.locked.load(Ordering::Relaxed)
-            && !actions::runs_while_locked(action)
+        self.locked_out() && !actions::runs_while_locked(action)
     }
 }
 
@@ -108,6 +123,21 @@ mod tests {
         gate.set_locked(true);
         gate.set_undetected();
         assert!(gate.blocks(actions::TEXT));
+    }
+
+    #[test]
+    fn only_real_changes_are_reported() {
+        use std::sync::atomic::AtomicUsize;
+        let count = Arc::new(AtomicUsize::new(0));
+        let gate = Gate::new(true);
+        let seen = count.clone();
+        gate.on_change(move || {
+            seen.fetch_add(1, Ordering::Relaxed);
+        });
+        for locked in [false, true, true, false, false] {
+            gate.set_locked(locked);
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 2);
     }
 
     #[test]

@@ -40,6 +40,8 @@ pub struct Settings {
     pub profile_order: Vec<String>,
     /// While the computer is locked, keys cannot act on the machine.
     pub lock_keys: bool,
+    /// What devices show while `lock_keys` holds them.
+    pub lock_look: LockLook,
 }
 
 impl Default for Settings {
@@ -52,6 +54,29 @@ impl Default for Settings {
             key_press: KeyPress::default(),
             profile_order: Vec::new(),
             lock_keys: true,
+            lock_look: LockLook::default(),
+        }
+    }
+}
+
+/// What a device shows while the computer is locked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockLook {
+    /// As after Sleep After: the screensaver, or the backlight off.
+    #[default]
+    Sleep,
+    /// The picture stored on the device.
+    Standby,
+}
+
+impl LockLook {
+    pub const ALL: [LockLook; 2] = [LockLook::Sleep, LockLook::Standby];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LockLook::Sleep => "Sleep",
+            LockLook::Standby => "Standby Screen",
         }
     }
 }
@@ -411,6 +436,7 @@ mod tests {
         };
         s.profile_order = strings(&["p2", "p1"]);
         s.lock_keys = false;
+        s.lock_look = LockLook::Standby;
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
     }
