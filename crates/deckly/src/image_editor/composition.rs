@@ -50,20 +50,13 @@ impl Layer {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Composition {
+    /// Pure black by default, matching built-in keys. A near-black color
+    /// leaves a visible background around the glyph on the hardware.
     pub background: [u8; 3],
     /// Back to front.
     pub layers: Vec<Layer>,
-}
-
-impl Default for Composition {
-    fn default() -> Self {
-        Self {
-            background: [24, 26, 32],
-            layers: Vec::new(),
-        }
-    }
 }
 
 impl Composition {
@@ -272,6 +265,56 @@ mod tests {
         ));
         layer.size = 0.5;
         layer
+    }
+
+    #[test]
+    fn default_icon_background_matches_builtin_previews_png_and_device_output() {
+        use crate::render::{Live, Renderer};
+        use deckly_core::{DeviceModel, KeyConfig, Orientation};
+
+        let mut draft = Composition::default();
+        draft
+            .add(Layer::new(Content::Icon(
+                "Arrows out line horizontal",
+                egui_phosphor::regular::ARROWS_OUT_LINE_HORIZONTAL,
+            )))
+            .unwrap();
+        let image = draft.render(&Fonts::new().unwrap()).unwrap();
+        let key = KeyConfig::new(crate::actions::TEXT, serde_json::json!({}));
+        let mut renderer = Renderer::new();
+        let default = renderer.render(Some(&key), 72, Live::default(), None);
+        assert_eq!(image.get_pixel(0, 0), default.get_pixel(0, 0));
+        assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0, 255]);
+
+        let path = std::env::temp_dir().join(format!(
+            "deckly-black-background-{}.png",
+            uuid::Uuid::new_v4()
+        ));
+        image.save(&path).unwrap();
+        assert_eq!(crate::render::decode_file(&path).unwrap(), image);
+        let mut key = key;
+        key.image = Some(path.clone());
+        for size in [72, 96, SIZE] {
+            let preview = renderer.render(Some(&key), size, Live::default(), None);
+            assert_eq!(preview.get_pixel(0, 0).0, [0, 0, 0, 255]);
+        }
+        for model in DeviceModel::ALL {
+            let bytes = renderer.device_image(
+                Some(&key),
+                Live::default(),
+                None,
+                model,
+                Orientation::Standard,
+            );
+            let decoded = image::load_from_memory(&bytes).unwrap().into_rgba8();
+            // JPEG can introduce a small rounding error; BMP remains exact.
+            assert!(
+                decoded.get_pixel(0, 0).0[..3].iter().all(|&c| c <= 2),
+                "{}",
+                model.name
+            );
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
