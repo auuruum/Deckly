@@ -1345,7 +1345,7 @@ impl App {
             let shown_page = profile.pages.get(i);
             let picture = shown_page
                 .and_then(|p| p.icon.as_deref())
-                .and_then(|path| prefs::page_picture(ui.ctx(), path));
+                .and_then(|path| prefs::page_picture(ui.ctx(), path, 14.0));
             if let Some(picture) = picture {
                 prefs::paint_page_picture(&painter, &picture, r.center(), 14.0, color);
             } else {

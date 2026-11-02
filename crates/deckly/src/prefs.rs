@@ -1918,18 +1918,21 @@ fn edit_page(env: &mut Env<'_>, profile: &str, page: &str, edit: impl FnOnce(&mu
 
 /// A page's picture, or a frame with its number.
 fn page_glyph(ui: &Ui, center: Pos2, size: f32, page: &PageRow, number: usize) {
-    let area = Rect::from_center_size(center, Vec2::splat(size));
     let picture = page
         .icon
         .as_deref()
-        .and_then(|path| page_picture(ui.ctx(), path));
+        .and_then(|path| page_picture(ui.ctx(), path, size));
     if let Some(picture) = picture {
         paint_page_picture(ui.painter(), &picture, center, size, Color32::WHITE);
     } else {
+        // Whole device pixels for the frame and its line, or both come out blurry.
+        let ppp = ui.ctx().pixels_per_point();
+        let area = pixel_rect(center, Vec2::splat(size), ppp);
+        let line = (1.5 * ppp).round().max(1.0) / ppp;
         ui.painter().rect_stroke(
             area,
             CornerRadius::same(3),
-            Stroke::new(1.5, TEXT),
+            Stroke::new(line, TEXT),
             egui::StrokeKind::Inside,
         );
         centered_glyph(ui, center, &number.to_string(), size * 0.6, TEXT);
@@ -1942,8 +1945,12 @@ fn centered_glyph(ui: &Ui, center: Pos2, glyph: &str, size: f32, color: Color32)
         .painter()
         .layout_no_wrap(glyph.to_owned(), font(size), color);
     if galley.mesh_bounds.is_finite() {
-        let origin = center - galley.mesh_bounds.center().to_vec2();
-        ui.painter().galley(origin, galley, color);
+        // egui snaps text to whole pixels and rounds a half up, which puts a
+        // small digit a pixel right of the frame's middle. Round it down here.
+        let ppp = ui.ctx().pixels_per_point();
+        let origin = (center - galley.mesh_bounds.center().to_vec2()).to_vec2() * ppp;
+        let origin = (origin - vec2(0.5, 0.5)).ceil() / ppp;
+        ui.painter().galley(origin.to_pos2(), galley, color);
     }
 }
 
@@ -1957,25 +1964,59 @@ pub(crate) fn paint_page_picture(
 ) {
     let pixels = picture.size_vec2();
     let fitted = pixels * (size / pixels.max_elem().max(1.0));
-    let area = Rect::from_center_size(center, fitted);
+    let area = pixel_rect(center, fitted, painter.pixels_per_point());
     let whole = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
     painter.image(picture.id(), area, whole, color);
 }
 
-/// The picture at `path` as a texture. Both windows ask every frame, so it
-/// stays in egui's memory, also when it cannot be read.
-pub(crate) fn page_picture(ctx: &egui::Context, path: &Path) -> Option<TextureHandle> {
-    let id = egui::Id::new(("page-picture", path));
+/// A rect of `size` around `center` whose edges sit on device pixels.
+fn pixel_rect(center: Pos2, size: Vec2, ppp: f32) -> Rect {
+    let size = (size * ppp).round();
+    let min = (center.to_vec2() * ppp - size / 2.0).round();
+    Rect::from_min_size((min / ppp).to_pos2(), size / ppp)
+}
+
+/// The picture at `path` as a texture for an icon `size` points wide. Both
+/// windows ask every frame, so it stays in egui's memory, also when it cannot
+/// be read.
+pub(crate) fn page_picture(ctx: &egui::Context, path: &Path, size: f32) -> Option<TextureHandle> {
+    let target = (size * ctx.pixels_per_point()).round().max(1.0) as u32;
+    let id = egui::Id::new(("page-picture", path, target));
     if let Some(known) = ctx.data(|d| d.get_temp::<Option<TextureHandle>>(id)) {
         return known;
     }
     let picture = plugins::decode_picture(path).ok().map(|image| {
-        let size = [image.width() as usize, image.height() as usize];
-        let pixels = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        let pixels = shrink_to(image, target);
         ctx.load_texture("page-picture", pixels, TextureOptions::LINEAR)
     });
     ctx.data_mut(|d| d.insert_temp(id, picture.clone()));
     picture
+}
+
+/// Scales a larger picture down to `target` pixels on its long side. egui-wgpu
+/// has no mipmaps, so a big icon drawn small would alias. Colour is scaled
+/// premultiplied so transparent pixels leave no dark edge.
+fn shrink_to(mut image: image::RgbaImage, target: u32) -> ColorImage {
+    let long = image.width().max(image.height());
+    if long > target {
+        for px in image.pixels_mut() {
+            let a = u32::from(px.0[3]);
+            for c in &mut px.0[..3] {
+                *c = ((u32::from(*c) * a + 127) / 255) as u8;
+            }
+        }
+        let scale = |n: u32| (n * target / long).max(1);
+        image = image::imageops::resize(
+            &image,
+            scale(image.width()),
+            scale(image.height()),
+            image::imageops::FilterType::Lanczos3,
+        );
+        let size = [image.width() as usize, image.height() as usize];
+        return ColorImage::from_rgba_premultiplied(size, image.as_raw());
+    }
+    let size = [image.width() as usize, image.height() as usize];
+    ColorImage::from_rgba_unmultiplied(size, image.as_raw())
 }
 
 /// Show, position, size and colour controls for a title style, laid out
@@ -2392,6 +2433,23 @@ mod tests {
     }
 
     #[test]
+    fn a_big_icon_is_shrunk_to_its_pixels_without_a_dark_edge() {
+        // White ink on transparent black: scaling straight alpha would gray the edge.
+        let mut icon = image::RgbaImage::from_pixel(64, 32, image::Rgba([0, 0, 0, 0]));
+        for x in 16..48 {
+            for y in 8..24 {
+                icon.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        let small = shrink_to(icon.clone(), 16);
+        assert_eq!(small.size, [16, 8]);
+        assert!(small.pixels.iter().all(|p| p.r() <= p.a()));
+        assert_eq!(small.pixels[4 * 16 + 8], Color32::WHITE);
+        // A small icon is left as it is.
+        assert_eq!(shrink_to(icon, 128).size, [64, 32]);
+    }
+
+    #[test]
     fn page_controls_center_visible_glyphs_and_preserve_picture_aspect_ratio() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let ctx = egui::Context::default();
@@ -2425,15 +2483,19 @@ mod tests {
                     egui::Shape::Text(text) => {
                         let ink = text.galley.mesh_bounds.translate(text.pos.to_vec2());
                         assert!(
-                            (ink.center() - center).length() < 0.01,
+                            (ink.center() - center).abs().max_elem() <= 0.5 / scale + 0.01,
                             "scale {scale}: {ink:?}"
                         );
                         glyphs += 1;
                     }
                     egui::Shape::Mesh(mesh) if mesh.texture_id == texture.id() => {
                         let bounds = mesh.calc_bounds();
-                        assert_eq!(bounds.center(), center);
-                        assert_eq!(bounds.size(), vec2(20.0, 10.0));
+                        // Edges sit on device pixels, so up to one pixel off.
+                        let pixel = 1.0 / scale;
+                        assert!((bounds.center() - center).abs().max_elem() <= pixel);
+                        assert!((bounds.size() - vec2(20.0, 10.0)).abs().max_elem() <= pixel);
+                        let device = bounds.min * scale;
+                        assert!((device - device.round()).abs().max_elem() < 1e-3);
                         pictures += 1;
                     }
                     _ => {}
