@@ -16,7 +16,6 @@ Planned features, chosen by the project owner on 2026-11-02.
       Wayland it needs the wlr foreign toplevel protocol; tested on Hyprland.
 - [x] Export a single profile, so people can share one without a full backup.
       Done: Preferences > Profiles > Export saves a `.decklyProfile`.
-- [ ] Conditions in Multi Actions: if window X is open, do Y.
 - [x] Lock the keys while the computer is locked, so Text and Hotkey cannot
       fire on the lock screen.
       Done: Preferences > General > Lock Screen, with Sleep or Standby Screen
@@ -70,7 +69,11 @@ A static registry, with no server or accounts.
 - [ ] List only what the license or the author allows. Take nothing from
       Elgato's marketplace.
 
-## Translations (lower priority)
+## Lower priority
+
+- [ ] Conditions in Multi Actions: if window X is open, do Y.
+
+### Translations
 
 - [ ] Move the UI strings (about 270) out of the code.
 - [ ] Add a language choice, and tell plugins the language instead of the fixed
