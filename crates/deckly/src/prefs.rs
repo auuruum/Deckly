@@ -89,6 +89,8 @@ pub struct Preferences {
     renaming: Option<Rename>,
     /// Profile waiting for delete confirmation.
     confirm_delete: Option<String>,
+    /// Profile and page waiting for page deletion confirmation.
+    confirm_delete_page: Option<(String, String)>,
     /// Style tab edits; they take effect with Apply.
     style: Option<TitleStyle>,
     /// Read from the system when the General tab is first shown.
@@ -164,6 +166,19 @@ fn profile_commands(ui: &mut Ui, profile: &ProfileRow, can_delete: bool) -> Opti
     selected
 }
 
+fn page_delete_menu(ui: &mut Ui, can_delete: bool) -> bool {
+    let delete = ui
+        .add_enabled(
+            can_delete,
+            egui::Button::new(format!("{}  Delete Page", icon::TRASH)),
+        )
+        .clicked();
+    if delete {
+        ui.close();
+    }
+    delete
+}
+
 impl ProfileRow {
     fn new(profile: &Profile) -> Self {
         let page = |(index, page): (usize, &Page)| PageRow {
@@ -209,6 +224,7 @@ impl Preferences {
             expanded: HashSet::new(),
             renaming: None,
             confirm_delete: None,
+            confirm_delete_page: None,
             style: None,
             autostart: None,
             official: None,
@@ -1045,6 +1061,7 @@ impl Preferences {
                             self.profile = Some(id.clone());
                             self.page = None;
                             self.confirm_delete = None;
+                            self.confirm_delete_page = None;
                         }
                         if resp.double_clicked() {
                             start = Some((id.clone(), name.clone()));
@@ -1056,7 +1073,7 @@ impl Preferences {
                         });
                         if open {
                             for (number, page) in p.pages.iter().enumerate() {
-                                self.page_row(ui, id, page, number + 1);
+                                self.page_row(ui, id, page, number + 1, p.pages.len() > 1);
                             }
                         }
                     }
@@ -1126,11 +1143,32 @@ impl Preferences {
             self.confirm_delete = None;
         }
         let minus = at(o, 45.0, 444.0, 24.0, 24.0);
-        if icon_button(ui, minus, icon::MINUS, can_delete && self.page.is_none())
-            .on_hover_text("Delete profile")
+        let selected = profiles
+            .iter()
+            .find(|p| Some(&p.id) == self.profile.as_ref());
+        let selected_page = selected.and_then(|p| {
+            p.pages
+                .iter()
+                .find(|page| Some(&page.id) == self.page.as_ref())
+        });
+        let can_delete_selected = if selected_page.is_some() {
+            selected.is_some_and(|p| p.pages.len() > 1)
+        } else {
+            can_delete
+        };
+        if icon_button(ui, minus, icon::MINUS, can_delete_selected)
+            .on_hover_text(if selected_page.is_some() {
+                "Delete page"
+            } else {
+                "Delete profile"
+            })
             .clicked()
         {
-            self.confirm_delete = self.profile.clone();
+            if let (Some(profile), Some(page)) = (selected, selected_page) {
+                self.confirm_delete_page = Some((profile.id.clone(), page.id.clone()));
+            } else {
+                self.confirm_delete = self.profile.clone();
+            }
         }
         let options = icon_button(ui, at(o, 69.0, 444.0, 24.0, 24.0), icon::GEAR, true)
             .on_hover_text("Profile options");
@@ -1139,7 +1177,11 @@ impl Preferences {
             .find(|p| Some(&p.id) == self.profile.as_ref())
         {
             egui::Popup::menu(&options).show(|ui| {
-                if let Some(pick) = profile_commands(ui, profile, can_delete) {
+                if let Some(page) = selected_page {
+                    if page_delete_menu(ui, profile.pages.len() > 1) {
+                        self.confirm_delete_page = Some((profile.id.clone(), page.id.clone()));
+                    }
+                } else if let Some(pick) = profile_commands(ui, profile, can_delete) {
                     command = Some((profile.id.clone(), pick));
                 }
             });
@@ -1162,6 +1204,7 @@ impl Preferences {
             .position(|p| Some(&p.id) == self.page.as_ref());
         if let Some((index, page)) = page.and_then(|i| Some((i, profile.pages.get(i)?))) {
             page_details(ui, o, env, &profile.id, page, index + 1);
+            self.page_delete_confirmation(ui, o, env, &profile.id, page);
             return;
         }
         let (id, name, pages) = (
@@ -1242,7 +1285,14 @@ impl Preferences {
     }
 
     /// A page of an open profile in the list; `number` counts from 1.
-    fn page_row(&mut self, ui: &mut Ui, profile: &str, page: &PageRow, number: usize) {
+    fn page_row(
+        &mut self,
+        ui: &mut Ui,
+        profile: &str,
+        page: &PageRow,
+        number: usize,
+        can_delete: bool,
+    ) {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
         if self.page.as_ref() == Some(&page.id) {
             ui.painter()
@@ -1260,10 +1310,51 @@ impl Preferences {
             font(13.0),
             TEXT,
         );
-        if resp.clicked() {
+        if resp.clicked() || resp.secondary_clicked() {
             self.profile = Some(profile.to_owned());
             self.page = Some(page.id.clone());
             self.confirm_delete = None;
+            self.confirm_delete_page = None;
+        }
+        resp.context_menu(|ui| {
+            if page_delete_menu(ui, can_delete) {
+                self.confirm_delete_page = Some((profile.to_owned(), page.id.clone()));
+            }
+        });
+    }
+
+    fn page_delete_confirmation(
+        &mut self,
+        ui: &mut Ui,
+        o: Pos2,
+        env: &mut Env<'_>,
+        profile: &str,
+        page: &PageRow,
+    ) {
+        if self
+            .confirm_delete_page
+            .as_ref()
+            .is_none_or(|(p, id)| p != profile || *id != page.id)
+        {
+            return;
+        }
+        let text = format!("Delete \"{}\" and all its actions?", page.title);
+        value(ui, o, 272.0, 400.0, 22.0, &text);
+        if button(ui, at(o, 272.0, 428.0, 70.0, 22.0), "Delete").clicked() {
+            let result = runtime::lock(env.state).delete_page(profile, &page.id);
+            match result {
+                Ok(neighbor) => {
+                    self.page = neighbor;
+                    let _ = env.runtime.send(Msg::Refresh);
+                }
+                Err(error) => {
+                    runtime::lock(env.state).notify(format!("Cannot delete page: {error}"))
+                }
+            }
+            self.confirm_delete_page = None;
+        }
+        if button(ui, at(o, 352.0, 428.0, 70.0, 22.0), "Cancel").clicked() {
+            self.confirm_delete_page = None;
         }
     }
 
@@ -1988,6 +2079,81 @@ fn combo(ui: &mut Ui, rect: Rect, id: &str, selected: &str, items: impl FnOnce(&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_click_selects_the_page_and_delete_requires_confirmation() {
+        for can_delete in [true, false] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            let mut prefs = Preferences::new();
+            prefs.profile = Some("other".into());
+            let page = PageRow {
+                id: "page".into(),
+                name: String::new(),
+                title: "Page 2".into(),
+                icon: None,
+            };
+            let pass = |prefs: &mut Preferences, events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::no_frame().show(root, |ui| {
+                            prefs.page_row(ui, "profile", &page, 2, can_delete)
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+                output
+            };
+            pass(&mut prefs, vec![]);
+            pass(&mut prefs, vec![]);
+            let point = pos2(100.0, 16.0);
+            let click = |prefs: &mut Preferences, pos, button| {
+                pass(
+                    prefs,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button,
+                            pressed: true,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                );
+                pass(
+                    prefs,
+                    vec![egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    }],
+                )
+            };
+            click(&mut prefs, point, egui::PointerButton::Secondary);
+            assert_eq!(prefs.profile.as_deref(), Some("profile"));
+            assert_eq!(prefs.page.as_deref(), Some("page"));
+            assert!(prefs.confirm_delete_page.is_none());
+            let output = pass(&mut prefs, vec![]);
+            let delete = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text().contains("Delete Page") => {
+                        Some(text.pos + text.galley.rect.center().to_vec2())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            click(&mut prefs, delete, egui::PointerButton::Primary);
+            assert_eq!(prefs.confirm_delete_page.is_some(), can_delete);
+        }
+    }
 
     fn moved_ids(from: usize, to: usize) -> Vec<String> {
         let ids = ["a", "b", "c", "d"].map(str::to_owned).to_vec();

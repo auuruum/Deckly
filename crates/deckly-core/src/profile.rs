@@ -392,6 +392,18 @@ impl Profile {
         Some(id)
     }
 
+    /// Deletes a regular page and its unreachable folders, keeping at least one page.
+    /// Returns the removed page's former index.
+    pub fn remove_page(&mut self, id: &str) -> Option<usize> {
+        if self.pages.len() <= 1 {
+            return None;
+        }
+        let index = self.pages.iter().position(|page| page.id == id)?;
+        self.pages.remove(index);
+        self.normalize_folders();
+        Some(index)
+    }
+
     pub fn folder_mut(&mut self, id: &str) -> Option<&mut Page> {
         self.folders.iter_mut().find(|f| f.id == id)
     }
@@ -695,6 +707,31 @@ mod tests {
         while profile.add_page().is_some() {}
         assert_eq!(profile.pages.len(), MAX_PAGES);
         assert!(profile.add_page().is_none());
+    }
+
+    #[test]
+    fn deleting_pages_removes_their_folders_but_preserves_the_last_page() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let first = profile.pages[0].id.clone();
+        let second = profile.add_page().unwrap();
+        for page in &mut profile.pages {
+            page.keys
+                .insert(1, KeyConfig::new(FOLDER_ACTION, json!({})));
+        }
+        profile.normalize_folders();
+        let remaining_folder = profile.pages[1].keys[&1].folder().unwrap().to_owned();
+        assert_eq!(profile.remove_page("missing"), None);
+        assert_eq!(profile.remove_page(&first), Some(0));
+        assert_eq!(profile.pages[0].id, second);
+        assert_eq!(profile.folders.len(), 1);
+        assert_eq!(profile.folders[0].id, remaining_folder);
+        let before = profile.clone();
+        assert_eq!(profile.remove_page(&second), None);
+        assert_eq!(profile, before);
+        assert_eq!(
+            Profile::from_json(&profile.to_json().unwrap()).unwrap(),
+            profile
+        );
     }
     #[test]
     fn round_trip() {

@@ -180,6 +180,45 @@ impl State {
         self.save_settings();
     }
 
+    /// Saves a page deletion before applying it, preserving the current page
+    /// and any open folders that still exist. Returns a neighboring page id.
+    pub fn delete_page(&mut self, profile: &str, page: &str) -> Result<Option<String>, String> {
+        self.delete_page_saving(profile, page, store::save_profile)
+    }
+
+    fn delete_page_saving(
+        &mut self,
+        profile: &str,
+        page: &str,
+        save: impl FnOnce(&Profile) -> Result<(), String>,
+    ) -> Result<Option<String>, String> {
+        let Some(original) = self.profile(profile) else {
+            return Ok(None);
+        };
+        let current = self.page(original);
+        let mut edited = original.clone();
+        let Some(removed) = edited.remove_page(page) else {
+            return Ok(None);
+        };
+        let neighbor = edited
+            .pages
+            .get(removed.min(edited.pages.len().saturating_sub(1)))
+            .map(|page| page.id.clone());
+        save(&edited)?;
+        let current = if current > removed {
+            current.saturating_sub(1)
+        } else {
+            current
+        };
+        let folders = self.folder_path(&edited);
+        if let Some(target) = self.profile_mut(profile) {
+            *target = edited;
+        }
+        self.set_page(profile, current);
+        self.set_folder_path(profile, folders);
+        Ok(neighbor)
+    }
+
     /// Takes in imported or restored profiles, replacing those with the same
     /// id. They are saved already.
     pub fn adopt_profiles(&mut self, profiles: Vec<Profile>) {
@@ -1526,6 +1565,68 @@ mod tests {
             Settings::default(),
         );
         assert!(alone.placeholders().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_page_preserves_live_selection_and_rolls_back_failed_saves() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let first = profile.pages[0].id.clone();
+        let middle = profile.add_page().unwrap();
+        let last = profile.add_page().unwrap();
+        profile.pages[1]
+            .keys
+            .insert(0, KeyConfig::new(actions::CREATE_FOLDER, json!({})));
+        profile.normalize_folders();
+        let folder = profile.pages[1].keys[&0].folder().unwrap().to_owned();
+        let id = profile.id.clone();
+        let mut state = State::new(vec![profile.clone()], Settings::default());
+        state.set_page(&id, 1);
+        state.set_folder_path(&id, vec![folder.clone()]);
+        assert!(
+            state
+                .delete_page_saving(&id, &first, |_| Err("disk full".into()))
+                .is_err()
+        );
+        assert_eq!(state.profile(&id), Some(&profile));
+        assert_eq!(state.page(&profile), 1);
+        assert_eq!(
+            state.folder_path(&profile).as_slice(),
+            std::slice::from_ref(&folder)
+        );
+        assert_eq!(
+            state
+                .delete_page_saving(&id, &first, |saved| {
+                    assert_eq!(saved.pages.len(), 2);
+                    Ok(())
+                })
+                .unwrap(),
+            Some(middle.clone())
+        );
+        let edited = state.profile(&id).unwrap();
+        assert_eq!(state.page(edited), 0);
+        assert_eq!(state.folder_path(edited), [folder]);
+        assert_eq!(
+            state.delete_page_saving(&id, &middle, |_| Ok(())).unwrap(),
+            Some(last.clone())
+        );
+        let edited = state.profile(&id).unwrap();
+        assert_eq!(state.page(edited), 0);
+        assert!(state.folder_path(edited).is_empty());
+        assert!(edited.folders.is_empty());
+        assert_eq!(
+            state
+                .delete_page_saving(&id, &last, |_| panic!("last page must not be saved"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .delete_page_saving("missing", &last, |_| panic!(
+                    "missing profile must not be saved"
+                ))
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

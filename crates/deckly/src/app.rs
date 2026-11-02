@@ -1406,7 +1406,9 @@ impl App {
         if let Some(i) = delete
             && profile.pages.len() > 1
         {
-            profile.pages.remove(i);
+            if let Some(id) = profile.pages.get(i).map(|page| page.id.clone()) {
+                profile.remove_page(&id);
+            }
             new_page = if new_page > i || new_page >= profile.pages.len() {
                 new_page.saturating_sub(1)
             } else {
