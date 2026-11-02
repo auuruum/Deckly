@@ -34,6 +34,8 @@
   every action to the folder rule. Confirmation text at `0x14166bb00` describes
   overwriting custom action rules. Only these meanings were retained here;
   proprietary strings, code, images and profiles were not copied into the tree.
+- The owner's screenshot of 7.6.0 shows that the reset control opens a modal
+  question with a "do not ask again" checkbox, a confirm and a cancel button.
 
 ## Inferred
 
@@ -52,8 +54,9 @@
   for a parent key. Legacy profiles keep their behavior. Delays are bounded.
   Core tests cover sanitization, profile round trips and independent copies.
 - The parent inspector edits the folder default. An action's Folder Exit popup
-  edits inheritance or an override. Reset asks for confirmation, clears only
-  the current folder's overrides, and supports Undo. The four
+  edits inheritance or an override. Reset is always available, asks in a modal
+  dialog in Deckly's own words unless the user turned that off, clears only the
+  current folder's overrides, and supports Undo. The four
   `app::auto_exit_tests` exercise these controls, cancellation and reset scope.
 - The runtime schedules one deadline after a normal key's release, a completed
   sequence, or the chosen Key Logic action. Entering a folder alone starts
