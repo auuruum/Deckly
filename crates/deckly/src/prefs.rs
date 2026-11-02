@@ -8,6 +8,7 @@
 use crate::actions;
 use crate::backup;
 use crate::cropper::{Cropper, Purpose};
+use crate::image_editor::{self, Editor, ImageChoice, Mode, Selection};
 use crate::logo;
 use crate::os::autostart;
 use crate::plugins;
@@ -108,6 +109,46 @@ pub struct Preferences {
     cropper: Cropper,
     /// Select a duplicated profile when its background save finishes.
     pending_profile: Option<String>,
+    page_icon_editor: Option<PageIconEditor>,
+}
+
+struct PageIconEditor {
+    profile: String,
+    page: String,
+    editor: Editor,
+}
+
+impl PageIconEditor {
+    fn matches(&self, state: &runtime::State) -> bool {
+        state
+            .profile(&self.profile)
+            .and_then(|profile| profile.pages.iter().find(|page| page.id == self.page))
+            .is_some_and(|page| self.editor.matches_page(&self.profile, page))
+    }
+
+    /// Revalidate the destination after background image work; save before applying.
+    fn apply(
+        &self,
+        state: &mut runtime::State,
+        path: PathBuf,
+        save: impl FnOnce(&Profile) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        if !self.matches(state) {
+            return Ok(false);
+        }
+        let Some(mut profile) = state.profile(&self.profile).cloned() else {
+            return Ok(false);
+        };
+        let Some(page) = profile.pages.iter_mut().find(|page| page.id == self.page) else {
+            return Ok(false);
+        };
+        page.icon = Some(path);
+        save(&profile)?;
+        if let Some(target) = state.profile_mut(&self.profile) {
+            *target = profile;
+        }
+        Ok(true)
+    }
 }
 
 /// A profile as the Profiles tab lists it.
@@ -132,6 +173,11 @@ enum ProfileCommand {
     AddPage,
     Delete,
     Import,
+}
+
+enum PageCommand {
+    Delete,
+    Icon(ImageChoice),
 }
 
 /// The row menu and the options button expose the same commands.
@@ -166,7 +212,14 @@ fn profile_commands(ui: &mut Ui, profile: &ProfileRow, can_delete: bool) -> Opti
     selected
 }
 
-fn page_delete_menu(ui: &mut Ui, can_delete: bool) -> bool {
+fn page_menu(ui: &mut Ui, can_delete: bool, has_icon: bool) -> Option<PageCommand> {
+    let mut choice = None;
+    ui.menu_button(format!("{}  Change Icon", icon::IMAGE), |ui| {
+        if let Some(pick) = image_editor::image_menu(ui, has_icon) {
+            choice = Some(PageCommand::Icon(pick));
+        }
+    });
+    ui.separator();
     let delete = ui
         .add_enabled(
             can_delete,
@@ -176,7 +229,11 @@ fn page_delete_menu(ui: &mut Ui, can_delete: bool) -> bool {
     if delete {
         ui.close();
     }
-    delete
+    if delete {
+        Some(PageCommand::Delete)
+    } else {
+        choice
+    }
 }
 
 impl ProfileRow {
@@ -235,6 +292,7 @@ impl Preferences {
             advanced: None,
             cropper: Cropper::default(),
             pending_profile: None,
+            page_icon_editor: None,
         }
     }
 
@@ -251,6 +309,7 @@ impl Preferences {
     pub fn close(&mut self) {
         self.open = false;
         self.advanced = None;
+        self.page_icon_editor = None;
     }
 
     #[cfg(test)]
@@ -285,10 +344,63 @@ impl Preferences {
         });
         if !self.open {
             self.advanced = None;
+            self.page_icon_editor = None;
         }
         self.show_advanced(ctx, env);
         if let Some((purpose, image)) = self.cropper.show(ctx) {
             use_picture(env, purpose, image);
+        }
+        self.show_page_icon_editor(ctx, env);
+    }
+
+    fn show_page_icon_editor(&mut self, ctx: &egui::Context, env: &mut Env<'_>) {
+        let valid = self.open
+            && self.tab == Tab::Profiles
+            && self.page_icon_editor.as_ref().is_some_and(|edit| {
+                self.profile.as_ref() == Some(&edit.profile)
+                    && self.page.as_ref() == Some(&edit.page)
+                    && edit.matches(&runtime::lock(env.state))
+            });
+        if !valid {
+            self.page_icon_editor = None;
+            return;
+        }
+        let Some(edit) = self.page_icon_editor.as_mut() else {
+            return;
+        };
+        let builder = egui::ViewportBuilder::default()
+            .with_title("Page icon - Deckly")
+            .with_icon(logo::window_icon())
+            .with_inner_size([852.0, 742.0])
+            .with_min_inner_size([852.0, 742.0]);
+        let mut selection = Selection::Pending;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("page-icon-editor"),
+            builder,
+            |ui, _| {
+                if ui.ctx().input(|input| input.viewport().close_requested()) {
+                    selection = Selection::Cancelled;
+                } else {
+                    egui::CentralPanel::no_frame().show(ui, |ui| {
+                        selection = edit.editor.show(ui.ctx(), &edit.profile);
+                    });
+                }
+            },
+        );
+        match selection {
+            Selection::Pending => {}
+            Selection::Cancelled => self.page_icon_editor = None,
+            Selection::Image(path) => {
+                let mut state = runtime::lock(env.state);
+                match edit.apply(&mut state, path, store::save_profile) {
+                    Ok(true) => {
+                        let _ = env.runtime.send(Msg::Refresh);
+                    }
+                    Ok(false) => {}
+                    Err(error) => state.notify(format!("Cannot save page icon: {error}")),
+                }
+                self.page_icon_editor = None;
+            }
         }
     }
 
@@ -931,6 +1043,7 @@ impl Preferences {
         let mut start: Option<(String, String)> = None;
         let mut reorder = None;
         let mut command = None;
+        let mut image_command = None;
         let can_delete = profiles.len() > 1;
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical()
@@ -1073,7 +1186,11 @@ impl Preferences {
                         });
                         if open {
                             for (number, page) in p.pages.iter().enumerate() {
-                                self.page_row(ui, id, page, number + 1, p.pages.len() > 1);
+                                if let Some(choice) =
+                                    self.page_row(ui, id, page, number + 1, p.pages.len() > 1)
+                                {
+                                    image_command = Some((id.clone(), page.id.clone(), choice));
+                                }
                             }
                         }
                     }
@@ -1178,8 +1295,14 @@ impl Preferences {
         {
             egui::Popup::menu(&options).show(|ui| {
                 if let Some(page) = selected_page {
-                    if page_delete_menu(ui, profile.pages.len() > 1) {
-                        self.confirm_delete_page = Some((profile.id.clone(), page.id.clone()));
+                    match page_menu(ui, profile.pages.len() > 1, page.icon.is_some()) {
+                        Some(PageCommand::Delete) => {
+                            self.confirm_delete_page = Some((profile.id.clone(), page.id.clone()))
+                        }
+                        Some(PageCommand::Icon(choice)) => {
+                            image_command = Some((profile.id.clone(), page.id.clone(), choice))
+                        }
+                        None => {}
                     }
                 } else if let Some(pick) = profile_commands(ui, profile, can_delete) {
                     command = Some((profile.id.clone(), pick));
@@ -1189,6 +1312,9 @@ impl Preferences {
         if let Some((id, command)) = command {
             self.finish_rename(env);
             self.profile_command(ui.ctx(), env, &id, command);
+        }
+        if let Some((profile, page, choice)) = image_command {
+            self.page_image_command(ui.ctx(), env, &profile, &page, choice);
         }
 
         // Details of the selected page or profile.
@@ -1203,7 +1329,9 @@ impl Preferences {
             .iter()
             .position(|p| Some(&p.id) == self.page.as_ref());
         if let Some((index, page)) = page.and_then(|i| Some((i, profile.pages.get(i)?))) {
-            page_details(ui, o, env, &profile.id, page, index + 1);
+            if let Some(choice) = page_details(ui, o, env, &profile.id, page, index + 1) {
+                self.page_image_command(ui.ctx(), env, &profile.id, &page.id, choice);
+            }
             self.page_delete_confirmation(ui, o, env, &profile.id, page);
             return;
         }
@@ -1292,7 +1420,7 @@ impl Preferences {
         page: &PageRow,
         number: usize,
         can_delete: bool,
-    ) {
+    ) -> Option<ImageChoice> {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
         if self.page.as_ref() == Some(&page.id) {
             ui.painter()
@@ -1316,11 +1444,49 @@ impl Preferences {
             self.confirm_delete = None;
             self.confirm_delete_page = None;
         }
-        resp.context_menu(|ui| {
-            if page_delete_menu(ui, can_delete) {
-                self.confirm_delete_page = Some((profile.to_owned(), page.id.clone()));
+        let mut image = None;
+        resp.context_menu(|ui| match page_menu(ui, can_delete, page.icon.is_some()) {
+            Some(PageCommand::Delete) => {
+                self.confirm_delete_page = Some((profile.to_owned(), page.id.clone()))
             }
+            Some(PageCommand::Icon(choice)) => image = Some(choice),
+            None => {}
         });
+        image
+    }
+
+    fn page_image_command(
+        &mut self,
+        ctx: &egui::Context,
+        env: &mut Env<'_>,
+        profile: &str,
+        page: &str,
+        choice: ImageChoice,
+    ) {
+        self.confirm_delete_page = None;
+        self.page_icon_editor = None;
+        if choice == ImageChoice::Reset {
+            edit_page(env, profile, page, |page| page.icon = None);
+            return;
+        }
+        let source = runtime::lock(env.state)
+            .profile(profile)
+            .and_then(|profile| profile.pages.iter().find(|p| p.id == page))
+            .cloned();
+        let Some(source) = source else { return };
+        let mode = if choice == ImageChoice::Library {
+            Mode::Library
+        } else {
+            Mode::Create
+        };
+        let mut editor = Editor::new_page(profile, &source, mode);
+        if choice != ImageChoice::Upload || editor.upload(ctx) {
+            self.page_icon_editor = Some(PageIconEditor {
+                profile: profile.to_owned(),
+                page: page.to_owned(),
+                editor,
+            });
+        }
     }
 
     fn page_delete_confirmation(
@@ -1671,7 +1837,7 @@ fn page_details(
     profile: &str,
     page: &PageRow,
     number: usize,
-) {
+) -> Option<ImageChoice> {
     let (label_x, field_x) = (272.0, 352.0);
     let text = |ui: &Ui, y: f32, text: &str| {
         ui.painter().text(
@@ -1711,13 +1877,10 @@ fn page_details(
     };
     ui.painter().rect_filled(area, CornerRadius::same(2), fill);
     page_glyph(ui, area.center(), 24.0, page, number);
-    if change.clicked()
-        && let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["svg", "png", "jpg", "jpeg"])
-            .pick_file()
-    {
-        edit_page(env, profile, &page.id, |p| p.icon = Some(path));
-    }
+    let mut choice = None;
+    egui::Popup::menu(&change).show(|ui| {
+        choice = image_editor::image_menu(ui, page.icon.is_some());
+    });
     let reset = at(o, field_x + 48.0, 114.0, 24.0, 24.0);
     if icon_button(
         ui,
@@ -1728,23 +1891,26 @@ fn page_details(
     .on_hover_text("Reset icon")
     .clicked()
     {
-        edit_page(env, profile, &page.id, |p| p.icon = None);
+        choice = Some(ImageChoice::Reset);
     }
+    choice
 }
 
 /// Changes a page and saves its profile.
 fn edit_page(env: &mut Env<'_>, profile: &str, page: &str, edit: impl FnOnce(&mut Page)) {
     let mut s = runtime::lock(env.state);
-    let Some(p) = s.profile_mut(profile) else {
+    let Some(mut p) = s.profile(profile).cloned() else {
         return;
     };
     let Some(target) = p.pages.iter_mut().find(|q| q.id == page) else {
         return;
     };
     edit(target);
-    let result = store::save_profile(p);
+    let result = store::save_profile(&p);
     if let Err(e) = result {
         s.notify(format!("Cannot save profile: {e}"));
+    } else if let Some(target) = s.profile_mut(profile) {
+        *target = p;
     }
     drop(s);
     let _ = env.runtime.send(Msg::Refresh);
@@ -2091,6 +2257,139 @@ fn combo(ui: &mut Ui, rect: Rect, id: &str, selected: &str, items: impl FnOnce(&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_icon_results_only_update_the_unchanged_destination_after_a_successful_save() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.add_page();
+        let source = profile.pages[0].clone();
+        let id = profile.id.clone();
+        let edit = PageIconEditor {
+            profile: id.clone(),
+            page: source.id.clone(),
+            editor: Editor::new_page(&id, &source, Mode::Library),
+        };
+        let mut state = runtime::State::new(vec![profile.clone()], Default::default());
+        assert!(edit.matches(&state));
+        assert!(
+            edit.apply(&mut state, "generated.png".into(), |_| Err(
+                "disk full".into()
+            ))
+            .is_err()
+        );
+        assert_eq!(state.profile(&id), Some(&profile));
+        assert!(
+            edit.apply(&mut state, "generated.png".into(), |saved| {
+                assert_eq!(
+                    saved.pages[0].icon.as_deref(),
+                    Some(Path::new("generated.png"))
+                );
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(state.profile(&id).unwrap().pages[1], profile.pages[1]);
+        assert!(!edit.matches(&state));
+        assert!(
+            !edit
+                .apply(&mut state, "stale.png".into(), |_| panic!(
+                    "stale result must not be saved"
+                ))
+                .unwrap()
+        );
+        let current = state.profile_mut(&id).unwrap();
+        current.pages.remove(0);
+        assert!(!edit.matches(&state));
+        state.profiles.clear();
+        assert!(!edit.matches(&state));
+    }
+
+    #[test]
+    fn change_icon_offers_the_shared_library_and_creator_without_changing_the_page() {
+        for label in ["Icon library…", "Create image…"] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            let profile = Profile::new("Test", DeviceKind::Mk2);
+            let state = std::sync::Arc::new(std::sync::Mutex::new(runtime::State::new(
+                vec![profile.clone()],
+                Default::default(),
+            )));
+            let (sender, _) = std::sync::mpsc::channel();
+            let mut renderer = Renderer::new();
+            let mut prefs = Preferences::new();
+            prefs.profile = Some(profile.id.clone());
+            prefs.page = Some(profile.pages[0].id.clone());
+            let mut pass = |prefs: &mut Preferences, events| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        egui::CentralPanel::no_frame().show(ui, |ui| {
+                            prefs.profiles(
+                                ui,
+                                Pos2::ZERO,
+                                &mut Env {
+                                    state: &state,
+                                    runtime: &sender,
+                                    renderer: &mut renderer,
+                                    device: None,
+                                    kind: DeviceKind::Mk2,
+                                    host: None,
+                                },
+                            );
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+                output.shapes
+            };
+            pass(&mut prefs, vec![]);
+            pass(&mut prefs, vec![]);
+            let mut click = |prefs: &mut Preferences, pos| {
+                for pressed in [true, false] {
+                    pass(
+                        prefs,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                    );
+                }
+                pass(prefs, vec![])
+            };
+            let shapes = click(&mut prefs, pos2(373.0, 126.0));
+            for option in ["Upload image…", "Icon library…", "Create image…"] {
+                assert!(shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains(option))));
+            }
+            let target = shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text().contains(label) => {
+                        Some(text.pos + text.galley.size() / 2.0)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            click(&mut prefs, target);
+            assert!(
+                prefs
+                    .page_icon_editor
+                    .as_ref()
+                    .is_some_and(|edit| edit.matches(&runtime::lock(&state)))
+            );
+            assert_eq!(runtime::lock(&state).profile(&profile.id), Some(&profile));
+            prefs.close();
+            assert!(prefs.page_icon_editor.is_none());
+        }
+    }
 
     #[test]
     fn page_controls_center_visible_glyphs_and_preserve_picture_aspect_ratio() {

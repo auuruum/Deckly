@@ -145,7 +145,9 @@ A temporary test, not kept, against an empty settings folder holding one empty
 - Not seen in a real window: the drag with a real mouse, the file dialog of Change
   Icon, the page strip with an icon. Not run on Linux or macOS.
 - Where macOS keeps the same setting.
-- Icon library, Copy to and the remaining page-specific menu entries.
+- Official `.sdIcons` packs, Copy to and the remaining page-specific menu entries.
 - Duplicate, Export, Add Page and import name collisions were implemented on
   2026-11-02; see `2026-11-02-profile-preferences.md`. Real mouse checks remain
   for the owner.
+- Page deletion, centered controls and the shared Phosphor library/image creator
+  were added afterwards; see `2026-11-02-page-workflows.md`.

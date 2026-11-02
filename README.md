@@ -87,6 +87,12 @@ Import from a profile's context menu or the options button below the list.
 Duplicate copies pages, folders, actions and pictures into an independent
 profile. Add Page appends an empty page and selects it in the list.
 
+Select a page to rename it or change its icon. Change Icon offers image upload,
+the offline icon library and the image creator, with the same layers and
+undo/redo as key images. Page icons default to a transparent background and are
+saved with the profile. A page's context menu, the options button and the minus
+button offer confirmed deletion; the last page is kept.
+
 Export saves a portable `.decklyProfile` with the profile and its pictures.
 Use Import in the same menu to bring it into Deckly on another computer; this
 is Deckly's own format. The importer also accepts `.streamDeckProfile` and

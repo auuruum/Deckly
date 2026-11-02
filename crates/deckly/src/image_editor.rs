@@ -8,7 +8,7 @@ use crate::history::Direction;
 use crate::store;
 use crate::theme::*;
 use composition::{Composition, Content, Fonts, Layer, MAX_LAYERS, MAX_TEXT, SIZE};
-use deckly_core::KeyConfig;
+use deckly_core::{KeyConfig, Page};
 use eframe::egui::{
     self, Color32, ColorImage, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Ui,
     pos2, vec2,
@@ -28,6 +28,57 @@ pub enum Mode {
     Create,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageChoice {
+    Upload,
+    Library,
+    Create,
+    Reset,
+}
+
+/// One image menu for keys and pages, backed by the same editor.
+pub fn image_menu(ui: &mut Ui, has_image: bool) -> Option<ImageChoice> {
+    let mut choice = None;
+    for (glyph, label, pick) in [
+        (icon::UPLOAD_SIMPLE, "Upload image…", ImageChoice::Upload),
+        (icon::SQUARES_FOUR, "Icon library…", ImageChoice::Library),
+        (icon::PAINT_BRUSH, "Create image…", ImageChoice::Create),
+    ] {
+        if ui.button(format!("{glyph}  {label}")).clicked() {
+            choice = Some(pick);
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui
+        .add_enabled(has_image, egui::Button::new("Reset to default"))
+        .clicked()
+    {
+        choice = Some(ImageChoice::Reset);
+        ui.close();
+    }
+    choice
+}
+
+#[derive(Debug, PartialEq)]
+enum Original {
+    Key(KeyConfig),
+    Page { profile: String, page: Page },
+}
+
+impl Original {
+    fn is_page(&self) -> bool {
+        matches!(self, Self::Page { .. })
+    }
+
+    fn image(&self) -> Option<PathBuf> {
+        match self {
+            Self::Key(key) => key.image.clone(),
+            Self::Page { page, .. } => page.icon.clone(),
+        }
+    }
+}
+
 enum Work {
     Loaded(String, RgbaImage),
     Saved(PathBuf),
@@ -41,7 +92,7 @@ pub enum Selection {
 
 pub struct Editor {
     pub context: String,
-    original: KeyConfig,
+    original: Original,
     mode: Mode,
     query: String,
     logos_only: bool,
@@ -62,15 +113,34 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(context: String, key: &KeyConfig, mode: Mode) -> Self {
+        Self::with_original(context, Original::Key(key.clone()), mode)
+    }
+
+    pub fn new_page(profile: &str, page: &Page, mode: Mode) -> Self {
+        Self::with_original(
+            format!("page-icon/{profile}/{}", page.id),
+            Original::Page {
+                profile: profile.to_owned(),
+                page: page.clone(),
+            },
+            mode,
+        )
+    }
+
+    fn with_original(context: String, original: Original, mode: Mode) -> Self {
+        let transparent = original.is_page();
         Self {
             context,
-            original: key.clone(),
+            original,
             mode,
             query: String::new(),
             logos_only: false,
             selected_icon: None,
             adding_icon: false,
-            draft: Composition::default(),
+            draft: Composition {
+                transparent,
+                ..Default::default()
+            },
             selected_layer: None,
             fonts: Fonts::new(),
             preview: None,
@@ -86,7 +156,12 @@ impl Editor {
 
     /// A modal never applies a result to a different or replaced action.
     pub fn matches(&self, context: &str, key: &KeyConfig) -> bool {
-        self.context == context && self.original == *key
+        self.context == context
+            && matches!(&self.original, Original::Key(original) if original == key)
+    }
+
+    pub fn matches_page(&self, profile: &str, page: &Page) -> bool {
+        matches!(&self.original, Original::Page { profile: owner, page: original } if owner == profile && original == page)
     }
 
     fn start(
@@ -120,7 +195,7 @@ impl Editor {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 "Images (first frame)",
-                &["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+                &["svg", "png", "jpg", "jpeg", "webp", "gif", "bmp"],
             )
             .pick_file()
         {
@@ -235,11 +310,16 @@ impl Editor {
         }
         let searching = (self.mode == Mode::Library || self.adding_icon) && ctx.text_edit_focused();
         let mut history_action = crate::history::shortcut(ctx, !busy && !searching);
-        let modal = egui::Modal::new(egui::Id::new("key-image-editor")).show(ctx, |ui| {
+        let modal_id = egui::Id::new(("image-editor", &self.context));
+        let modal = egui::Modal::new(modal_id).show(ctx, |ui| {
             ui.set_width(684.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon::IMAGE).size(23.0));
-                ui.heading("Key image");
+                ui.heading(if self.original.is_page() {
+                    "Page icon"
+                } else {
+                    "Key image"
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     for (direction, glyph, label, enabled, key, shift) in [
                         (
@@ -333,9 +413,23 @@ impl Editor {
                         && (self.mode == Mode::Create || self.selected_icon.is_some())
                         && !self.adding_icon;
                     apply = ui
-                        .add_enabled(valid, egui::Button::new("Set image"))
+                        .add_enabled(
+                            valid,
+                            egui::Button::new(if self.original.is_page() {
+                                "Set icon"
+                            } else {
+                                "Set image"
+                            }),
+                        )
                         .clicked();
-                    ui.label(RichText::new("Changes apply only to this key.").color(TEXT_DIM));
+                    ui.label(
+                        RichText::new(if self.original.is_page() {
+                            "Changes apply only to this page."
+                        } else {
+                            "Changes apply only to this key."
+                        })
+                        .color(TEXT_DIM),
+                    );
                 });
             });
         });
@@ -468,10 +562,7 @@ impl Editor {
                 ui.label(name.unwrap_or_else(|| "Choose an icon above".into()));
                 if !self.adding_icon {
                     ui.horizontal(|ui| {
-                        ui.label("Background");
-                        self.dirty |= ui
-                            .color_edit_button_srgb(&mut self.draft.background)
-                            .changed();
+                        self.background_control(ui);
                         if let Some(layer) = self.draft.layers.first_mut() {
                             ui.label("Icon");
                             self.dirty |= ui.color_edit_button_srgb(&mut layer.color).changed();
@@ -556,6 +647,18 @@ impl Editor {
         }
     }
 
+    fn background_control(&mut self, ui: &mut Ui) {
+        ui.label("Background");
+        ui.add_enabled_ui(!self.draft.transparent, |ui| {
+            self.dirty |= ui
+                .color_edit_button_srgb(&mut self.draft.background)
+                .changed();
+        });
+        self.dirty |= ui
+            .checkbox(&mut self.draft.transparent, "Transparent")
+            .changed();
+    }
+
     fn creator(&mut self, ui: &mut Ui) {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -568,16 +671,17 @@ impl Editor {
                 );
                 ui.label(RichText::new("PNG · 288 × 288 px").small().color(TEXT_DIM));
                 ui.horizontal(|ui| {
-                    ui.label("Background");
-                    self.dirty |= ui
-                        .color_edit_button_srgb(&mut self.draft.background)
-                        .changed();
+                    self.background_control(ui);
                 });
-                if let Some(path) = self.original.image.clone()
+                if let Some(path) = self.original.image()
                     && ui
                         .add_enabled(
                             self.draft.layers.len() < MAX_LAYERS,
-                            egui::Button::new("Add current key image"),
+                            egui::Button::new(if self.original.is_page() {
+                                "Add current page icon"
+                            } else {
+                                "Add current key image"
+                            }),
                         )
                         .clicked()
                 {
@@ -781,6 +885,43 @@ fn display_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn page_icon_editor_uses_page_labels_transparency_and_guards_its_destination() {
+        let mut page = Page::new();
+        page.icon = Some("existing.svg".into());
+        for mode in [Mode::Library, Mode::Create] {
+            let mut editor = Editor::new_page("profile", &page, mode);
+            assert!(editor.matches_page("profile", &page));
+            assert!(!editor.matches_page("other", &page));
+            let mut replaced = page.clone();
+            replaced.icon = Some("new.png".into());
+            assert!(!editor.matches_page("profile", &replaced));
+            assert!(!editor.matches(
+                "page.0",
+                &KeyConfig::new("com.example.a", serde_json::json!({}))
+            ));
+            assert!(editor.draft.transparent);
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            pass(&mut editor, &ctx, vec![]);
+            let shapes = pass(&mut editor, &ctx, vec![]);
+            for label in [
+                "Page icon",
+                "Set icon",
+                "Cancel",
+                "Changes apply only to this page.",
+                "Transparent",
+            ] {
+                let position = text_position(&shapes, label);
+                assert!(
+                    (0.0..852.0).contains(&position.x) && (0.0..742.0).contains(&position.y),
+                    "{label}: {position:?}"
+                );
+            }
+            assert!(editor.render().unwrap().pixels().all(|p| p.0[3] == 0));
+        }
+    }
+
     fn pass(
         editor: &mut Editor,
         ctx: &egui::Context,
@@ -918,7 +1059,7 @@ mod tests {
             assert!(editor.draft == imported);
             assert_eq!(editor.selected_layer, Some(1));
             assert!(editor.render().is_ok());
-            assert_eq!(editor.original, key);
+            assert_eq!(editor.original, Original::Key(key));
         }
     }
 
@@ -958,7 +1099,7 @@ mod tests {
             vec![shortcut(egui::Key::Y, false, false)],
         );
         assert!(matches!(&editor.draft.layers[0].content, Content::Text(text) if text == "Bim!"));
-        assert_eq!(editor.original, key);
+        assert_eq!(editor.original, Original::Key(key));
     }
 
     #[test]
@@ -1078,7 +1219,7 @@ mod tests {
             );
         }
         assert!(editor.render().is_ok());
-        assert_eq!(key, editor.original);
+        assert_eq!(Original::Key(key), editor.original);
     }
 
     #[test]
@@ -1139,6 +1280,6 @@ mod tests {
         );
         output.textures_delta.clear();
         assert!(matches!(result, Selection::Cancelled));
-        assert_eq!(editor.original, key);
+        assert_eq!(editor.original, Original::Key(key));
     }
 }

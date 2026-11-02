@@ -72,6 +72,8 @@ pub struct Composition {
     /// Pure black by default, matching built-in keys. A near-black color
     /// leaves a visible background around the glyph on the hardware.
     pub background: [u8; 3],
+    /// Page icons default to transparency; key images retain their black background.
+    pub transparent: bool,
     /// Back to front.
     pub layers: Vec<Layer>,
 }
@@ -90,7 +92,12 @@ impl Composition {
             return Err("too many layers".into());
         }
         let [r, g, b] = self.background;
-        let mut out = RgbaImage::from_pixel(SIZE, SIZE, Rgba([r, g, b, 255]));
+        let background = if self.transparent {
+            [0, 0, 0, 0]
+        } else {
+            [r, g, b, 255]
+        };
+        let mut out = RgbaImage::from_pixel(SIZE, SIZE, Rgba(background));
         for layer in &self.layers {
             if ![layer.x, layer.y, layer.size].iter().all(|v| v.is_finite()) {
                 return Err("invalid layer position or size".into());
@@ -118,8 +125,10 @@ impl Composition {
             imageops::overlay(&mut out, &raster, x as i64, y as i64);
             // The background is opaque. Integer alpha compositing may round
             // 255 down to 254; keep every intermediate canvas opaque too.
-            for p in out.pixels_mut() {
-                p.0[3] = 255;
+            if !self.transparent {
+                for p in out.pixels_mut() {
+                    p.0[3] = 255;
+                }
             }
         }
         Ok(out)
@@ -194,6 +203,12 @@ pub fn load_picture(path: &Path) -> Result<RgbaImage, String> {
     if bytes.len() as u64 > MAX_FILE {
         return Err("image file is larger than 16 MiB".into());
     }
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+    {
+        return load_svg(&bytes);
+    }
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
@@ -208,6 +223,40 @@ pub fn load_picture(path: &Path) -> Result<RgbaImage, String> {
         image.width().max(image.height()).min(512),
     );
     Ok(resize_alpha(&image, w, h))
+}
+
+fn load_svg(bytes: &[u8]) -> Result<RgbaImage, String> {
+    use resvg::{tiny_skia, usvg};
+    // Uploaded vector icons cannot read external files or allocate embedded bitmaps.
+    let options = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_data(bytes, &options).map_err(|e| e.to_string())?;
+    let mut pixmap = tiny_skia::Pixmap::new(SIZE, SIZE).ok_or("cannot allocate icon")?;
+    let size = tree.size();
+    let scale = (SIZE as f32 / size.width()).min(SIZE as f32 / size.height());
+    let transform = tiny_skia::Transform::from_row(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        (SIZE as f32 - size.width() * scale) / 2.0,
+        (SIZE as f32 - size.height() * scale) / 2.0,
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut image = RgbaImage::new(SIZE, SIZE);
+    for (dst, src) in image.pixels_mut().zip(pixmap.pixels()) {
+        let color = src.demultiply();
+        *dst = Rgba([color.red(), color.green(), color.blue(), color.alpha()]);
+    }
+    if image.pixels().all(|pixel| pixel.0[3] == 0) {
+        return Err("SVG has no visible vector artwork; use a PNG for embedded pictures".into());
+    }
+    Ok(image)
 }
 
 fn lettering(font: &FontArc, text: &str, color: [u8; 3]) -> Result<RgbaImage, String> {
@@ -274,6 +323,41 @@ fn lettering(font: &FontArc, text: &str, color: [u8; 3]) -> Result<RgbaImage, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_icons_keep_transparency_through_composition_and_png_encoding() {
+        let mut draft = Composition {
+            transparent: true,
+            ..Default::default()
+        };
+        draft.add(picture([200, 40, 80, 128])).unwrap();
+        let image = draft.render(&Fonts::new().unwrap()).unwrap();
+        assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        let pixel = image.get_pixel(144, 144).0;
+        for (actual, expected) in pixel.into_iter().zip([200u8, 40, 80, 128]) {
+            assert!(actual.abs_diff(expected) <= 1);
+        }
+        assert_eq!(pixel[3], 128);
+        let mut png = Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        assert_eq!(
+            image::load_from_memory(png.get_ref()).unwrap().into_rgba8(),
+            image
+        );
+    }
+
+    #[test]
+    fn vector_uploads_fit_the_canvas_and_cannot_load_external_or_embedded_images() {
+        let image = load_svg(br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="red"/></svg>"#).unwrap();
+        assert_eq!(image.dimensions(), (SIZE, SIZE));
+        assert_eq!(image.get_pixel(0, 0).0[3], 0);
+        assert_eq!(image.get_pixel(144, 144).0, [255, 0, 0, 255]);
+        for svg in [br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><image href="file:///secret.png" width="40" height="20"/></svg>"#.as_slice(),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><image href="data:image/png;base64,AA==" width="40" height="20"/></svg>"#] {
+            assert!(load_svg(svg).is_err());
+        }
+        assert!(load_svg(b"invalid svg").is_err());
+    }
 
     fn picture(color: [u8; 4]) -> Layer {
         let mut layer = Layer::new(Content::Picture(

@@ -2094,27 +2094,21 @@ impl App {
                 );
                 ui.add_space(6.0);
                 ui.menu_button(format!("{}  Image…", icon::IMAGE), |ui| {
-                    use crate::image_editor::{Editor, Mode};
-                    for (glyph, label, mode, upload) in [
-                        (icon::UPLOAD_SIMPLE, "Upload image…", Mode::Create, true),
-                        (icon::SQUARES_FOUR, "Icon library…", Mode::Library, false),
-                        (icon::PAINT_BRUSH, "Create image…", Mode::Create, false),
-                    ] {
-                        if ui.button(format!("{glyph}  {label}")).clicked() {
+                    use crate::image_editor::{self, Editor, ImageChoice, Mode};
+                    if let Some(choice) = image_editor::image_menu(ui, key.image.is_some()) {
+                        if choice == ImageChoice::Reset {
+                            key.image = None;
+                        } else {
+                            let mode = if choice == ImageChoice::Library {
+                                Mode::Library
+                            } else {
+                                Mode::Create
+                            };
                             let mut editor = Editor::new(image_context.clone(), key, mode);
-                            if !upload || editor.upload(ui.ctx()) {
+                            if choice != ImageChoice::Upload || editor.upload(ui.ctx()) {
                                 self.image_editor = Some(editor);
                             }
-                            ui.close();
                         }
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(key.image.is_some(), egui::Button::new("Reset to default"))
-                        .clicked()
-                    {
-                        key.image = None;
-                        ui.close();
                     }
                 });
                 if ui
