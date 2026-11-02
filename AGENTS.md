@@ -78,6 +78,19 @@ Deckly is a clean-room reimplementation: study features and behavior, document f
 
 ## 6. Implementation workflow
 
+### Branches and human approval
+
+- `main` is the stable branch; `dev` is the integration branch, initially created from `main`. If `dev` does not exist, ask the owner for explicit permission to create it from `main` and publish it. Do not silently use `main` as the base for new tasks.
+- Start each new task on a separate `codex/<short-task-name>` branch based on the latest `origin/dev` after fetching. Continue related work on that task branch; keep unrelated work in separate branches.
+- Within the authorized task, agents may edit, test, commit, and push the task branch without asking for confirmation at each step. Push explicitly to the task branch; never include `dev` or `main` in a blanket push.
+- Once the task is complete, report the changes and validation results. The agent may then ask whether to merge that task branch into `dev`. Wait for explicit human approval before merging and publishing the merge to `dev`.
+- Without explicit human approval for the specific operation and target, agents must not change either local or remote `dev` or `main`: no direct commits, merges, cherry-picks, rebases, resets, pushes, force-pushes, deletions, or other branch updates. Fetching and reading these branches, creating a task branch from `origin/dev`, and incorporating `origin/dev` into a task branch are allowed because they do not update the protected branches.
+- Promote `dev` into `main` only when the owner explicitly requests that promotion. Do not start this promotion on an agent's own initiative or infer permission to update `main` from approval to merge into `dev`.
+- Permission to work on or push a task branch does not authorize changes to `dev` or `main`. Approval applies only to the stated operation, target, and agreed changes; it is not blanket approval for later tasks or promotions. An explicit approval already given in the conversation remains valid within that scope; do not ask for it again.
+- Pull requests may be prepared for review, but do not enable auto-merge or otherwise bypass these approval requirements.
+
+### Implementation and validation
+
 - Read the relevant code and docs before changing files. Keep changes small; no speculative architecture.
 - Every change includes tests where the logic is testable without hardware (protocol encoding, model validation, serialization round-trips, rendering sizes).
 - Visual UI changes are checked by running the app and looking at it.
