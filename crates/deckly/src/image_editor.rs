@@ -2,7 +2,9 @@
 //! offline Phosphor catalog and a small layered creator, all drawn by egui.
 
 mod composition;
+mod history;
 
+use crate::history::Direction;
 use crate::store;
 use crate::theme::*;
 use composition::{Composition, Content, Fonts, Layer, MAX_LAYERS, MAX_TEXT, SIZE};
@@ -12,6 +14,7 @@ use eframe::egui::{
     pos2, vec2,
 };
 use egui_phosphor::regular as icon;
+use history::{Group, History, Snapshot};
 use image::RgbaImage;
 use std::path::PathBuf;
 use std::sync::{
@@ -53,6 +56,8 @@ pub struct Editor {
     receiver: Option<Receiver<Result<Work, String>>>,
     saving: bool,
     focus_search: bool,
+    history: History,
+    gesture: u64,
 }
 
 impl Editor {
@@ -74,6 +79,8 @@ impl Editor {
             receiver: None,
             saving: false,
             focus_search: true,
+            history: History::default(),
+            gesture: 0,
         }
     }
 
@@ -174,6 +181,24 @@ impl Editor {
             .render(self.fonts.as_ref().map_err(Clone::clone)?)
     }
 
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            draft: self.draft.clone(),
+            selected_layer: self.selected_layer,
+            selected_icon: self.selected_icon,
+        }
+    }
+
+    fn restore(&mut self, direction: Direction) {
+        if let Some(snapshot) = self.history.step(direction) {
+            self.draft = snapshot.draft;
+            self.selected_layer = snapshot.selected_layer;
+            self.selected_icon = snapshot.selected_icon;
+            self.adding_icon = false;
+            self.dirty = true;
+        }
+    }
+
     fn update_preview(&mut self, ctx: &egui::Context) {
         if !std::mem::take(&mut self.dirty) {
             return;
@@ -198,17 +223,64 @@ impl Editor {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, profile: &str) -> Selection {
+        let before = self.snapshot();
         if let Some(path) = self.receive() {
             return Selection::Image(path);
         }
         let mut cancel = false;
         let mut apply = false;
         let busy = self.receiver.is_some();
+        if ctx.input(|i| i.pointer.any_pressed()) {
+            self.gesture = self.gesture.wrapping_add(1);
+        }
+        let searching = (self.mode == Mode::Library || self.adding_icon) && ctx.text_edit_focused();
+        let mut history_action = crate::history::shortcut(ctx, !busy && !searching);
         let modal = egui::Modal::new(egui::Id::new("key-image-editor")).show(ctx, |ui| {
             ui.set_width(684.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon::IMAGE).size(23.0));
                 ui.heading("Key image");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    for (direction, glyph, label, enabled, key, shift) in [
+                        (
+                            Direction::Redo,
+                            icon::ARROW_CLOCKWISE,
+                            "Redo",
+                            self.history.can_redo(),
+                            if matches!(ctx.os(), egui::os::OperatingSystem::Mac) {
+                                egui::Key::Z
+                            } else {
+                                egui::Key::Y
+                            },
+                            matches!(ctx.os(), egui::os::OperatingSystem::Mac),
+                        ),
+                        (
+                            Direction::Undo,
+                            icon::ARROW_COUNTER_CLOCKWISE,
+                            "Undo",
+                            self.history.can_undo(),
+                            egui::Key::Z,
+                            false,
+                        ),
+                    ] {
+                        let modifiers = egui::Modifiers {
+                            shift,
+                            ..egui::Modifiers::COMMAND
+                        };
+                        let shortcut =
+                            ctx.format_shortcut(&egui::KeyboardShortcut::new(modifiers, key));
+                        if ui
+                            .add_enabled(
+                                !busy && enabled,
+                                egui::Button::new(format!("{glyph}  {label}")),
+                            )
+                            .on_hover_text(format!("{label} ({shortcut})"))
+                            .clicked()
+                        {
+                            history_action = Some(direction);
+                        }
+                    }
+                });
             });
             ui.add_space(8.0);
             ui.add_enabled_ui(!busy, |ui| {
@@ -267,6 +339,20 @@ impl Editor {
                 });
             });
         });
+        let group = if ctx.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+            Some(Group::Pointer(self.gesture))
+        } else if ctx.text_edit_focused() {
+            ctx.memory(|m| m.focused())
+                .map(|field| Group::Typing(field, self.selected_layer))
+        } else {
+            None
+        };
+        if self.history.record(before, self.snapshot(), group) {
+            ctx.request_repaint();
+        }
+        if let Some(direction) = history_action {
+            self.restore(direction);
+        }
         if apply {
             match self.render() {
                 Ok(image) => {
@@ -441,7 +527,20 @@ impl Editor {
                     egui::StrokeKind::Inside,
                 );
                 if response.dragged() {
-                    let delta = ui.input(|i| i.pointer.delta()) / side;
+                    // A drag starts on press. The pointer may have travelled
+                    // from a control to the canvas in this same frame; only
+                    // motion after the press belongs to the gesture.
+                    let delta = if response.drag_started() {
+                        ui.input(|i| {
+                            i.pointer
+                                .interact_pos()
+                                .zip(i.pointer.press_origin())
+                                .map(|(pos, origin)| pos - origin)
+                                .unwrap_or_default()
+                        })
+                    } else {
+                        response.drag_delta()
+                    } / side;
                     layer.x = (layer.x + delta.x).clamp(0.0, 1.0);
                     layer.y = (layer.y + delta.y).clamp(0.0, 1.0);
                     self.dirty = true;
@@ -488,53 +587,83 @@ impl Editor {
             ui.add_space(12.0);
             ui.vertical(|ui| {
                 ui.set_width(380.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Layers").strong());
-                    ui.label(
-                        RichText::new(format!("{} / {MAX_LAYERS}", self.draft.layers.len()))
-                            .color(TEXT_DIM),
-                    );
-                });
+                ui.label(RichText::new("Add layer").strong());
                 ui.add_enabled_ui(self.draft.layers.len() < MAX_LAYERS, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button(format!("{}  Text", icon::TEXT_T)).clicked() {
+                        if ui.button(format!("{}  Add text", icon::PLUS)).clicked() {
                             self.add(Layer::new(Content::Text("Text".into())));
                         }
-                        if ui.button(format!("{}  Icon", icon::SQUARES_FOUR)).clicked() {
+                        if ui.button(format!("{}  Add icon", icon::PLUS)).clicked() {
                             self.adding_icon = true;
                             self.focus_search = true;
                         }
-                        if ui.button(format!("{}  Image…", icon::IMAGE)).clicked() {
+                        if ui.button(format!("{}  Add image…", icon::PLUS)).clicked() {
                             self.upload(ui.ctx());
                         }
                     });
                 });
-                egui::ScrollArea::vertical()
-                    .id_salt("creator-layers")
-                    .min_scrolled_height(104.0)
-                    .max_height(104.0)
-                    .auto_shrink([false, false])
+                ui.add_space(6.0);
+                egui::Frame::new()
+                    .fill(LIST)
+                    .stroke(Stroke::new(1.0, KEY_BORDER))
+                    .corner_radius(6)
+                    .inner_margin(10)
                     .show(ui, |ui| {
-                        for (i, layer) in self.draft.layers.iter().enumerate().rev() {
-                            let name: String = layer.name().chars().take(32).collect();
-                            if ui
-                                .selectable_label(
-                                    self.selected_layer == Some(i),
-                                    format!("{}  {name}", i + 1),
-                                )
-                                .clicked()
-                            {
-                                self.selected_layer = Some(i);
-                            }
-                        }
-                        if self.draft.layers.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Layers").strong());
                             ui.label(
-                                RichText::new("Add text, icons or your own pictures.")
-                                    .color(TEXT_DIM),
+                                RichText::new(format!(
+                                    "{} / {MAX_LAYERS}",
+                                    self.draft.layers.len()
+                                ))
+                                .color(TEXT_DIM),
                             );
-                        }
+                        });
+                        ui.label(
+                            RichText::new("Top layer appears in front")
+                                .small()
+                                .color(TEXT_DIM),
+                        );
+                        egui::ScrollArea::vertical()
+                            .id_salt("creator-layers")
+                            .min_scrolled_height(94.0)
+                            .max_height(94.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for (i, layer) in self.draft.layers.iter().enumerate().rev() {
+                                    let (glyph, kind) = match &layer.content {
+                                        Content::Text(_) => (icon::TEXT_T, "Text"),
+                                        Content::Icon(..) => (icon::SQUARES_FOUR, "Icon"),
+                                        Content::Picture(..) => (icon::IMAGE, "Image"),
+                                    };
+                                    let name: String = layer
+                                        .name()
+                                        .chars()
+                                        .take(32)
+                                        .map(|c| if c.is_whitespace() { ' ' } else { c })
+                                        .collect();
+                                    let label = format!("{glyph}  {kind} · {name}");
+                                    if ui
+                                        .add_sized(
+                                            vec2(ui.available_width(), 26.0),
+                                            egui::Button::selectable(
+                                                self.selected_layer == Some(i),
+                                                label,
+                                            )
+                                            .truncate(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.selected_layer = Some(i);
+                                    }
+                                }
+                                if self.draft.layers.is_empty() {
+                                    ui.label(RichText::new("No layers yet").color(TEXT_DIM));
+                                }
+                            });
                     });
-                ui.separator();
+                ui.add_space(6.0);
+                ui.label(RichText::new("Edit selected layer").strong());
                 self.layer_controls(ui);
             });
         });
@@ -545,6 +674,7 @@ impl Editor {
 
     fn layer_controls(&mut self, ui: &mut Ui) {
         let Some(index) = self.selected_layer else {
+            ui.label(RichText::new("Select a layer to edit it.").color(TEXT_DIM));
             return;
         };
         let Some(layer) = self.draft.layers.get_mut(index) else {
@@ -703,6 +833,209 @@ mod tests {
         }
     }
 
+    fn shortcut(key: egui::Key, mac: bool, shift: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: true,
+                ctrl: !mac,
+                mac_cmd: mac,
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn undo_redo_buttons_and_platform_shortcuts_restore_layers_without_changing_the_key() {
+        for mac in [false, true] {
+            let key = KeyConfig::new(crate::actions::WEBSITE, serde_json::json!({}));
+            let mut editor = Editor::new("page.0".into(), &key, Mode::Create);
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            ctx.set_os(if mac {
+                egui::os::OperatingSystem::Mac
+            } else {
+                egui::os::OperatingSystem::Windows
+            });
+            pass(&mut editor, &ctx, Vec::new());
+            let shapes = pass(&mut editor, &ctx, Vec::new());
+            click(
+                &mut editor,
+                &ctx,
+                text_position(&shapes, &format!("{}  Add text", icon::PLUS)),
+            );
+            assert_eq!(editor.draft.layers.len(), 1);
+            assert!(editor.history.can_undo());
+            let shapes = pass(&mut editor, &ctx, Vec::new());
+            click(
+                &mut editor,
+                &ctx,
+                text_position(&shapes, &format!("{}  Undo", icon::ARROW_COUNTER_CLOCKWISE)),
+            );
+            assert!(editor.draft.layers.is_empty());
+            assert!(editor.history.can_redo());
+            let shapes = pass(&mut editor, &ctx, Vec::new());
+            click(
+                &mut editor,
+                &ctx,
+                text_position(&shapes, &format!("{}  Redo", icon::ARROW_CLOCKWISE)),
+            );
+            assert_eq!(editor.draft.layers.len(), 1);
+            pass(&mut editor, &ctx, vec![shortcut(egui::Key::Z, mac, false)]);
+            assert!(editor.draft.layers.is_empty());
+            let redo = if mac {
+                shortcut(egui::Key::Z, true, true)
+            } else {
+                shortcut(egui::Key::Y, false, false)
+            };
+            pass(&mut editor, &ctx, vec![redo]);
+            assert_eq!(editor.draft.layers.len(), 1);
+
+            // Completed imports are edits too, and Undo retains their pixels
+            // for Redo even when the original file no longer exists.
+            let (tx, rx) = mpsc::sync_channel(1);
+            tx.send(Ok(Work::Loaded(
+                "Logo".into(),
+                RgbaImage::from_pixel(20, 10, image::Rgba([20, 40, 60, 255])),
+            )))
+            .unwrap();
+            editor.receiver = Some(rx);
+            pass(&mut editor, &ctx, Vec::new());
+            assert_eq!(editor.draft.layers.len(), 2);
+            pass(&mut editor, &ctx, vec![shortcut(egui::Key::Z, mac, false)]);
+            assert_eq!(editor.draft.layers.len(), 1);
+            pass(&mut editor, &ctx, vec![shortcut(egui::Key::Y, mac, false)]);
+            assert_eq!(editor.draft.layers.len(), 2);
+            let imported = editor.draft.clone();
+            let shapes = pass(&mut editor, &ctx, Vec::new());
+            click(&mut editor, &ctx, text_position(&shapes, icon::TRASH));
+            assert_eq!(editor.draft.layers.len(), 1);
+            pass(&mut editor, &ctx, vec![shortcut(egui::Key::Z, mac, false)]);
+            assert!(editor.draft == imported);
+            assert_eq!(editor.selected_layer, Some(1));
+            assert!(editor.render().is_ok());
+            assert_eq!(editor.original, key);
+        }
+    }
+
+    #[test]
+    fn focused_text_uses_draft_undo_and_redo_for_a_typing_burst() {
+        let key = KeyConfig::new(crate::actions::WEBSITE, serde_json::json!({}));
+        let mut editor = Editor::new("page.0".into(), &key, Mode::Create);
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        pass(&mut editor, &ctx, Vec::new());
+        let shapes = pass(&mut editor, &ctx, Vec::new());
+        click(
+            &mut editor,
+            &ctx,
+            text_position(&shapes, &format!("{}  Add text", icon::PLUS)),
+        );
+        let shapes = pass(&mut editor, &ctx, Vec::new());
+        click(&mut editor, &ctx, text_position(&shapes, "Text"));
+        pass(
+            &mut editor,
+            &ctx,
+            vec![shortcut(egui::Key::A, false, false)],
+        );
+        pass(&mut editor, &ctx, vec![egui::Event::Text("Bim".into())]);
+        pass(&mut editor, &ctx, vec![egui::Event::Text("!".into())]);
+        assert!(matches!(&editor.draft.layers[0].content, Content::Text(text) if text == "Bim!"));
+        assert!(ctx.text_edit_focused());
+        pass(
+            &mut editor,
+            &ctx,
+            vec![shortcut(egui::Key::Z, false, false)],
+        );
+        assert!(matches!(&editor.draft.layers[0].content, Content::Text(text) if text == "Text"));
+        pass(
+            &mut editor,
+            &ctx,
+            vec![shortcut(egui::Key::Y, false, false)],
+        );
+        assert!(matches!(&editor.draft.layers[0].content, Content::Text(text) if text == "Bim!"));
+        assert_eq!(editor.original, key);
+    }
+
+    #[test]
+    fn a_preview_drag_undoes_as_one_change() {
+        let key = KeyConfig::new(crate::actions::WEBSITE, serde_json::json!({}));
+        let mut editor = Editor::new("page.0".into(), &key, Mode::Create);
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        pass(&mut editor, &ctx, Vec::new());
+        let shapes = pass(&mut editor, &ctx, Vec::new());
+        click(
+            &mut editor,
+            &ctx,
+            text_position(&shapes, &format!("{}  Add text", icon::PLUS)),
+        );
+        let shapes = pass(&mut editor, &ctx, Vec::new());
+        let texture = editor.preview.as_ref().unwrap().id();
+        let rect = shapes
+            .iter()
+            .find_map(|s| {
+                if let egui::Shape::Mesh(mesh) = &s.shape
+                    && mesh.texture_id == texture
+                {
+                    Some(mesh.calc_bounds())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let start = rect.center();
+        pass(
+            &mut editor,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        for offset in [vec2(20.0, -10.0), vec2(40.0, -20.0)] {
+            pass(
+                &mut editor,
+                &ctx,
+                vec![egui::Event::PointerMoved(start + offset)],
+            );
+        }
+        pass(
+            &mut editor,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: start + vec2(40.0, -20.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(editor.draft.layers[0].x > 0.6);
+        let moved = editor.draft.clone();
+        pass(
+            &mut editor,
+            &ctx,
+            vec![shortcut(egui::Key::Z, false, false)],
+        );
+        assert_eq!(editor.draft.layers[0].x, 0.5);
+        assert_eq!(editor.draft.layers[0].y, 0.5);
+        pass(
+            &mut editor,
+            &ctx,
+            vec![shortcut(egui::Key::Y, false, false)],
+        );
+        assert!(editor.draft == moved);
+    }
+
     #[test]
     fn library_and_creator_controls_fit_minimum_window_and_edit_only_the_draft() {
         let key = KeyConfig::new(crate::actions::WEBSITE, serde_json::json!({}));
@@ -726,11 +1059,18 @@ mod tests {
         click(
             &mut editor,
             &ctx,
-            text_position(&shapes, &format!("{}  Text", icon::TEXT_T)),
+            text_position(&shapes, &format!("{}  Add text", icon::PLUS)),
         );
         assert_eq!(editor.draft.layers.len(), 2);
         let shapes = pass(&mut editor, &ctx, Vec::new());
-        for label in ["Set image", "Cancel", "Center", "Layers"] {
+        for label in [
+            "Set image",
+            "Cancel",
+            "Center",
+            "Layers",
+            "Add layer",
+            "Edit selected layer",
+        ] {
             let pos = text_position(&shapes, label);
             assert!(
                 (0.0..852.0).contains(&pos.x) && (0.0..742.0).contains(&pos.y),

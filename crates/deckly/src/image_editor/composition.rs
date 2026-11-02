@@ -20,7 +20,24 @@ pub enum Content {
     Picture(String, Arc<RgbaImage>),
 }
 
-#[derive(Clone)]
+impl PartialEq for Content {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Icon(name, glyph), Self::Icon(other_name, other_glyph)) => {
+                name == other_name && glyph == other_glyph
+            }
+            (Self::Text(text), Self::Text(other_text)) => text == other_text,
+            // Pictures are immutable. Snapshots share their pixels, so a
+            // draft comparison never needs to scan image buffers per frame.
+            (Self::Picture(name, image), Self::Picture(other_name, other_image)) => {
+                name == other_name && Arc::ptr_eq(image, other_image)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct Layer {
     pub content: Content,
     /// Centre and bounding box size as fractions of the square canvas.
@@ -50,7 +67,7 @@ impl Layer {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Composition {
     /// Pure black by default, matching built-in keys. A near-black color
     /// leaves a visible background around the glyph on the hardware.

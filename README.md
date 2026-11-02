@@ -159,13 +159,25 @@ Phosphor icon library, or open **Create image…**. The library searches the
 bundled icons by name and can show only logos. Change its background and
 icon colors, then press **Set image**, or continue in the creator.
 
-The creator combines up to eight text, icon and picture layers. Drag the
+The creator combines up to eight text, icon and picture layers. **Add text**,
+**Add icon** and **Add image…** create layers; the separate **Layers** list
+selects an existing layer, and **Edit selected layer** changes its settings.
+The top item in the list appears in front. Drag the
 selected layer in the preview or edit its position and size; **Back** and
 **Front** change the layer order. You can combine several uploaded logos
 and add text on a background color. **Set image** applies the result to the
 selected key; Cancel or Escape leaves it unchanged. **Reset** restores the
 action's default image, including live plugin images. These key edits are
 covered by Undo and Redo.
+
+While the image dialog is open, its **Undo** and **Redo** buttons restore
+draft edits, including layer additions/removals, order, text, colors,
+position and size. Use Ctrl+Z/Ctrl+Y, or Cmd+Z/Cmd+Shift+Z on macOS. One
+drag is one edit, and consecutive typing is grouped. Draft history keeps
+up to 50 edits and 32 MiB of retained buffers; images share their pixels
+between snapshots. It lasts until the dialog closes. Search fields keep
+their own text undo. After **Set image**, the profile's Undo restores the
+previous assigned image.
 
 Uploads accept PNG, JPEG, WebP, GIF and BMP (the first frame), up to 16 MiB
 and 4096 pixels per edge. Imported pictures keep their aspect ratio. The

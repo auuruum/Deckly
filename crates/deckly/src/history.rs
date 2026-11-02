@@ -21,6 +21,43 @@ pub enum Direction {
     Redo,
 }
 
+/// Shared editor shortcuts. Consuming the key keeps one undo from reaching
+/// both an image draft and the surrounding profile or text field.
+pub fn shortcut(ctx: &eframe::egui::Context, enabled: bool) -> Option<Direction> {
+    use eframe::egui;
+    if !enabled {
+        return None;
+    }
+    let mac = matches!(ctx.os(), egui::os::OperatingSystem::Mac);
+    ctx.input_mut(|i| {
+        let found = i.events.iter().enumerate().find_map(|(index, event)| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            if !modifiers.command || modifiers.alt {
+                return None;
+            }
+            let direction = match (*key, modifiers.shift) {
+                (egui::Key::Z, false) => Direction::Undo,
+                (egui::Key::Y, false) => Direction::Redo,
+                (egui::Key::Z, true) if mac => Direction::Redo,
+                _ => return None,
+            };
+            Some((index, direction))
+        });
+        found.map(|(index, direction)| {
+            i.events.remove(index);
+            direction
+        })
+    })
+}
+
 struct Edit {
     profile: String,
     before: String,

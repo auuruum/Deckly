@@ -8,7 +8,7 @@
 use crate::actions::{self, ACTIONS, Category};
 use crate::background::Background;
 use crate::clipboard::{self, KeyClipboard};
-use crate::history::{Direction, History, Location};
+use crate::history::{Direction, History, Location, shortcut as history_shortcut};
 use crate::os::tray::Command;
 use crate::os::{Hotkey, MediaKey};
 use crate::plugins::{self, KeyImage, Overlay};
@@ -3467,40 +3467,6 @@ fn clipboard_events(ctx: &egui::Context, enabled: bool) -> Vec<egui::Event> {
             }
         });
         events
-    })
-}
-
-fn history_shortcut(ctx: &egui::Context, enabled: bool) -> Option<Direction> {
-    if !enabled {
-        return None;
-    }
-    let mac = matches!(ctx.os(), egui::os::OperatingSystem::Mac);
-    ctx.input_mut(|i| {
-        let found = i.events.iter().enumerate().find_map(|(index, event)| {
-            let egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } = event
-            else {
-                return None;
-            };
-            if !modifiers.command || modifiers.alt {
-                return None;
-            }
-            let direction = match (*key, modifiers.shift) {
-                (egui::Key::Z, false) => Direction::Undo,
-                (egui::Key::Y, false) => Direction::Redo,
-                (egui::Key::Z, true) if mac => Direction::Redo,
-                _ => return None,
-            };
-            Some((index, direction))
-        });
-        found.map(|(index, direction)| {
-            i.events.remove(index);
-            direction
-        })
     })
 }
 
