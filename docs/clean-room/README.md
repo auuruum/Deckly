@@ -37,6 +37,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-10-31 | [Linux and macOS actions and plugins](2026-10-31-linux-macos-actions.md) | Simulated input per session, media control, command lines in Open, Windows plugins through Wine |
 | 2026-10-31 | [Official profiles, backups and plugin folders](2026-10-31-official-profiles.md) | Backup and profile files, page and key layout, action settings, model codes, where plugins and their settings live |
 | 2026-11-02 | [Keys while the computer is locked](2026-11-02-lock-keys.md) | Which actions run on the lock screen, fail-open choice, lock detection per system and what is unverified |
+| 2026-11-02 | [Profiles by active window](2026-11-02-active-window-profiles.md) | Rules on profiles, going back and manual switches, what names each system gives an application, what is unverified |
 
 ## Open questions
 

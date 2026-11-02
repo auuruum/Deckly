@@ -239,6 +239,7 @@ pub fn convert(
         device: kind,
         pages,
         folders,
+        applications: Vec::new(),
     };
     profile.sanitize();
     Ok(Converted {

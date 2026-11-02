@@ -34,12 +34,18 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -61,8 +67,10 @@ rustix = { version = "1.1.5", default-features = false, features = ["std", "even
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGRemoteOperation", "CGSession"] }
 # Lock screen notifications; already in the tree through objc2-core-graphics.
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDictionary", "CFNotificationCenter", "CFNumber", "CFString"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "objc2-core-graphics"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSGeometry"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSRunningApplication", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "objc2-core-graphics"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSURL"] }
+# Blocks for notification observers; already in the tree through AppKit.
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 # Autorelease pools for native icon previews on the background worker; already
 # in the dependency tree through AppKit and winit.
 objc2 = { version = "0.6.5", default-features = false, features = ["std"] }

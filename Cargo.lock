@@ -1016,6 +1016,7 @@ name = "deckly"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "block2 0.6.2",
  "deckly-core",
  "deckly-device",
  "deckly-plugin-host",

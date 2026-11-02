@@ -56,9 +56,14 @@ impl Gate {
         self.0.undetected.load(Ordering::Relaxed)
     }
 
+    /// Whether the computer is locked, whatever the setting says.
+    pub fn locked(&self) -> bool {
+        self.0.locked.load(Ordering::Relaxed)
+    }
+
     /// Whether the computer is locked and the setting applies.
     pub fn locked_out(&self) -> bool {
-        self.0.enabled.load(Ordering::Relaxed) && self.0.locked.load(Ordering::Relaxed)
+        self.0.enabled.load(Ordering::Relaxed) && self.locked()
     }
 
     /// Whether an action must not run now.
@@ -123,6 +128,14 @@ mod tests {
         gate.set_locked(true);
         gate.set_undetected();
         assert!(gate.blocks(actions::TEXT));
+    }
+
+    #[test]
+    fn being_locked_does_not_depend_on_the_setting() {
+        let gate = Gate::new(false);
+        gate.set_locked(true);
+        assert!(gate.locked());
+        assert!(!gate.locked_out());
     }
 
     #[test]

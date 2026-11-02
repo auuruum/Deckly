@@ -6,6 +6,7 @@
 //! measured positions, relative to the window's client area.
 
 use crate::actions;
+use crate::app_picker::{self, Picker};
 use crate::backup;
 use crate::cropper::{Cropper, Purpose};
 use crate::image_editor::{self, Editor, ImageChoice, Mode, Selection};
@@ -17,11 +18,13 @@ use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use crate::transfer::{self, Job, PluginKind, SharedJob, Summary};
-use deckly_core::profile::{MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_NAME_CHARS};
+use deckly_core::profile::{
+    MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_APPLICATIONS, MAX_PROFILE_NAME_CHARS,
+};
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
 use deckly_core::{
-    DeviceKind, DeviceModel, KeyConfig, KeyPress, LockLook, Orientation, Page, Profile, TitleAlign,
-    TitleStyle,
+    AppRule, DeviceKind, DeviceModel, KeyConfig, KeyPress, LockLook, Orientation, Page, Profile,
+    TitleAlign, TitleStyle,
 };
 use deckly_plugin_host::Host;
 use eframe::egui::{
@@ -110,6 +113,10 @@ pub struct Preferences {
     /// Select a duplicated profile when its background save finishes.
     pending_profile: Option<String>,
     page_icon_editor: Option<PageIconEditor>,
+    /// Choosing an application for the profile in its `context`.
+    app_picker: Option<Picker>,
+    /// Why the application just chosen could not be added.
+    app_note: Option<String>,
 }
 
 struct PageIconEditor {
@@ -293,6 +300,8 @@ impl Preferences {
             cropper: Cropper::default(),
             pending_profile: None,
             page_icon_editor: None,
+            app_picker: None,
+            app_note: None,
         }
     }
 
@@ -310,6 +319,7 @@ impl Preferences {
         self.open = false;
         self.advanced = None;
         self.page_icon_editor = None;
+        self.app_picker = None;
     }
 
     #[cfg(test)]
@@ -341,10 +351,12 @@ impl Preferences {
             }
             egui::CentralPanel::no_frame().show(ui, |ui| self.contents(ui, env));
             self.job_dialog(ui.ctx(), env);
+            self.application_picker(ui.ctx(), env);
         });
         if !self.open {
             self.advanced = None;
             self.page_icon_editor = None;
+            self.app_picker = None;
         }
         self.show_advanced(ctx, env);
         if let Some((purpose, image)) = self.cropper.show(ctx) {
@@ -618,11 +630,12 @@ impl Preferences {
         }
 
         self.lock_keys(ui, o, env);
+        self.switch_by_window(ui, o, env);
 
-        label(ui, o, 322.0, 22.0, "About:");
+        label(ui, o, 392.0, 22.0, "About:");
         let text = "Deckly is an independent app. It is not made, approved or \
                     supported by Elgato or Corsair.";
-        value_dim(ui, o, VALUE_X, 325.0, 440.0, text);
+        value_dim(ui, o, VALUE_X, 395.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
     }
@@ -662,6 +675,31 @@ impl Preferences {
              screensaver; Standby Screen shows the picture stored on the device."
         };
         value_dim(ui, o, VALUE_X, 279.0, 440.0, note);
+    }
+
+    /// Whether profiles follow the applications they list.
+    fn switch_by_window(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        label(ui, o, 322.0, 22.0, "Active Window:");
+        let mut s = runtime::lock(env.state);
+        let mut on = s.settings.switch_by_window;
+        let text = "Switch profiles by active window";
+        if checkbox(ui, at(o, VALUE_X, 323.0, 280.0, 20.0), &mut on, text).changed() {
+            s.settings.switch_by_window = on;
+            s.save_settings();
+            let _ = env.runtime.send(Msg::Settings);
+        }
+        match s.follower.error() {
+            Some(error) => wrapped(ui, o, VALUE_X, 347.0, 440.0, error, WARNING),
+            None => value_dim(
+                ui,
+                o,
+                VALUE_X,
+                347.0,
+                440.0,
+                "Choose the applications of a profile on the Profiles tab. It shows \
+                 while one of them is active, then the device goes back.",
+            ),
+        }
     }
 
     fn create_backup(&mut self, ctx: &egui::Context, env: &Env<'_>) {
@@ -1434,6 +1472,7 @@ impl Preferences {
             ),
         }
         drop(s);
+        self.applications(ui, o, env, &id);
 
         if self.confirm_delete.as_ref() == Some(&id) {
             let text = format!("Delete \"{name}\" and all its pages?");
@@ -1449,6 +1488,115 @@ impl Preferences {
                 self.confirm_delete = None;
             }
         }
+    }
+
+    /// The applications that bring a profile up.
+    fn applications(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>, id: &str) {
+        let x = 272.0;
+        let (rules, on, error) = {
+            let s = runtime::lock(env.state);
+            (
+                s.profile(id)
+                    .map_or_else(Vec::new, |p| p.applications.clone()),
+                s.settings.switch_by_window,
+                s.follower.error().map(str::to_owned),
+            )
+        };
+        let title = "Show this profile while one of these is active:";
+        value(ui, o, x, 195.0, 20.0, title);
+        let list = at(o, x, 218.0, 438.0, 118.0);
+        frame(ui, list);
+        let mut remove = None;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(list.shrink(1.0)), |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("profile-applications")
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    for (index, rule) in rules.iter().enumerate() {
+                        let width = ui.available_width();
+                        let (rect, row) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
+                        if row.hovered() {
+                            ui.painter()
+                                .rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
+                        }
+                        let y = rect.center().y;
+                        centered_glyph(
+                            ui,
+                            pos2(rect.left() + 16.0, y),
+                            icon::APP_WINDOW,
+                            15.0,
+                            TEXT_DIM,
+                        );
+                        let close =
+                            Rect::from_center_size(pos2(rect.right() - 16.0, y), Vec2::splat(22.0));
+                        let clip =
+                            Rect::from_x_y_ranges(rect.left()..=close.left() - 4.0, rect.y_range());
+                        ui.painter().with_clip_rect(clip).text(
+                            pos2(rect.left() + 32.0, y),
+                            Align2::LEFT_CENTER,
+                            &rule.name,
+                            font(13.0),
+                            TEXT,
+                        );
+                        let button = ui.push_id(index, |ui| icon_button(ui, close, icon::X, true));
+                        if button.inner.on_hover_text("Remove").clicked() {
+                            remove = Some(index);
+                        }
+                        row.on_hover_text(&rule.id);
+                    }
+                });
+        });
+        if rules.is_empty() {
+            value_dim(ui, o, x + 10.0, 226.0, 418.0, "No applications yet.");
+        }
+        if let Some(index) = remove {
+            self.app_note = None;
+            edit_applications(env, id, |list| remove_application(list, index));
+        }
+        let room = rules.len() < MAX_PROFILE_APPLICATIONS;
+        if button(ui, at(o, x, 344.0, 130.0, 22.0), "Add Application…").clicked() && room {
+            self.app_note = None;
+            self.app_picker = Some(Picker::new(ui.ctx(), id.to_owned()));
+        }
+        let file = button(ui, at(o, x + 140.0, 344.0, 110.0, 22.0), "Choose File…")
+            .on_hover_text("For a program the list does not have, such as a game");
+        if file.clicked()
+            && room
+            && let Some(path) = rfd::FileDialog::new().pick_file()
+        {
+            self.app_note = None;
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+            let rule = AppRule::new(&name, &path.to_string_lossy());
+            edit_applications(env, id, |list| add_application(list, rule));
+        }
+        if let Some(note) = error.as_ref().or(self.app_note.as_ref()) {
+            wrapped(ui, o, x, 372.0, 438.0, note, WARNING);
+        } else if !on {
+            value_dim(ui, o, x, 372.0, 438.0, "Turned off on the General tab.");
+        }
+    }
+
+    /// Runs the picker opened on the Profiles tab.
+    fn application_picker(&mut self, ctx: &egui::Context, env: &mut Env<'_>) {
+        let Some(picker) = &mut self.app_picker else {
+            return;
+        };
+        match picker.show(ctx) {
+            app_picker::Selection::Pending => return,
+            app_picker::Selection::Cancelled => {}
+            app_picker::Selection::Application(app) if app.process.is_empty() => {
+                self.app_note = Some(format!(
+                    "Deckly cannot tell when {} is active. Use Choose File… with its program.",
+                    app.name
+                ));
+            }
+            app_picker::Selection::Application(app) => {
+                let rule = AppRule::new(&app.name, &app.process);
+                edit_applications(env, &picker.context, |list| add_application(list, rule));
+            }
+        }
+        self.app_picker = None;
     }
 
     /// A page of an open profile in the list; `number` counts from 1.
@@ -1937,14 +2085,50 @@ fn page_details(
 
 /// Changes a page and saves its profile.
 fn edit_page(env: &mut Env<'_>, profile: &str, page: &str, edit: impl FnOnce(&mut Page)) {
+    edit_profile(env, profile, |p| {
+        let target = p.pages.iter_mut().find(|q| q.id == page);
+        target.map(edit).is_some()
+    });
+}
+
+/// Adds an application to a list unless it is there or the list is full.
+fn add_application(list: &mut Vec<AppRule>, rule: AppRule) -> bool {
+    let id = rule.id.to_lowercase();
+    let known = list.iter().any(|r| r.id.to_lowercase() == id);
+    let add = !known && !id.is_empty() && list.len() < MAX_PROFILE_APPLICATIONS;
+    if add {
+        list.push(rule);
+    }
+    add
+}
+
+fn remove_application(list: &mut Vec<AppRule>, index: usize) -> bool {
+    let exists = index < list.len();
+    if exists {
+        list.remove(index);
+    }
+    exists
+}
+
+/// Changes the applications of a profile and saves it.
+fn edit_applications(
+    env: &mut Env<'_>,
+    profile: &str,
+    edit: impl FnOnce(&mut Vec<AppRule>) -> bool,
+) {
+    edit_profile(env, profile, |p| edit(&mut p.applications));
+    runtime::lock(env.state).follower.rules_changed();
+}
+
+/// Changes a profile, when `edit` says it did, and saves it.
+fn edit_profile(env: &mut Env<'_>, profile: &str, edit: impl FnOnce(&mut Profile) -> bool) {
     let mut s = runtime::lock(env.state);
     let Some(mut p) = s.profile(profile).cloned() else {
         return;
     };
-    let Some(target) = p.pages.iter_mut().find(|q| q.id == page) else {
+    if !edit(&mut p) {
         return;
-    };
-    edit(target);
+    }
     let result = store::save_profile(&p);
     if let Err(e) = result {
         s.notify(format!("Cannot save profile: {e}"));
@@ -2186,10 +2370,12 @@ fn value(ui: &Ui, o: Pos2, x: f32, y: f32, h: f32, text: &str) {
 
 /// Dim text wrapped at `w`, starting at the top left.
 fn value_dim(ui: &Ui, o: Pos2, x: f32, y: f32, w: f32, text: &str) {
-    let galley = ui
-        .painter()
-        .layout(text.to_owned(), font(13.0), TEXT_DIM, w);
-    ui.painter().galley(o + vec2(x, y), galley, TEXT_DIM);
+    wrapped(ui, o, x, y, w, text, TEXT_DIM);
+}
+
+fn wrapped(ui: &Ui, o: Pos2, x: f32, y: f32, w: f32, text: &str, color: Color32) {
+    let galley = ui.painter().layout(text.to_owned(), font(13.0), color, w);
+    ui.painter().galley(o + vec2(x, y), galley, color);
 }
 
 fn footer(ui: &Ui, o: Pos2, text: &str) {
@@ -2469,6 +2655,141 @@ mod tests {
             prefs.close();
             assert!(prefs.page_icon_editor.is_none());
         }
+    }
+
+    /// One pass of a Preferences tab; pointer events come with the click.
+    fn tab_shapes(
+        ctx: &egui::Context,
+        prefs: &mut Preferences,
+        state: &Shared,
+        tab: Tab,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let (sender, _) = std::sync::mpsc::channel();
+        let mut renderer = Renderer::new();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::no_frame().show(ui, |ui| {
+                    let mut env = Env {
+                        state,
+                        runtime: &sender,
+                        renderer: &mut renderer,
+                        device: None,
+                        kind: DeviceKind::Mk2,
+                        host: None,
+                    };
+                    match tab {
+                        Tab::General => prefs.switch_by_window(ui, Pos2::ZERO, &mut env),
+                        _ => prefs.profiles(ui, Pos2::ZERO, &mut env),
+                    }
+                });
+            },
+        );
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    fn says(shapes: &[egui::epaint::ClippedShape], text: &str) -> bool {
+        shapes.iter().any(
+            |shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.text().contains(text)),
+        )
+    }
+
+    fn with_game() -> (Shared, Profile) {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.applications.push(AppRule::new("Game", "game.exe"));
+        let state = runtime::State::new(vec![profile.clone()], Default::default());
+        (std::sync::Arc::new(std::sync::Mutex::new(state)), profile)
+    }
+
+    #[test]
+    fn a_profile_lists_its_applications_and_offers_the_picker() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (state, profile) = with_game();
+        let mut prefs = Preferences::new();
+        prefs.profile = Some(profile.id.clone());
+        tab_shapes(&ctx, &mut prefs, &state, Tab::Profiles, vec![]);
+        let shapes = tab_shapes(&ctx, &mut prefs, &state, Tab::Profiles, vec![]);
+        assert!(says(&shapes, "Game"));
+        assert!(says(&shapes, "Add Application…"));
+        assert!(!says(&shapes, "No applications yet."));
+        assert!(!says(&shapes, "Turned off"));
+        let pos = pos2(330.0, 355.0);
+        for pressed in [true, false] {
+            let press = egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            let events = vec![egui::Event::PointerMoved(pos), press];
+            tab_shapes(&ctx, &mut prefs, &state, Tab::Profiles, events);
+        }
+        let picker = prefs.app_picker.as_ref().expect("the picker opens");
+        assert_eq!(picker.context, profile.id);
+    }
+
+    #[test]
+    fn the_rule_list_says_when_it_cannot_work() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (state, profile) = with_game();
+        let mut prefs = Preferences::new();
+        prefs.profile = Some(profile.id.clone());
+        runtime::lock(&state).settings.switch_by_window = false;
+        tab_shapes(&ctx, &mut prefs, &state, Tab::Profiles, vec![]);
+        let shapes = tab_shapes(&ctx, &mut prefs, &state, Tab::Profiles, vec![]);
+        assert!(says(&shapes, "Turned off on the General tab."));
+        let error = "Wayland does not tell applications which window is active.";
+        runtime::lock(&state).follower.set_error(error.to_owned());
+        let shapes = tab_shapes(&ctx, &mut prefs, &state, Tab::Profiles, vec![]);
+        assert!(says(&shapes, error));
+        assert!(!says(&shapes, "Turned off"));
+    }
+
+    #[test]
+    fn the_setting_shows_why_this_system_cannot_follow_windows() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (state, _) = with_game();
+        let mut prefs = Preferences::new();
+        tab_shapes(&ctx, &mut prefs, &state, Tab::General, vec![]);
+        let shapes = tab_shapes(&ctx, &mut prefs, &state, Tab::General, vec![]);
+        assert!(says(&shapes, "Switch profiles by active window"));
+        assert!(says(&shapes, "Choose the applications of a profile"));
+        let error = "Wayland does not tell applications which window is active.";
+        runtime::lock(&state).follower.set_error(error.to_owned());
+        let shapes = tab_shapes(&ctx, &mut prefs, &state, Tab::General, vec![]);
+        assert!(says(&shapes, error));
+        assert!(!says(&shapes, "Choose the applications of a profile"));
+    }
+
+    #[test]
+    fn an_application_is_listed_once_and_within_the_limit() {
+        let mut list = Vec::new();
+        assert!(add_application(&mut list, AppRule::new("Game", "game.exe")));
+        assert!(!add_application(
+            &mut list,
+            AppRule::new("Other", "GAME.EXE")
+        ));
+        assert!(!add_application(&mut list, AppRule::new("Empty", "")));
+        assert_eq!(list.len(), 1);
+        for i in 1..MAX_PROFILE_APPLICATIONS {
+            assert!(add_application(
+                &mut list,
+                AppRule::new("", &format!("{i}.exe"))
+            ));
+        }
+        assert!(!add_application(&mut list, AppRule::new("", "more.exe")));
+        assert!(!remove_application(&mut list, MAX_PROFILE_APPLICATIONS));
+        assert!(remove_application(&mut list, 0));
+        assert_eq!(list.len(), MAX_PROFILE_APPLICATIONS - 1);
     }
 
     #[test]

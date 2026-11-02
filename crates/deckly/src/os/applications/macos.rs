@@ -33,6 +33,11 @@ fn discover_in(roots: &[PathBuf]) -> Catalog {
                     catalog.add(Application {
                         name: name.into(),
                         target: target.into(),
+                        process: path
+                            .file_name()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or_default()
+                            .into(),
                         detail: path
                             .parent()
                             .map_or_else(String::new, |p| p.display().to_string()),

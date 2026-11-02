@@ -330,6 +330,7 @@ mod tests {
             .map(|name| Application {
                 name: name.into(),
                 target: format!("/apps/{name}.desktop"),
+                process: String::new(),
                 detail: "Installed application".into(),
                 keywords: String::new(),
                 icon: String::new(),
@@ -450,6 +451,7 @@ mod tests {
         let app = Application {
             name: "Spotify".into(),
             target: "/apps/spotify.desktop".into(),
+            process: String::new(),
             detail: String::new(),
             keywords: String::new(),
             icon: String::new(),

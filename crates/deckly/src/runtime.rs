@@ -7,8 +7,9 @@
 //! the runtime re-renders only keys whose image changed.
 
 use crate::actions::{self, Outcome};
+use crate::auto_switch::Follower;
 use crate::lock_gate::Gate;
-use crate::os::{screen_lock, tray};
+use crate::os::{active_window, screen_lock, tray};
 use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
 use crate::sequence::{self, Press, Step};
@@ -46,6 +47,8 @@ pub struct State {
     pub previous: HashMap<String, String>,
     /// Holds actions back while the computer is locked.
     pub gate: Gate,
+    /// Shows profiles by the application in the foreground.
+    pub follower: Follower,
 }
 
 impl State {
@@ -53,6 +56,7 @@ impl State {
         settings.sort_profiles(&mut profiles);
         Self {
             gate: Gate::new(settings.lock_keys),
+            follower: Follower::new(settings.switch_by_window),
             profiles,
             settings,
             devices: Vec::new(),
@@ -69,14 +73,35 @@ impl State {
     /// Shows a profile on a device and saves the choice. The profile it
     /// replaces is remembered for plugins that ask to go back.
     pub fn assign(&mut self, serial: &str, id: String) {
+        self.choose(serial, id);
+        self.save_settings();
+    }
+
+    fn choose(&mut self, serial: &str, id: String) {
+        let shown = self.follower.manual(serial);
         let old = self
             .settings
             .assignments
             .insert(serial.to_owned(), id.clone());
-        if let Some(old) = old.filter(|o| *o != id) {
+        if let Some(old) = shown.or(old).filter(|o| *o != id) {
             self.previous.insert(serial.to_owned(), old);
         }
-        self.save_settings();
+    }
+
+    /// Shows a device what the foreground asks for, without saving it.
+    /// Returns whether the device's profile changed.
+    pub fn follow_window(&mut self, serial: &str, kind: DeviceKind) -> bool {
+        let before = self.assigned(serial).map(|p| p.id.clone());
+        let assigned = self.settings.assignments.get(serial).map(String::as_str);
+        if !self.follower.follow(serial, kind, assigned, &self.profiles) {
+            return false;
+        }
+        let after = self.assigned(serial).map(|p| p.id.as_str());
+        let Some(before) = before.filter(|b| Some(b.as_str()) != after) else {
+            return false;
+        };
+        self.previous.insert(serial.to_owned(), before);
+        true
     }
 
     pub fn profile(&self, id: &str) -> Option<&Profile> {
@@ -91,8 +116,15 @@ impl State {
         self.devices.iter().find(|d| d.handle == handle)
     }
 
-    /// The profile assigned to a device serial, if it still exists.
+    /// The profile a device shows, if it still exists: what a rule shows on
+    /// it, else its own choice.
     pub fn assigned(&self, serial: &str) -> Option<&Profile> {
+        let shown = self.follower.shown(serial).and_then(|id| self.profile(id));
+        shown.or_else(|| self.chosen(serial))
+    }
+
+    /// The profile chosen for a device, if it still exists.
+    fn chosen(&self, serial: &str) -> Option<&Profile> {
         self.profile(self.settings.assignments.get(serial)?)
     }
 
@@ -171,6 +203,7 @@ impl State {
         self.profiles.retain(|p| p.id != id);
         self.pages.remove(id);
         self.folders.remove(id);
+        self.follower.forget_profile(id);
         if let Err(e) = store::delete_profile(id) {
             self.notify(format!("Cannot delete profile: {e}"));
         }
@@ -287,7 +320,7 @@ impl State {
         let orphans: Vec<(String, DeviceKind)> = self
             .devices
             .iter()
-            .filter(|d| self.assigned(&d.serial).is_none())
+            .filter(|d| self.chosen(&d.serial).is_none())
             .map(|d| (d.serial.clone(), d.model.kind))
             .collect();
         for (serial, kind) in orphans {
@@ -364,6 +397,9 @@ pub enum Msg {
     Settings,
     /// The computer locked or unlocked.
     ScreenLock,
+    /// Another application reached the foreground, or that cannot be known
+    /// here.
+    ActiveWindow(Result<Vec<String>, String>),
     Outcome(Handle, Result<Outcome, String>),
     /// A sequence pressed or released a plugin action.
     PluginStep {
@@ -480,6 +516,10 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
         let _ = lock_tx.send(Msg::ScreenLock);
     });
     screen_lock::watch(gate.clone());
+    let window_tx = tx.clone();
+    active_window::watch(move |names| {
+        let _ = window_tx.send(Msg::ActiveWindow(names));
+    });
     let run = move || {
         // DECKLY_NO_DEVICES=1 runs the editor without opening any device,
         // e.g. while the official app owns it.
@@ -505,17 +545,22 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 links: &links,
                 results: &step_tx,
             };
-            if press_timers(&tools, &mut groups) {
+            let followed = follow_window(&state, &links);
+            if press_timers(&tools, &mut groups) || followed {
                 refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                 repaint();
             }
             // Wait for the next message, until a device should sleep, until
-            // a plugin's Alert/OK mark ends, or until a Key Logic press is
-            // decided.
-            let mark_end = lock(&state).next_mark_end();
+            // a plugin's Alert/OK mark ends, until a Key Logic press is
+            // decided, or until the foreground has settled.
+            let (mark_end, settled) = {
+                let s = lock(&state);
+                (s.next_mark_end(), s.follower.deadline())
+            };
             let wake = next_sleep(&state, &links)
                 .into_iter()
                 .chain(mark_end)
+                .chain(settled)
                 .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
                 .min();
             let msg = match wake {
@@ -645,6 +690,13 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                     refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                     repaint();
                 }
+                Msg::ActiveWindow(Ok(names)) => {
+                    lock(&state).follower.report(names, Instant::now());
+                }
+                Msg::ActiveWindow(Err(e)) => {
+                    lock(&state).follower.set_error(e);
+                    repaint();
+                }
                 Msg::Outcome(handle, Ok(Outcome::Sleep)) => {
                     let awake = links.get(&handle).is_some_and(|l| l.enabled && !l.asleep);
                     if awake {
@@ -697,7 +749,7 @@ fn connect(state: &Shared, info: &ConnectedDevice) {
         .device(&info.serial)
         .default_profile
         .filter(|id| s.profile(id).is_some());
-    let current = s.assigned(&info.serial).map(|p| p.id.clone());
+    let current = s.chosen(&info.serial).map(|p| p.id.clone());
     let pick = match (preferred, &current) {
         (Some(id), _) => Some(id),
         (None, None) => Some(s.ensure_profile(info.model.kind)),
@@ -777,6 +829,23 @@ fn follow_lock(state: &Shared, devices: &DeviceManager, links: &mut Links) {
             devices.set_brightness(handle, s.settings.device(&link.serial).brightness);
         }
     }
+}
+
+/// Brings devices up to date with the foreground; returns whether any changed
+/// its profile. A device that is off or asleep, and all of them while the
+/// computer is locked, stay as they are and catch up when they come back.
+fn follow_window(state: &Shared, links: &Links) -> bool {
+    let mut s = lock(state);
+    let (enabled, locked) = (s.settings.switch_by_window, s.gate.locked());
+    s.follower.settle(enabled, locked, Instant::now());
+    if locked {
+        return false;
+    }
+    let mut changed = false;
+    for link in links.values().filter(|l| l.enabled && !l.asleep) {
+        changed |= s.follow_window(&link.serial, link.model.kind);
+    }
+    changed
 }
 
 /// A key change that reaches an action.
@@ -1644,6 +1713,135 @@ mod tests {
         let state = Arc::new(Mutex::new(State::new(vec![profile], settings)));
         let links = Links::from([(1, Link::new(&info))]);
         (state, DeviceManager::disabled(), links)
+    }
+
+    /// A device on `Home` with a `Game` profile that lists game.exe.
+    fn following_device(settings: Settings) -> (Shared, Links, String, String) {
+        let (state, _, links) = one_device(settings);
+        let mut game = Profile::new("Game", DeviceKind::Mk2);
+        game.applications
+            .push(deckly_core::AppRule::new("Game", "game.exe"));
+        let game_id = game.id.clone();
+        let mut s = lock(&state);
+        let home = s.profiles[0].id.clone();
+        s.profiles.push(game);
+        s.settings.assignments.insert("S1".into(), home.clone());
+        drop(s);
+        (state, links, home, game_id)
+    }
+
+    /// Reports an application as settled already.
+    fn reach_foreground(state: &Shared, program: &str) {
+        let now = Instant::now();
+        let then = now.checked_sub(crate::auto_switch::SETTLE).unwrap_or(now);
+        lock(state)
+            .follower
+            .report(vec![format!("C:\\Apps\\{program}")], then);
+    }
+
+    fn showing(state: &Shared) -> Option<String> {
+        lock(state).assigned("S1").map(|p| p.id.clone())
+    }
+
+    #[test]
+    fn a_rule_shows_on_the_device_and_in_the_tray_without_being_saved() {
+        let (state, links, home, game) = following_device(Settings::default());
+        reach_foreground(&state, "game.exe");
+        assert!(follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&game));
+        let mut s = lock(&state);
+        assert_eq!(s.settings.assignments["S1"], home);
+        assert_eq!(s.previous["S1"], home);
+        s.devices.push(ConnectedDevice {
+            handle: 1,
+            model: links[&1].model,
+            serial: "S1".into(),
+            firmware: None,
+        });
+        assert_eq!(s.tray_devices()[0].active.as_ref(), Some(&game));
+        drop(s);
+        reach_foreground(&state, "other.exe");
+        assert!(follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+        assert!(!follow_window(&state, &links), "nothing left to send");
+    }
+
+    #[test]
+    fn a_switch_by_hand_ends_the_rule_and_stays() {
+        let (state, links, home, game) = following_device(Settings::default());
+        reach_foreground(&state, "game.exe");
+        follow_window(&state, &links);
+        lock(&state).choose("S1", home.clone());
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+        assert_eq!(lock(&state).previous["S1"], game);
+        reach_foreground(&state, "other.exe");
+        assert!(!follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+    }
+
+    #[test]
+    fn a_sleeping_device_is_left_alone_and_catches_up_when_it_wakes() {
+        let (state, mut links, home, game) = following_device(Settings::default());
+        links.get_mut(&1).unwrap().asleep = true;
+        reach_foreground(&state, "game.exe");
+        assert!(!follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+        links.get_mut(&1).unwrap().asleep = false;
+        assert!(follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&game));
+    }
+
+    /// Also with the setting off, when devices stay awake on the lock screen.
+    #[test]
+    fn a_locked_computer_holds_devices_where_they_are() {
+        let settings = Settings {
+            lock_keys: false,
+            ..Settings::default()
+        };
+        let (state, links, home, game) = following_device(settings);
+        let gate = lock(&state).gate.clone();
+        gate.set_locked(true);
+        reach_foreground(&state, "game.exe");
+        assert!(!follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+        gate.set_locked(false);
+        assert!(!follow_window(&state, &links));
+        reach_foreground(&state, "game.exe");
+        assert!(follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&game));
+    }
+
+    #[test]
+    fn a_disabled_or_absent_device_is_left_alone() {
+        let (state, mut links, home, _) = following_device(Settings::default());
+        links.get_mut(&1).unwrap().enabled = false;
+        reach_foreground(&state, "game.exe");
+        assert!(!follow_window(&state, &links));
+        assert!(!follow_window(&state, &Links::new()));
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+    }
+
+    #[test]
+    fn the_setting_turns_following_off_and_back_on() {
+        let (state, links, home, game) = following_device(Settings::default());
+        reach_foreground(&state, "game.exe");
+        follow_window(&state, &links);
+        lock(&state).settings.switch_by_window = false;
+        assert!(follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&home));
+        lock(&state).settings.switch_by_window = true;
+        assert!(follow_window(&state, &links));
+        assert_eq!(showing(&state).as_ref(), Some(&game));
+    }
+
+    #[test]
+    fn a_shown_profile_that_is_gone_falls_back_to_the_choice() {
+        let (state, links, home, game) = following_device(Settings::default());
+        reach_foreground(&state, "game.exe");
+        follow_window(&state, &links);
+        let mut s = lock(&state);
+        s.profiles.retain(|p| p.id != game);
+        assert_eq!(s.assigned("S1").map(|p| p.id.clone()), Some(home));
     }
 
     #[test]

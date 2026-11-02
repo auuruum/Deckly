@@ -9,7 +9,9 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Profiles
 
-- [ ] Switch profiles automatically by the active window.
+- [x] Switch profiles automatically by the active window.
+      Done: Preferences > Profiles lists the applications of a profile, and
+      Preferences > General > Active Window turns it off. Not on Wayland.
 - [x] Export a single profile, so people can share one without a full backup.
       Done: Preferences > Profiles > Export saves a `.decklyProfile`.
 - [ ] Conditions in Multi Actions: if window X is open, do Y.

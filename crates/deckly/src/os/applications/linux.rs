@@ -177,6 +177,11 @@ fn parse(
     Some(Application {
         name,
         target: path.to_str()?.to_owned(),
+        // Most desktop files are named after their window class.
+        process: match get("StartupWMClass") {
+            "" => path.file_stem()?.to_str()?.to_owned(),
+            class => class.to_owned(),
+        },
         detail: if generic.is_empty() {
             source.into()
         } else {
@@ -254,10 +259,18 @@ mod tests {
         assert!(a.detail.starts_with("Music Player"));
         assert!(a.matches("audio"));
         assert_eq!(a.target, "/apps/spotify.desktop");
+        assert_eq!(a.process, "spotify");
         assert_eq!(
             locales("sr_RS.UTF-8@latin"),
             ["sr_RS@latin", "sr_RS", "sr@latin", "sr"]
         );
+    }
+
+    #[test]
+    fn a_process_goes_by_its_window_class_or_the_desktop_file() {
+        assert_eq!(app(&entry("")).unwrap().process, "spotify");
+        let class = app(&entry("StartupWMClass=Spotify-Client")).unwrap();
+        assert_eq!(class.process, "Spotify-Client");
     }
 
     #[test]

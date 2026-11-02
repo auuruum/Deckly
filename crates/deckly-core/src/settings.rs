@@ -42,6 +42,10 @@ pub struct Settings {
     pub lock_keys: bool,
     /// What devices show while `lock_keys` holds them.
     pub lock_look: LockLook,
+    /// Profiles follow the applications listed on them. On by default: a
+    /// profile lists none until the user adds one, and adding one is the
+    /// choice to use this.
+    pub switch_by_window: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +59,7 @@ impl Default for Settings {
             profile_order: Vec::new(),
             lock_keys: true,
             lock_look: LockLook::default(),
+            switch_by_window: true,
         }
     }
 }
@@ -437,6 +442,7 @@ mod tests {
         s.profile_order = strings(&["p2", "p1"]);
         s.lock_keys = false;
         s.lock_look = LockLook::Standby;
+        s.switch_by_window = false;
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
     }
@@ -448,6 +454,12 @@ mod tests {
                 .unwrap()
                 .lock_keys
         );
+    }
+
+    #[test]
+    fn older_settings_files_switch_by_window() {
+        let s = Settings::from_json(r#"{"brightness":50,"lock_keys":false}"#).unwrap();
+        assert!(s.switch_by_window);
     }
 
     #[test]

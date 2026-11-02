@@ -2,13 +2,15 @@
 //! Shell COM is needed because packaged apps do not have executable paths.
 
 use super::{Application, Catalog, MAX_APPLICATIONS};
+use windows::Win32::Storage::EnhancedStorage::PKEY_Link_TargetParsingPath;
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::UI::Shell::{
-    BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, KF_FLAG_DEFAULT,
+    BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, IShellItem2, KF_FLAG_DEFAULT,
     SHGetKnownFolderItem, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
 };
+use windows::core::Interface;
 
 struct Apartment;
 impl Drop for Apartment {
@@ -50,9 +52,11 @@ fn collect() -> windows::core::Result<Catalog> {
             display_name(&item, SIGDN_NORMALDISPLAY),
             display_name(&item, SIGDN_PARENTRELATIVEPARSING),
         ) {
+            let process = process_name(&id, link_target(&item).as_deref());
             catalog.add(Application {
                 name,
                 target: format!("shell:AppsFolder\\{id}"),
+                process,
                 detail: "Installed application".into(),
                 keywords: String::new(),
                 icon: format!("shell:AppsFolder\\{id}"),
@@ -61,6 +65,29 @@ fn collect() -> windows::core::Result<Catalog> {
     }
     catalog.truncated = true;
     Ok(catalog)
+}
+
+/// What a Start menu shortcut leads to; packaged apps have nothing here.
+fn link_target(item: &IShellItem) -> Option<String> {
+    let item: IShellItem2 = item.cast().ok()?;
+    // SAFETY: the key is a static. Shell returns a null-terminated,
+    // COM-allocated string; copy it while alive and free it either way.
+    unsafe {
+        let text = item.GetString(&PKEY_Link_TargetParsingPath).ok()?;
+        let result = text.to_string().ok();
+        CoTaskMemFree(Some(text.0.cast()));
+        result
+    }
+}
+
+/// A shortcut's program, else the package id the entry goes by. A shortcut to
+/// a link or a document says nothing about what will run.
+fn process_name(id: &str, target: Option<&str>) -> String {
+    match target.filter(|t| !t.is_empty()) {
+        Some(path) if path.to_lowercase().ends_with(".exe") => path.to_owned(),
+        Some(_) => String::new(),
+        None => id.to_owned(),
+    }
 }
 
 fn display_name(item: &IShellItem, kind: SIGDN) -> windows::core::Result<String> {
@@ -83,7 +110,7 @@ pub(super) fn icon(target: &str) -> Option<image::RgbaImage> {
     use windows::Win32::UI::Shell::{
         IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY,
     };
-    use windows::core::{HSTRING, Interface};
+    use windows::core::HSTRING;
 
     struct Bitmap(HBITMAP);
     impl Drop for Bitmap {
@@ -175,4 +202,27 @@ pub(super) fn icon(target: &str) -> Option<image::RgbaImage> {
     }
     super::icons::bgra(&mut bytes);
     image::RgbaImage::from_raw(width, height, bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Values seen in the Start menu listing of a Windows 10 machine.
+    #[test]
+    fn a_process_is_named_by_the_shortcuts_program_or_the_package() {
+        let discord = r"C:\Users\me\AppData\Local\Discord\Discord.exe";
+        assert_eq!(
+            process_name("com.squirrel.Discord.Discord", Some(discord)),
+            discord
+        );
+        let calculator = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+        assert_eq!(process_name(calculator, None), calculator);
+        assert_eq!(process_name(calculator, Some("")), calculator);
+        assert_eq!(
+            process_name("steam://rungameid/240", Some("steam://rungameid/240")),
+            ""
+        );
+        assert_eq!(process_name("manual", Some(r"C:\Docs\manual.pdf")), "");
+    }
 }

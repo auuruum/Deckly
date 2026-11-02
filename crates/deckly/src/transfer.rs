@@ -810,6 +810,9 @@ mod tests {
         std::fs::write(&image, b"<svg/>").unwrap();
         let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
         profile.pages[0].icon = Some(image.clone());
+        profile
+            .applications
+            .push(deckly_core::AppRule::new("Game", "game.exe"));
         profile.pages[0].keys.insert(
             0,
             KeyConfig::new(deckly_core::profile::FOLDER_ACTION, serde_json::json!({})),

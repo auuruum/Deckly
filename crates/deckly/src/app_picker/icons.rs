@@ -114,6 +114,7 @@ mod tests {
         let app = Application {
             name: "App".into(),
             target: "app".into(),
+            process: String::new(),
             detail: String::new(),
             keywords: String::new(),
             icon: "icon-1".into(),

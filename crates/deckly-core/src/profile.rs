@@ -19,6 +19,9 @@ pub const MAX_FOLDER_DEPTH: usize = 16;
 pub const MAX_TITLE_CHARS: usize = 200;
 pub const MAX_PAGE_NAME_CHARS: usize = 64;
 pub const MAX_PROFILE_NAME_CHARS: usize = 64;
+/// Applications one profile can follow; more are dropped on load.
+pub const MAX_PROFILE_APPLICATIONS: usize = 64;
+const MAX_APPLICATION_CHARS: usize = 256;
 /// The name of the profile made for a device that has none.
 pub const DEFAULT_PROFILE_NAME: &str = "Default Profile";
 /// Profile files larger than this are refused before parsing.
@@ -64,6 +67,50 @@ pub struct Profile {
     /// that a key leads to are kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<Page>,
+    /// Applications that bring this profile up while they are in the
+    /// foreground. Kept here so they leave with the profile when it is
+    /// deleted and travel with it in exports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applications: Vec<AppRule>,
+}
+
+/// An application that brings a profile up
+/// (docs/clean-room/2026-11-02-active-window-profiles.md).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppRule {
+    /// As Preferences lists it.
+    pub name: String,
+    /// A program, bundle, package or window class. A path keeps only its last
+    /// part: programs move between versioned folders, and a shared profile
+    /// lands on a computer with other folders.
+    pub id: String,
+}
+
+impl AppRule {
+    pub fn new(name: &str, id: &str) -> Self {
+        let limit = |text: &str| text.trim().chars().take(MAX_APPLICATION_CHARS).collect();
+        let id: String = limit(last_part(id));
+        Self {
+            name: if name.trim().is_empty() {
+                id.clone()
+            } else {
+                limit(name)
+            },
+            id,
+        }
+    }
+
+    /// Whether this is one of the names the system gives an application. Two
+    /// applications with the same program file name both match.
+    pub fn matches(&self, names: &[String]) -> bool {
+        let id = self.id.to_lowercase();
+        names.iter().any(|n| last_part(n).to_lowercase() == id)
+    }
+}
+
+fn last_part(path: &str) -> &str {
+    let path = path.trim_end_matches(['/', '\\']);
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -298,14 +345,17 @@ impl Profile {
             device,
             pages: vec![Page::new()],
             folders: Vec::new(),
+            applications: Vec::new(),
         }
     }
 
     /// An independent copy, including fresh ids and links to its own folders.
+    /// Its applications stay with the original, so two profiles do not claim one.
     pub fn duplicate(&self, name: String) -> Self {
         let mut copy = self.clone();
         copy.id = new_id();
         copy.name = name;
+        copy.applications.clear();
         let mut ids = HashMap::new();
         for page in copy.pages.iter_mut().chain(&mut copy.folders) {
             let id = new_id();
@@ -431,6 +481,7 @@ impl Profile {
     pub fn is_placeholder(&self) -> bool {
         self.name == DEFAULT_PROFILE_NAME
             && self.folders.is_empty()
+            && self.applications.is_empty()
             && matches!(self.pages.as_slice(), [page]
                 if page.keys.is_empty() && page.name.is_empty() && page.icon.is_none())
     }
@@ -492,6 +543,12 @@ impl Profile {
         if self.id.is_empty() {
             self.id = new_id();
         }
+        self.applications = std::mem::take(&mut self.applications)
+            .iter()
+            .map(|rule| AppRule::new(&rule.name, &rule.id))
+            .filter(|rule| !rule.id.is_empty())
+            .take(MAX_PROFILE_APPLICATIONS)
+            .collect();
     }
 
     pub fn from_json(text: &str) -> Result<Self, ProfileError> {
@@ -742,8 +799,66 @@ mod tests {
         );
         key.title = "Site".into();
         p.pages[0].keys.insert(3, key);
+        p.applications.push(AppRule::new("Spotify", "Spotify.exe"));
         let text = p.to_json().unwrap();
         assert_eq!(Profile::from_json(&text).unwrap(), p);
+    }
+
+    #[test]
+    fn older_profile_files_list_no_applications_and_new_empty_ones_stay_small() {
+        let text = r#"{"id":"a","name":"x","device":"mk2","pages":[{"id":"p"}]}"#;
+        let p = Profile::from_json(text).unwrap();
+        assert!(p.applications.is_empty());
+        assert!(!p.to_json().unwrap().contains("applications"));
+    }
+
+    #[test]
+    fn a_rule_matches_by_the_last_part_of_a_name_in_any_case() {
+        let rule = AppRule::new("Discord", r"C:\Users\me\AppData\Local\Discord\Discord.exe");
+        assert_eq!(rule.id, "Discord.exe");
+        let running = r"C:\Users\me\AppData\Local\Discord\app-1.0.9\discord.EXE";
+        assert!(rule.matches(&["other".into(), running.into()]));
+        assert!(!rule.matches(&[r"C:\Discord.exe.bak".into()]));
+        assert!(!rule.matches(&[]));
+
+        let package = AppRule::new("Calculator", "Microsoft.Calc_8wek!App");
+        assert!(package.matches(&["microsoft.calc_8wek!app".into()]));
+        let bundle = AppRule::new("Music", "/Applications/Music.app/");
+        assert_eq!(bundle.id, "Music.app");
+        assert!(bundle.matches(&["/System/Applications/Music.app".into()]));
+        assert!(!bundle.matches(&["com.apple.Music".into()]));
+    }
+
+    #[test]
+    fn a_rule_without_a_name_shows_its_id() {
+        assert_eq!(AppRule::new("  ", "/usr/bin/gimp").name, "gimp");
+    }
+
+    #[test]
+    fn sanitize_bounds_applications_and_drops_empty_ones() {
+        let long = "x".repeat(1000);
+        let rules: Vec<String> = (0..=MAX_PROFILE_APPLICATIONS)
+            .map(|i| format!(r#"{{"name":"{long}","id":"/a/b/{i}.exe"}}"#))
+            .collect();
+        let text = format!(
+            r#"{{"id":"a","name":"x","device":"mk2","pages":[],
+            "applications":[{{"name":"none","id":" / "}},{}]}}"#,
+            rules.join(",")
+        );
+        let p = Profile::from_json(&text).unwrap();
+        assert_eq!(p.applications.len(), MAX_PROFILE_APPLICATIONS);
+        assert_eq!(p.applications[0].id, "0.exe");
+        assert_eq!(
+            p.applications[0].name.chars().count(),
+            MAX_APPLICATION_CHARS
+        );
+    }
+
+    #[test]
+    fn a_copy_does_not_claim_the_applications_of_its_original() {
+        let mut p = Profile::new("Game", DeviceKind::Mk2);
+        p.applications.push(AppRule::new("Game", "game.exe"));
+        assert!(p.duplicate("Copy".into()).applications.is_empty());
     }
 
     #[test]
@@ -967,6 +1082,11 @@ mod tests {
         let mut named = new();
         named.pages[0].name = "Scenes".into();
         assert!(!named.is_placeholder());
+        let mut following = new();
+        following
+            .applications
+            .push(AppRule::new("Game", "game.exe"));
+        assert!(!following.is_placeholder());
     }
 
     #[test]

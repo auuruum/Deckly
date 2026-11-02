@@ -16,6 +16,10 @@ pub struct Application {
     pub name: String,
     /// An Open action target: desktop file, app bundle or Shell parsing name.
     pub target: String,
+    /// What the system calls it while it runs, for profiles that follow it:
+    /// a program, bundle, package or window class. Empty when that cannot be
+    /// told, as for a game started by a link.
+    pub process: String,
     pub detail: String,
     pub keywords: String,
     /// Desktop icon name/path, or the native Shell/bundle target. Never saved
@@ -54,6 +58,9 @@ impl Catalog {
         app.keywords = app.keywords.chars().take(1024).collect();
         if app.icon.len() > 8192 || app.icon.contains('\0') {
             app.icon.clear();
+        }
+        if app.process.len() > 1024 {
+            app.process.clear();
         }
         self.applications.push(app);
     }
@@ -126,6 +133,7 @@ mod tests {
         let app = Application {
             name: "Spotify (Launcher)".into(),
             target: "/apps/spotify.desktop".into(),
+            process: String::new(),
             detail: "Music Player".into(),
             keywords: "Audio;streaming;".into(),
             icon: String::new(),
@@ -142,6 +150,7 @@ mod tests {
         let app = Application {
             name: "Music".into(),
             target: "/music.desktop".into(),
+            process: String::new(),
             detail: "d".repeat(5000),
             keywords: "k".repeat(5000),
             icon: String::new(),
