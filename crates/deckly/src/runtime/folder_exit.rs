@@ -276,6 +276,23 @@ mod tests {
     }
 
     #[test]
+    fn the_event_loop_works_out_its_wake_without_locking_itself_out() {
+        use super::super::{Groups, Links, next_wake};
+        use std::sync::{Arc, Mutex, mpsc::channel};
+        let (mut s, _, _) = setup(10);
+        let now = Instant::now();
+        s.arm_folder_exit(source(&s), now);
+        let state = Arc::new(Mutex::new(s));
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(next_wake(&state, &Links::new(), &Groups::default()));
+        });
+        // Taking the state lock twice would hang the app with no window.
+        let wake = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert!(wake < now + Duration::from_secs(10));
+    }
+
+    #[test]
     fn a_short_countdown_is_limited_in_frames_and_zero_has_none() {
         let now = Instant::now();
         let (mut s, _, _) = setup(1);

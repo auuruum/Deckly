@@ -624,23 +624,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                 repaint();
             }
-            // Wait for the next message, until a device should sleep, until
-            // a plugin's Alert/OK mark ends, until a Key Logic press is
-            // decided, until the foreground has settled, or until a folder's
-            // countdown moves on.
-            let (mark_end, settled) = {
-                let s = lock(&state);
-                (s.next_mark_end(), s.follower.deadline())
-            };
-            let wake = next_sleep(&state, &links)
-                .into_iter()
-                .chain(mark_end)
-                .chain(settled)
-                .chain(lock(&state).folder_exit.deadline())
-                .chain(lock(&state).folder_exit.next_frame(Instant::now()))
-                .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
-                .min();
-            let msg = match wake {
+            let msg = match next_wake(&state, &links, &groups) {
                 Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(msg) => msg,
                     Err(RecvTimeoutError::Timeout) => {
@@ -1389,6 +1373,23 @@ fn next_sleep(state: &Shared, links: &Links) -> Option<Instant> {
             let idle = sleep_after(&s.settings, &l.serial)?;
             Some(l.active_at + idle)
         })
+        .min()
+}
+
+/// How long the event loop waits for the next message: until a device should
+/// sleep, until a plugin's Alert/OK mark ends, until a Key Logic press is
+/// decided, until the foreground has settled, or until a folder's countdown
+/// moves on.
+fn next_wake(state: &Shared, links: &Links, groups: &Groups) -> Option<Instant> {
+    let sleep = next_sleep(state, links);
+    let s = lock(state);
+    sleep
+        .into_iter()
+        .chain(s.next_mark_end())
+        .chain(s.follower.deadline())
+        .chain(s.folder_exit.deadline())
+        .chain(s.folder_exit.next_frame(Instant::now()))
+        .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
         .min()
 }
 
