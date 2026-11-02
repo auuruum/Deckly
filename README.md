@@ -8,6 +8,39 @@ An independent, open-source app for Stream Deck hardware, written in pure Rust.
 
 **Status:** early alpha.
 
+## Supported devices
+
+Deckly drives keys only for now: dials and touch screens do nothing yet.
+Only the MK.2 has been run on real hardware, and Deckly has not been run on
+macOS.
+
+✅ Tested &nbsp;·&nbsp; 🟡 Should work, not tested &nbsp;·&nbsp; 🟠 Keys only,
+not tested &nbsp;·&nbsp; ❌ Not supported
+
+| Device | Status | Notes |
+| --- | :-: | --- |
+| Stream Deck MK.2 | ✅ | Windows 10, Linux (CachyOS, Hyprland) |
+| Stream Deck (v2) | 🟡 | |
+| Stream Deck MK.2 (scissor keys) | 🟡 | |
+| Stream Deck 15-key module | 🟡 | |
+| Stream Deck XL | 🟡 | |
+| Stream Deck XL (v2) | 🟡 | |
+| Stream Deck 32-key module | 🟡 | |
+| Stream Deck Mini | 🟡 | Older protocol |
+| Stream Deck Mini (v2) | 🟡 | Older protocol |
+| Stream Deck Mini Discord | 🟡 | Older protocol |
+| Stream Deck 6-key module | 🟡 | Older protocol |
+| Stream Deck Neo | 🟠 | No touch sensors or info window |
+| Stream Deck + | 🟠 | No dials or touch strip |
+| Stream Deck + XL | 🟠 | No dials or touch strip |
+| First Stream Deck (`0x0060`) | ❌ | Its protocol is not documented |
+| Stream Deck Pedal | ❌ | |
+| Stream Deck Studio | ❌ | Not recognized |
+
+Untested models are built from Elgato's published HID documentation.
+[docs/devices.md](docs/devices.md) records what was checked and how to test a
+new model.
+
 ## Build
 
 Run from the repository root:
@@ -220,10 +253,6 @@ buttons.
 To get the original picture back, open the official app, go to its
 Preferences > Devices > Advanced…, and press "Reset" under "Standby screen".
 If you have a picture of your own, "Set Image…" in either app uploads it.
-
-## Tested devices
-
-See [docs/devices.md](docs/devices.md).
 
 ## License
 
