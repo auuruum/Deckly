@@ -42,6 +42,12 @@ fn options() -> SimpleFileOptions {
 /// A portable profile contains only its model, pages, actions and pictures.
 pub fn export_profile(path: &Path, mut profile: Profile) -> Result<Summary, String> {
     let tmp = path.with_file_name(format!(".deckly-export-{}.tmp", uuid::Uuid::new_v4()));
+    // A full path would tell whoever gets the file this computer's user name.
+    for rule in &mut profile.applications {
+        if Path::new(&rule.icon).is_absolute() {
+            rule.icon.clear();
+        }
+    }
     let result = (|| {
         let file = File::create(&tmp).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipWriter::new(BufWriter::new(file));

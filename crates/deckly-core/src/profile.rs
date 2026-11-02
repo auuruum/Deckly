@@ -22,6 +22,7 @@ pub const MAX_PROFILE_NAME_CHARS: usize = 64;
 /// Applications one profile can follow; more are dropped on load.
 pub const MAX_PROFILE_APPLICATIONS: usize = 64;
 const MAX_APPLICATION_CHARS: usize = 256;
+const MAX_APPLICATION_ICON_BYTES: usize = 1024;
 /// The name of the profile made for a device that has none.
 pub const DEFAULT_PROFILE_NAME: &str = "Default Profile";
 /// Profile files larger than this are refused before parsing.
@@ -84,6 +85,10 @@ pub struct AppRule {
     /// part: programs move between versioned folders, and a shared profile
     /// lands on a computer with other folders.
     pub id: String,
+    /// Where the system finds its picture on this computer, as the picker or
+    /// a chosen file gave it. Empty or gone leaves the plain window icon.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 impl AppRule {
@@ -97,7 +102,16 @@ impl AppRule {
                 limit(name)
             },
             id,
+            icon: String::new(),
         }
+    }
+
+    /// A source too long to be real leaves the rule without a picture.
+    pub fn with_icon(mut self, icon: &str) -> Self {
+        if icon.len() <= MAX_APPLICATION_ICON_BYTES {
+            self.icon = icon.to_owned();
+        }
+        self
     }
 
     /// Whether this is one of the names the system gives an application. Two
@@ -545,7 +559,7 @@ impl Profile {
         }
         self.applications = std::mem::take(&mut self.applications)
             .iter()
-            .map(|rule| AppRule::new(&rule.name, &rule.id))
+            .map(|rule| AppRule::new(&rule.name, &rule.id).with_icon(&rule.icon))
             .filter(|rule| !rule.id.is_empty())
             .take(MAX_PROFILE_APPLICATIONS)
             .collect();
@@ -800,8 +814,11 @@ mod tests {
         key.title = "Site".into();
         p.pages[0].keys.insert(3, key);
         p.applications.push(AppRule::new("Spotify", "Spotify.exe"));
+        p.applications
+            .push(AppRule::new("Game", "game.exe").with_icon(r"C:\Games\game.exe"));
         let text = p.to_json().unwrap();
         assert_eq!(Profile::from_json(&text).unwrap(), p);
+        assert_eq!(text.matches("\"icon\"").count(), 1);
     }
 
     #[test]
@@ -837,8 +854,9 @@ mod tests {
     #[test]
     fn sanitize_bounds_applications_and_drops_empty_ones() {
         let long = "x".repeat(1000);
+        let huge = "x".repeat(MAX_APPLICATION_ICON_BYTES + 1);
         let rules: Vec<String> = (0..=MAX_PROFILE_APPLICATIONS)
-            .map(|i| format!(r#"{{"name":"{long}","id":"/a/b/{i}.exe"}}"#))
+            .map(|i| format!(r#"{{"name":"{long}","id":"/a/b/{i}.exe","icon":"{huge}"}}"#))
             .collect();
         let text = format!(
             r#"{{"id":"a","name":"x","device":"mk2","pages":[],
@@ -848,6 +866,7 @@ mod tests {
         let p = Profile::from_json(&text).unwrap();
         assert_eq!(p.applications.len(), MAX_PROFILE_APPLICATIONS);
         assert_eq!(p.applications[0].id, "0.exe");
+        assert!(p.applications[0].icon.is_empty());
         assert_eq!(
             p.applications[0].name.chars().count(),
             MAX_APPLICATION_CHARS

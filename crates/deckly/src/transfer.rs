@@ -857,6 +857,31 @@ mod tests {
     }
 
     #[test]
+    fn an_exported_profile_keeps_no_full_path_to_an_icon() {
+        use deckly_core::{AppRule, DeviceKind, Settings};
+        let root =
+            std::env::temp_dir().join(format!("deckly-profile-icons-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut profile = Profile::new("Game", DeviceKind::Mk2);
+        let program = std::env::current_exe().unwrap();
+        profile.applications = vec![
+            AppRule::new("Game", "game.exe").with_icon(&program.to_string_lossy()),
+            AppRule::new("Music", "music").with_icon(r"shell:AppsFolder\music"),
+        ];
+        let file = root.join("Game.decklyProfile");
+        backup::export_profile(&file, profile).unwrap();
+        let state = Arc::new(Mutex::new(crate::runtime::State::new(
+            vec![],
+            Settings::default(),
+        )));
+        let read = scan(&file, None, &state).unwrap();
+        let rules = &read.profiles[0].profile.applications;
+        assert_eq!(rules[0].icon, "");
+        assert_eq!(rules[1].icon, r"shell:AppsFolder\music");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn native_profiles_cannot_import_images_outside_their_folder() {
         use deckly_core::{DeviceKind, KeyConfig, Settings};
         let root =

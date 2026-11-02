@@ -41,6 +41,7 @@ use std::sync::mpsc::Sender;
 const SIZE: Vec2 = vec2(740.0, 489.0);
 const ADVANCED_SIZE: Vec2 = vec2(400.0, 200.0);
 const STRIP_HEIGHT: f32 = 35.0;
+const APP_ICON_SIZE: f32 = 18.0;
 const LABEL_X: f32 = 20.0;
 const LABEL_WIDTH: f32 = 182.0;
 const VALUE_X: f32 = 224.0;
@@ -117,6 +118,8 @@ pub struct Preferences {
     app_picker: Option<Picker>,
     /// Why the application just chosen could not be added.
     app_note: Option<String>,
+    /// Pictures of the applications a profile lists, while the window is open.
+    app_icons: Option<app_picker::icons::Cache>,
 }
 
 struct PageIconEditor {
@@ -302,6 +305,7 @@ impl Preferences {
             page_icon_editor: None,
             app_picker: None,
             app_note: None,
+            app_icons: None,
         }
     }
 
@@ -320,6 +324,7 @@ impl Preferences {
         self.advanced = None;
         self.page_icon_editor = None;
         self.app_picker = None;
+        self.app_icons = None;
     }
 
     #[cfg(test)]
@@ -357,6 +362,7 @@ impl Preferences {
             self.advanced = None;
             self.page_icon_editor = None;
             self.app_picker = None;
+            self.app_icons = None;
         }
         self.show_advanced(ctx, env);
         if let Some((purpose, image)) = self.cropper.show(ctx) {
@@ -1507,6 +1513,10 @@ impl Preferences {
         let list = at(o, x, 218.0, 438.0, 118.0);
         frame(ui, list);
         let mut remove = None;
+        let icons = self
+            .app_icons
+            .get_or_insert_with(|| app_picker::icons::Cache::new(ui.ctx(), APP_ICON_SIZE));
+        icons.receive(ui.ctx());
         ui.scope_builder(egui::UiBuilder::new().max_rect(list.shrink(1.0)), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("profile-applications")
@@ -1521,13 +1531,18 @@ impl Preferences {
                                 .rect_filled(rect, CornerRadius::ZERO, LIST_HOVER);
                         }
                         let y = rect.center().y;
-                        centered_glyph(
-                            ui,
-                            pos2(rect.left() + 16.0, y),
-                            icon::APP_WINDOW,
-                            15.0,
-                            TEXT_DIM,
-                        );
+                        let center = pos2(rect.left() + 16.0, y);
+                        if let Some(picture) = icons.texture(&rule.icon) {
+                            paint_page_picture(
+                                ui.painter(),
+                                picture,
+                                center,
+                                APP_ICON_SIZE,
+                                Color32::WHITE,
+                            );
+                        } else {
+                            centered_glyph(ui, center, icon::APP_WINDOW, 15.0, TEXT_DIM);
+                        }
                         let close =
                             Rect::from_center_size(pos2(rect.right() - 16.0, y), Vec2::splat(22.0));
                         let clip =
@@ -1567,7 +1582,8 @@ impl Preferences {
         {
             self.app_note = None;
             let name = path.file_stem().unwrap_or_default().to_string_lossy();
-            let rule = AppRule::new(&name, &path.to_string_lossy());
+            let file = path.to_string_lossy();
+            let rule = AppRule::new(&name, &file).with_icon(&file);
             edit_applications(env, id, |list| add_application(list, rule));
         }
         if let Some(note) = error.as_ref().or(self.app_note.as_ref()) {
@@ -1592,7 +1608,7 @@ impl Preferences {
                 ));
             }
             app_picker::Selection::Application(app) => {
-                let rule = AppRule::new(&app.name, &app.process);
+                let rule = AppRule::new(&app.name, &app.process).with_icon(&app.icon);
                 edit_applications(env, &picker.context, |list| add_application(list, rule));
             }
         }
@@ -2219,7 +2235,7 @@ pub(crate) fn page_picture(ctx: &egui::Context, path: &Path, size: f32) -> Optio
 /// Scales a larger picture down to `target` pixels on its long side. egui-wgpu
 /// has no mipmaps, so a big icon drawn small would alias. Colour is scaled
 /// premultiplied so transparent pixels leave no dark edge.
-fn shrink_to(mut image: image::RgbaImage, target: u32) -> ColorImage {
+pub(crate) fn shrink_to(mut image: image::RgbaImage, target: u32) -> ColorImage {
     let long = image.width().max(image.height());
     if long > target {
         for px in image.pixels_mut() {

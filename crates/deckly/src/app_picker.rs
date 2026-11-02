@@ -8,7 +8,10 @@ use deckly_core::KeyConfig;
 use eframe::egui::{self, Align2, CornerRadius, RichText, Sense, pos2, vec2};
 use egui_phosphor::regular as icon;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-mod icons;
+pub mod icons;
+
+/// How wide a row of the list draws an application's picture.
+const ICON_SIZE: f32 = 28.0;
 
 pub struct Picker {
     pub context: String,
@@ -53,7 +56,7 @@ impl Picker {
             focus: true,
             scroll_y: 0.0,
             reset_scroll: true,
-            icons: icons::Cache::new(ctx),
+            icons: icons::Cache::new(ctx, ICON_SIZE),
         }
     }
 
@@ -182,13 +185,13 @@ impl Picker {
                             },
                         );
                     }
-                    if let Some(texture) = self.icons.texture(app) {
+                    if let Some(texture) = self.icons.texture(&app.icon) {
                         let image_rect = egui::Rect::from_center_size(
                             pos2(rect.left() + 22.0, rect.center().y),
-                            vec2(28.0, 28.0),
+                            vec2(ICON_SIZE, ICON_SIZE),
                         );
                         painter.image(
-                            texture,
+                            texture.id(),
                             image_rect,
                             egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                             egui::Color32::WHITE,

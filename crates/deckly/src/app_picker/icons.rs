@@ -1,17 +1,18 @@
 //! Decode only visible rows on one worker; keep textures and misses in a
 //! bounded cache for the lifetime of this picker. No disk I/O in a UI frame.
 
-use crate::os::applications::{Application, icons::Loader};
-use eframe::egui::{self, TextureHandle, TextureId};
+use crate::os::applications::icons::Loader;
+use crate::prefs::shrink_to;
+use eframe::egui::{self, ColorImage, TextureHandle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 const CAPACITY: usize = 256;
 const QUEUE: usize = 32;
-type IconResult = (String, Option<image::RgbaImage>);
+type IconResult = (String, Option<ColorImage>);
 
 #[derive(Default)]
-pub(super) struct Cache {
+pub struct Cache {
     requests: Option<SyncSender<String>>,
     results: Option<Receiver<IconResult>>,
     pending: HashSet<String>,
@@ -20,16 +21,18 @@ pub(super) struct Cache {
 }
 
 impl Cache {
-    pub fn new(ctx: &egui::Context) -> Self {
+    /// For icons drawn `size` points wide.
+    pub fn new(ctx: &egui::Context, size: f32) -> Self {
         let (requests, rx) = mpsc::sync_channel::<String>(QUEUE);
         let (tx, results) = mpsc::sync_channel(QUEUE);
+        let target = (size * ctx.pixels_per_point()).round().max(1.0) as u32;
         let ctx = ctx.clone();
         let worker = std::thread::Builder::new()
             .name("deckly-app-icons".into())
             .spawn(move || {
                 let mut loader = Loader::new();
                 while let Ok(key) = rx.recv() {
-                    let image = loader.load(&key);
+                    let image = loader.load(&key).map(|image| shrink_to(image, target));
                     if tx.send((key, image)).is_err() {
                         break;
                     }
@@ -58,10 +61,7 @@ impl Cache {
             let texture = image.map(|image| {
                 ctx.load_texture(
                     format!("app-icon:{key}"),
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [image.width() as usize, image.height() as usize],
-                        image.as_raw(),
-                    ),
+                    image,
                     egui::TextureOptions::LINEAR,
                 )
             });
@@ -75,18 +75,18 @@ impl Cache {
         }
     }
 
-    pub fn texture(&mut self, app: &Application) -> Option<TextureId> {
-        if app.icon.is_empty() {
+    pub fn texture(&mut self, icon: &str) -> Option<&TextureHandle> {
+        if icon.is_empty() {
             return None;
         }
-        if let Some(texture) = self.textures.get(&app.icon) {
-            return texture.as_ref().map(TextureHandle::id);
+        if self.textures.contains_key(icon) {
+            return self.textures.get(icon)?.as_ref();
         }
-        if !self.pending.contains(&app.icon)
+        if !self.pending.contains(icon)
             && let Some(requests) = &self.requests
-            && requests.try_send(app.icon.clone()).is_ok()
+            && requests.try_send(icon.to_owned()).is_ok()
         {
-            self.pending.insert(app.icon.clone());
+            self.pending.insert(icon.to_owned());
         }
         None
     }
@@ -111,15 +111,7 @@ mod tests {
         }
         assert_eq!(cache.textures.len(), CAPACITY);
         assert!(!cache.textures.contains_key("icon-0"));
-        let app = Application {
-            name: "App".into(),
-            target: "app".into(),
-            process: String::new(),
-            detail: String::new(),
-            keywords: String::new(),
-            icon: "icon-1".into(),
-        };
-        assert_eq!(cache.texture(&app), None);
+        assert!(cache.texture("icon-1").is_none());
         assert!(requested.try_recv().is_err());
     }
 }

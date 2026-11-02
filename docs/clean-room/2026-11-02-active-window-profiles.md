@@ -24,6 +24,17 @@ another model, and it travels in a `.decklyProfile` and in backups. A rule holds
 a display name and an id: the last part of a path, or a package, bundle or class
 name. A full path would break on the next update and on another computer.
 
+A rule also keeps where its picture is on this computer, for the list in
+Preferences: the picker's icon source, or the chosen file. It only draws the
+row, and a source that is empty or gone leaves the plain window icon, so
+nothing depends on it. An exported profile drops a source that is a full path,
+which names the computer's folders and its user. Windows draws only
+`shell:AppsFolder\` entries and paths on a drive: a shared profile must not make
+Shell open a network location. On Linux a chosen program has no picture of its
+own, only desktop entries do. Tests: `icons_come_from_this_computer_only`,
+`a_chosen_program_gives_its_own_picture`,
+`an_exported_profile_keeps_no_full_path_to_an_icon`.
+
 A copy of a profile (Duplicate) does not take the rules along. Two profiles of a
 model listing one application: the first in the profile list wins. Test:
 `the_first_profile_in_the_list_wins_an_application_two_list`.
