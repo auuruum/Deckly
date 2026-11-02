@@ -17,7 +17,7 @@ use crate::render::{self, Live, Renderer};
 use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
-use crate::transfer::{self, Job, PluginKind, SharedJob, Summary};
+use crate::transfer::{self, Job, Outcome, PluginKind, Section, SharedJob, Summary, Tone};
 use deckly_core::profile::{
     MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_APPLICATIONS, MAX_PROFILE_NAME_CHARS,
 };
@@ -842,6 +842,7 @@ impl Preferences {
                     close = ui.button("OK").clicked();
                 });
             }
+            Job::Imported(outcome) => close = import_result(ctx, outcome),
         }
         if close {
             *job = Job::Idle;
@@ -853,7 +854,7 @@ impl Preferences {
                 let runtime = env.runtime.clone();
                 let (profiles, plugins) = (self.import_profiles, self.import_plugins);
                 transfer::start(&self.job, ctx, "Importing", move |progress| {
-                    Job::Done(transfer::commit(
+                    Job::Imported(transfer::commit(
                         *scan,
                         profiles,
                         plugins,
@@ -1970,6 +1971,152 @@ fn finished(failed: &str, result: Result<Summary, String>) -> Job {
     }))
 }
 
+/// The window after an import: how much came across, then what did not and
+/// what to do about it. Returns whether the user closed it.
+fn import_result(ctx: &egui::Context, outcome: &Outcome) -> bool {
+    let (glyph, color, title, lead) = match outcome.sections.iter().map(|s| s.tone).min() {
+        Some(Tone::Problem) => (
+            icon::WARNING_CIRCLE,
+            DANGER,
+            "Import finished with problems",
+            "Some of it did not come across.",
+        ),
+        Some(Tone::Todo) => (
+            icon::CHECK_CIRCLE,
+            SUCCESS,
+            "Import finished",
+            "Almost there, a few things still need you.",
+        ),
+        _ => (
+            icon::CHECK_CIRCLE,
+            SUCCESS,
+            "Import finished",
+            "Everything came across and is ready to use.",
+        ),
+    };
+    let frame = egui::Frame::new()
+        .fill(PREF_BODY)
+        .stroke(Stroke::new(1.0, KEY_BORDER))
+        .corner_radius(10)
+        .inner_margin(20);
+    let mut close = false;
+    egui::Modal::new(egui::Id::new("job-imported"))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_width(620.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(glyph).font(font(40.0)).color(color));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).font(bold(20.0)));
+                    ui.label(RichText::new(lead).color(TEXT_DIM));
+                });
+            });
+            ui.add_space(12.0);
+            import_totals(ui, &outcome.totals);
+            if !outcome.sections.is_empty() {
+                ui.add_space(12.0);
+                // Room for the rest of the window, however it is resized.
+                let height = (ui.ctx().content_rect().height() - 262.0).max(120.0);
+                egui::ScrollArea::vertical()
+                    .max_height(height)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        for section in &outcome.sections {
+                            import_section(ui, section);
+                        }
+                    });
+            }
+            ui.add_space(14.0);
+            let row = vec2(ui.available_width(), 32.0);
+            let right = egui::Layout::right_to_left(egui::Align::Center);
+            ui.allocate_ui_with_layout(row, right, |ui| {
+                let done = egui::Button::new(RichText::new("Done").color(Color32::WHITE))
+                    .fill(ACCENT)
+                    .min_size(vec2(96.0, 32.0));
+                close = ui.add(done).clicked();
+            });
+        });
+    close
+}
+
+fn import_totals(ui: &mut Ui, totals: &[(String, String)]) {
+    const GAP: f32 = 10.0;
+    let n = totals.len().max(1) as f32;
+    let width = (ui.available_width() - GAP * (n - 1.0)) / n;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = GAP;
+        for (number, what) in totals {
+            let (rect, _) = ui.allocate_exact_size(vec2(width, 68.0), Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 8, PREF_PANEL);
+            let at = rect.left_top() + vec2(14.0, 8.0);
+            painter.text(at, Align2::LEFT_TOP, number, bold(26.0), TEXT);
+            let at = rect.left_bottom() + vec2(14.0, -9.0);
+            painter.text(at, Align2::LEFT_BOTTOM, what, font(13.0), TEXT_DIM);
+        }
+    });
+}
+
+fn import_section(ui: &mut Ui, section: &Section) {
+    let (glyph, color) = match section.tone {
+        Tone::Problem => (icon::X_CIRCLE, DANGER),
+        Tone::Todo => (icon::WARNING, WARNING),
+        Tone::Note => (icon::INFO, TEXT_DIM),
+    };
+    let card = egui::Frame::new()
+        .fill(PREF_PANEL)
+        .corner_radius(8)
+        .inner_margin(12);
+    card.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_top(|ui| {
+            ui.label(RichText::new(glyph).font(font(18.0)).color(color));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(RichText::new(&section.title).font(bold(14.0)));
+                if !section.text.is_empty() {
+                    ui.label(RichText::new(&section.text).color(TEXT_DIM));
+                }
+                for line in &section.lines {
+                    ui.label(line);
+                }
+                if !section.names.is_empty() {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                        for (name, keys) in &section.names {
+                            name_chip(ui, name, *keys);
+                        }
+                    });
+                }
+            });
+        });
+    });
+}
+
+/// A plugin or action name, with the keys it concerns when there are any.
+fn name_chip(ui: &mut Ui, name: &str, keys: usize) {
+    // Names come from plugin manifests and can be any length.
+    let name: String = name.chars().take(48).collect();
+    let painter = ui.painter();
+    let name = painter.layout_no_wrap(name, font(13.0), TEXT);
+    let keys = (keys > 0)
+        .then(|| painter.layout_no_wrap(transfer::count(keys, "key"), font(12.0), TEXT_DIM));
+    let extra = keys.as_ref().map_or(0.0, |k| k.size().x + 7.0);
+    let size = vec2(name.size().x + extra + 22.0, 26.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 13, PREF_FIELD);
+    let x = rect.left() + 11.0;
+    let name_width = name.size().x;
+    let top = rect.center().y - name.size().y / 2.0;
+    painter.galley(pos2(x, top), name, TEXT);
+    if let Some(keys) = keys {
+        let top = rect.center().y - keys.size().y / 2.0;
+        painter.galley(pos2(x + name_width + 7.0, top), keys, TEXT_DIM);
+    }
+}
+
 fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("deckly-preferences")
 }
@@ -2714,6 +2861,47 @@ mod tests {
         shapes.iter().any(
             |shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.text().contains(text)),
         )
+    }
+
+    #[test]
+    fn the_import_result_shows_what_came_across_and_what_is_left() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let outcome = Outcome {
+            totals: vec![("7".into(), "of 8 profiles".into())],
+            sections: vec![Section {
+                tone: Tone::Todo,
+                title: "1 plugin to install".into(),
+                text: "Their keys are in place.".into(),
+                names: vec![("Discord".into(), 12)],
+                lines: vec!["Default Profile: not supported".into()],
+            }],
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+                    ..Default::default()
+                },
+                |ui| assert!(!import_result(ui.ctx(), &outcome)),
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        for text in [
+            "Import finished",
+            "a few things still need you",
+            "of 8 profiles",
+            "1 plugin to install",
+            "Their keys are in place.",
+            "Default Profile: not supported",
+            "Discord",
+            "12 keys",
+            "Done",
+        ] {
+            assert!(says(&shapes, text), "{text}");
+        }
     }
 
     fn with_game() -> (Shared, Profile) {

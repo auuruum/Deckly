@@ -33,6 +33,8 @@ pub enum Job {
     /// The import is read and waits for a go-ahead.
     Review(Box<Scan>),
     Done(Summary),
+    /// An import ended.
+    Imported(Outcome),
 }
 
 pub type SharedJob = Arc<Mutex<Job>>;
@@ -42,6 +44,48 @@ pub type SharedJob = Arc<Mutex<Job>>;
 pub struct Summary {
     pub title: String,
     pub lines: Vec<String>,
+}
+
+/// What an import did, for its result window.
+#[derive(Default)]
+pub struct Outcome {
+    /// Big numbers: the count and what it counts.
+    pub totals: Vec<(String, String)>,
+    /// Worst first.
+    pub sections: Vec<Section>,
+}
+
+/// One thing about an import that the user should know.
+pub struct Section {
+    pub tone: Tone,
+    pub title: String,
+    pub text: String,
+    /// Names, each with the number of keys it concerns, or 0 for none.
+    pub names: Vec<(String, usize)>,
+    pub lines: Vec<String>,
+}
+
+impl Section {
+    fn new(tone: Tone, title: String, text: &str) -> Self {
+        Self {
+            tone,
+            title,
+            text: text.to_owned(),
+            names: Vec::new(),
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// Ordered by how much it needs the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tone {
+    /// Something failed.
+    Problem,
+    /// Something is left for the user to do.
+    Todo,
+    /// Good to know.
+    Note,
 }
 
 /// Runs a job off the UI thread, showing `text` until it is done.
@@ -494,35 +538,52 @@ pub fn commit(
     host: Option<&Host>,
     runtime: &Sender<Msg>,
     progress: &Progress,
-) -> Summary {
-    let mut summary = Summary {
-        title: "Import finished".to_owned(),
-        lines: Vec::new(),
-    };
+) -> Outcome {
+    let mut outcome = Outcome::default();
     let mut report = Report::default();
     if profiles {
-        match write_profiles(&scan, &mut report, state, Some(progress)) {
+        let mut renamed = Vec::new();
+        let done = match write_profiles(&scan, &mut report, state, Some(progress)) {
             Ok(n) => {
                 let mut s = runtime::lock(state);
                 for converted in &scan.profiles {
                     if let Some(profile) = s.profile(&converted.profile.id)
                         && profile.name != converted.profile.name
                     {
-                        summary.lines.push(format!(
-                            "Renamed \"{}\" to \"{}\" because the name is taken.",
+                        renamed.push(format!(
+                            "\"{}\" is now \"{}\".",
                             converted.profile.name, profile.name
                         ));
                     }
                 }
                 s.place_imported(&scan.order);
                 s.drop_placeholders();
-                drop(s);
-                summary.lines.push(count(n, "profile") + " imported.");
+                n
             }
-            Err(e) => summary.lines.push(format!("Profiles not imported: {e}")),
+            Err(e) => {
+                let title = "Profiles not imported".to_owned();
+                outcome
+                    .sections
+                    .push(Section::new(Tone::Problem, title, &e));
+                0
+            }
+        };
+        let of = scan.profiles.len() + scan.skipped.len();
+        outcome.totals.push(total(done, of, "profile"));
+        outcome.totals.push(total(report.keys, report.keys, "key"));
+        if !scan.skipped.is_empty() {
+            let title = count(scan.skipped.len(), "profile") + " not imported";
+            outcome.sections.push(Section {
+                lines: scan.skipped.clone(),
+                ..Section::new(Tone::Todo, title, "")
+            });
         }
-        for line in &scan.skipped {
-            summary.lines.push(format!("Skipped {line}"));
+        if !renamed.is_empty() {
+            let title = count(renamed.len(), "profile") + " renamed";
+            outcome.sections.push(Section {
+                lines: renamed,
+                ..Section::new(Tone::Note, title, "Their names were taken.")
+            });
         }
         let _ = runtime.send(Msg::Refresh);
     }
@@ -546,67 +607,80 @@ pub fn commit(
                 .ok_or_else(|| "plugins are not available".to_owned())
                 .and_then(|h| h.install(&plugin.dir));
             match result {
-                Ok(_) => copied.push(*plugin),
+                Ok(id) => copied.push((*plugin, id)),
                 Err(e) => failed.push(format!("{}: {e}", plugin.name)),
             }
         }
-        if !scan.plugins.is_empty() {
-            summary
-                .lines
-                .push(count(copied.len(), "plugin") + " copied.");
+        let of = scan.plugins.len() - scan.count(PluginKind::Installed);
+        if of > 0 {
+            outcome.totals.push(total(copied.len(), of, "plugin"));
         }
-        let only_official: Vec<&str> = copied
+        if !failed.is_empty() {
+            let title = count(failed.len(), "plugin") + " could not be copied";
+            outcome.sections.push(Section {
+                lines: failed,
+                ..Section::new(Tone::Problem, title, "")
+            });
+        }
+    }
+    let left: Vec<&FoundPlugin> = scan
+        .plugins
+        .iter()
+        .filter(|p| plugins && matches!(p.kind, PluginKind::Encrypted | PluginKind::Unreadable))
+        .collect();
+    let s = runtime::lock(state);
+    // The catalog may not list a plugin copied a moment ago yet.
+    let has = |id: &str| {
+        copied
             .iter()
-            .filter(|p| needs_official_app(&p.dir))
-            .map(|p| p.name.as_str())
-            .collect();
-        if !only_official.is_empty() {
-            summary.lines.push(format!(
-                "Copied, but they work only in the official app: {}.",
-                only_official.join(", ")
-            ));
-        }
-        for line in failed {
-            summary.lines.push(format!("Not copied, {line}"));
-        }
-        let encrypted: Vec<&str> = scan
-            .plugins
-            .iter()
-            .filter(|p| p.kind == PluginKind::Encrypted)
-            .map(|p| p.name.as_str())
-            .collect();
-        let unreadable: Vec<&str> = scan
-            .plugins
-            .iter()
-            .filter(|p| p.kind == PluginKind::Unreadable)
-            .map(|p| p.name.as_str())
-            .collect();
-        if !unreadable.is_empty() {
-            summary.lines.push(format!(
-                "Not copied, their manifests cannot be read: {}.",
-                unreadable.join(", ")
-            ));
-        }
-        if !encrypted.is_empty() {
-            summary.lines.push(format!(
-                "Not copied, encrypted by the official marketplace ({}): {}. \
-                 Get them from their authors' own downloads.",
-                encrypted.len(),
-                encrypted.join(", ")
-            ));
-        }
-        if !scan.plugins.is_empty() {
-            summary.lines.push(
-                "Plugin logins and connections are kept by the official app in a form Deckly \
-                 cannot read; set them up again in each plugin."
-                    .to_owned(),
+            .any(|(_, c)| id == c || id.starts_with(&format!("{c}.")))
+            || s.catalog.action(id).is_some()
+            || s.catalog.plugins.iter().any(|p| p.id == id)
+    };
+    let missing = to_install(&left, &report, has);
+    drop(s);
+    if !missing.is_empty() {
+        let mut text = String::new();
+        if left.iter().any(|p| p.kind == PluginKind::Encrypted) {
+            text.push_str(
+                "Marketplace copies are encrypted, so get these from their authors' own \
+                 downloads. ",
             );
         }
+        text.push_str("Their keys are in place and start working once the plugin is installed.");
+        let title = count(missing.len(), "plugin") + " to install";
+        outcome.sections.push(Section {
+            names: missing,
+            ..Section::new(Tone::Todo, title, &text)
+        });
     }
-    if profiles {
-        summary.lines.extend(report_lines(&report, state));
+    let only_official: Vec<(String, usize)> = copied
+        .iter()
+        .filter(|(p, _)| needs_official_app(&p.dir))
+        .map(|(p, _)| (p.name.clone(), 0))
+        .collect();
+    if !only_official.is_empty() {
+        let title = count(only_official.len(), "plugin") + " only for the official app";
+        outcome.sections.push(Section {
+            names: only_official,
+            ..Section::new(
+                Tone::Todo,
+                title,
+                "They are copied, but Deckly cannot run them.",
+            )
+        });
     }
-    summary
+    if !copied.is_empty() {
+        outcome.sections.push(Section::new(
+            Tone::Note,
+            "Sign in to your plugins again".to_owned(),
+            "The official app keeps plugin logins and connections in a form Deckly cannot read. \
+             Set them up again in each plugin.",
+        ));
+    }
+    outcome.sections.extend(report_sections(&report));
+    outcome.sections.sort_by_key(|section| section.tone);
+    outcome
 }
 
 /// Brings in the profile a plugin ships and returns its id. A profile that
@@ -701,39 +775,57 @@ fn fold_plugin_actions(report: &mut Report) {
     }
 }
 
-fn report_lines(report: &Report, state: &Shared) -> Vec<String> {
-    let mut lines = vec![count(report.keys, "key") + " read."];
-    let s = runtime::lock(state);
-    let mut waiting: Vec<(&str, usize)> = report
+/// The plugins that keys wait for and the ones that could not be brought
+/// along, each once, with the keys that need them, most keys first.
+fn to_install(
+    left: &[&FoundPlugin],
+    report: &Report,
+    has: impl Fn(&str) -> bool,
+) -> Vec<(String, usize)> {
+    let mut plugins: BTreeMap<&str, (&str, usize)> = report
         .plugins
         .iter()
-        .filter(|(id, _)| {
-            s.catalog.action(id).is_none() && !s.catalog.plugins.iter().any(|p| p.id == **id)
+        .filter(|(id, _)| !has(id))
+        .map(|(id, (name, n))| {
+            (
+                id.as_str(),
+                (if name.is_empty() { id } else { name }.as_str(), *n),
+            )
         })
-        .map(|(id, (name, n))| (if name.is_empty() { id } else { name }.as_str(), *n))
         .collect();
-    drop(s);
-    waiting.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    if !waiting.is_empty() {
-        let text: Vec<String> = waiting
-            .iter()
-            .map(|(name, n)| format!("{name} ({n})"))
-            .collect();
-        lines.push(format!(
-            "Keys stay in place and start working once their plugin is installed: {}.",
-            text.join(", ")
-        ));
+    for plugin in left {
+        let id = plugin
+            .dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".sdPlugin"))
+            .unwrap_or(&plugin.name);
+        plugins.entry(id).or_insert((&plugin.name, 0));
     }
+    let mut list: Vec<(String, usize)> = plugins
+        .into_values()
+        .map(|(name, n)| (name.to_owned(), n))
+        .collect();
+    list.sort_by_key(|(name, n)| (std::cmp::Reverse(*n), name.to_lowercase()));
+    list
+}
+
+fn report_sections(report: &Report) -> Vec<Section> {
+    let mut sections = Vec::new();
     if !report.unsupported.is_empty() {
-        let text: Vec<String> = report
-            .unsupported
-            .iter()
-            .map(|(id, n)| format!("{} ({n})", id.rsplit('.').next().unwrap_or(id)))
-            .collect();
-        lines.push(format!(
-            "Official actions Deckly does not have yet stay on their keys and do nothing: {}.",
-            text.join(", ")
-        ));
+        let title = count(report.unsupported.len(), "official action") + " not in Deckly yet";
+        sections.push(Section {
+            names: report
+                .unsupported
+                .iter()
+                .map(|(id, n)| (id.rsplit('.').next().unwrap_or(id).to_owned(), *n))
+                .collect(),
+            ..Section::new(
+                Tone::Todo,
+                title,
+                "They stay on their keys and do nothing for now.",
+            )
+        });
     }
     let notes = [
         (report.dials, "dial action", "not imported."),
@@ -753,19 +845,38 @@ fn report_lines(report: &Report, state: &Shared) -> Vec<String> {
             "missing from the source.",
         ),
     ];
-    for (n, what, note) in notes {
-        if n > 0 {
-            lines.push(format!("{} {note}", count(n, what)));
-        }
+    let lines: Vec<String> = notes
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .map(|(n, what, note)| format!("{} {note}", count(n, what)))
+        .collect();
+    if !lines.is_empty() {
+        sections.push(Section {
+            lines,
+            ..Section::new(Tone::Note, "Small differences".to_owned(), "")
+        });
     }
-    lines
+    sections
+}
+
+fn total(done: usize, of: usize, what: &str) -> (String, String) {
+    let what = if done == of {
+        noun(done, what)
+    } else {
+        format!("of {}", count(of, what))
+    };
+    (done.to_string(), what)
 }
 
 pub fn count(n: usize, what: &str) -> String {
+    format!("{n} {}", noun(n, what))
+}
+
+fn noun(n: usize, what: &str) -> String {
     if n == 1 {
-        format!("1 {what}")
+        what.to_owned()
     } else {
-        format!("{n} {what}s")
+        format!("{what}s")
     }
 }
 
@@ -1030,6 +1141,80 @@ mod tests {
         assert_eq!(report.plugins["com.example.p"], ("P".into(), 5));
         assert_eq!(report.plugins["com.example.pp.action"].1, 1);
         assert_eq!(report.plugins.len(), 2);
+    }
+
+    fn found(id: &str, name: &str, kind: PluginKind) -> FoundPlugin {
+        FoundPlugin {
+            name: name.into(),
+            dir: PathBuf::from(format!("{id}.sdPlugin")),
+            kind,
+        }
+    }
+
+    #[test]
+    fn plugins_to_install_are_listed_once_with_their_keys_most_first() {
+        let mut report = Report::default();
+        for (id, name, keys) in [
+            ("com.example.a", "Alpha", 2),
+            ("com.example.b", "Beta", 9),
+            ("com.example.copied", "Copied", 50),
+            ("com.example.nameless", "", 1),
+        ] {
+            report.plugins.insert(id.into(), (name.into(), keys));
+        }
+        let alpha = found("com.example.a", "Alpha", PluginKind::Encrypted);
+        let zeta = found("com.example.z", "Zeta", PluginKind::Encrypted);
+        let omega = found("com.example.o", "com.example.o", PluginKind::Unreadable);
+        let list = to_install(&[&alpha, &zeta, &omega], &report, |id| {
+            id == "com.example.copied"
+        });
+        assert_eq!(
+            list,
+            [
+                ("Beta".to_owned(), 9),
+                ("Alpha".to_owned(), 2),
+                ("com.example.nameless".to_owned(), 1),
+                ("com.example.o".to_owned(), 0),
+                ("Zeta".to_owned(), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_import_result_puts_failures_first_and_counts_what_came_across() {
+        let scan = Scan {
+            source: PathBuf::new(),
+            profiles: Vec::new(),
+            images: Vec::new(),
+            skipped: Vec::new(),
+            plugins: vec![
+                found("com.example.a", "Alpha", PluginKind::Ready),
+                found("com.example.b", "Beta", PluginKind::Encrypted),
+                found("com.example.c", "Gamma", PluginKind::Installed),
+            ],
+            replaces: 0,
+            order: Vec::new(),
+        };
+        let state = Arc::new(Mutex::new(crate::runtime::State::new(
+            Vec::new(),
+            deckly_core::Settings::default(),
+        )));
+        let (runtime, _) = std::sync::mpsc::channel();
+        let progress = Progress {
+            job: SharedJob::default(),
+            ctx: egui::Context::default(),
+        };
+        let done = commit(scan, false, true, &state, None, &runtime, &progress);
+        assert_eq!(done.totals, [("0".to_owned(), "of 2 plugins".to_owned())]);
+        let titles: Vec<&str> = done.sections.iter().map(|s| s.title.as_str()).collect();
+        // Nothing was copied, so there are no plugin logins to set up.
+        assert_eq!(
+            titles,
+            ["1 plugin could not be copied", "1 plugin to install"]
+        );
+        assert_eq!(done.sections[0].tone, Tone::Problem);
+        assert_eq!(done.sections[0].lines, ["Alpha: plugins are not available"]);
+        assert_eq!(done.sections[1].names, [("Beta".to_owned(), 0)]);
     }
 
     #[test]

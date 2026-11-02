@@ -39,6 +39,8 @@ pub const FIELD: Color32 = Color32::from_rgb(0x3B, 0x3B, 0x3B);
 pub const POPUP: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 pub const ACCENT: Color32 = Color32::from_rgb(0x3E, 0x7A, 0xC0);
 pub const WARNING: Color32 = Color32::from_rgb(0xF0, 0xB4, 0x3C);
+pub const SUCCESS: Color32 = Color32::from_rgb(0x4C, 0xC3, 0x8A);
+pub const DANGER: Color32 = Color32::from_rgb(0xE8, 0x60, 0x60);
 
 // Preferences window.
 pub const PREF_STRIP: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
