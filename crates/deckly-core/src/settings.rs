@@ -46,6 +46,9 @@ pub struct Settings {
     /// profile lists none until the user adds one, and adding one is the
     /// choice to use this.
     pub switch_by_window: bool,
+    /// The user answered the first start's offer to import the official
+    /// app's setup.
+    pub import_offered: bool,
 }
 
 impl Default for Settings {
@@ -60,6 +63,7 @@ impl Default for Settings {
             lock_keys: true,
             lock_look: LockLook::default(),
             switch_by_window: true,
+            import_offered: false,
         }
     }
 }

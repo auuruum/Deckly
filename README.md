@@ -61,6 +61,11 @@ since closing the window leaves Deckly running. See
 
 Close the official Stream Deck app first: both apps cannot drive the same device at once.
 
+On a first start, Deckly looks for the official app on this computer (Windows and
+macOS). If it finds your setup, one click brings over your profiles, pictures and
+plugins, and the official app stays as it is. Preferences > General > Import
+Everything… does the same later.
+
 Development switches: `DECKLY_NO_DEVICES=1` opens the editor without touching
 any device, `DECKLY_DEBUG=1` prints device events and action results.
 

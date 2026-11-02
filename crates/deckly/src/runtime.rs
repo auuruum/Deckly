@@ -9,6 +9,7 @@
 use crate::actions::{self, Outcome};
 use crate::auto_switch::Follower;
 use crate::lock_gate::Gate;
+use crate::official::Preferred;
 use crate::os::{active_window, screen_lock, tray};
 use crate::plugins::{self, Overlay};
 use crate::render::{self, Live, Renderer};
@@ -289,6 +290,28 @@ impl State {
     pub fn drop_placeholders(&mut self) {
         for id in self.placeholders() {
             self.delete_profile(&id);
+        }
+    }
+
+    /// Nothing of the user's is here yet, and they have not been asked.
+    pub fn first_start(&self) -> bool {
+        !self.settings.import_offered && self.profiles.iter().all(Profile::is_placeholder)
+    }
+
+    /// Puts devices that have no profile of the user's yet on the one the
+    /// official app keeps for them.
+    pub fn assign_preferred(&mut self, preferred: &[Preferred]) {
+        for device in preferred {
+            let free = self
+                .chosen(&device.serial)
+                .is_none_or(Profile::is_placeholder);
+            let fits = self
+                .profile(&device.profile)
+                .is_some_and(|p| p.device == device.kind);
+            if free && fits {
+                let id = device.profile.clone();
+                self.settings.assignments.insert(device.serial.clone(), id);
+            }
         }
     }
 
@@ -2081,6 +2104,52 @@ mod tests {
             Settings::default(),
         );
         assert!(alone.placeholders().is_empty());
+    }
+
+    #[test]
+    fn only_an_empty_deckly_counts_as_a_first_start() {
+        let empty = || Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
+        assert!(State::new(Vec::new(), Settings::default()).first_start());
+        assert!(State::new(vec![empty()], Settings::default()).first_start());
+        let mine = Profile::new("Mine", DeviceKind::Mk2);
+        assert!(!State::new(vec![empty(), mine], Settings::default()).first_start());
+        let answered = Settings {
+            import_offered: true,
+            ..Settings::default()
+        };
+        assert!(!State::new(vec![empty()], answered).first_start());
+    }
+
+    #[test]
+    fn a_device_takes_its_official_profile_unless_it_has_one_of_the_users() {
+        let empty = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
+        let mine = Profile::new("Mine", DeviceKind::Mk2);
+        let official = Profile::new("Official", DeviceKind::Mk2);
+        let mini = Profile::new("Mini", DeviceKind::Mini);
+        let (empty_id, mine_id) = (empty.id.clone(), mine.id.clone());
+        let (official_id, mini_id) = (official.id.clone(), mini.id.clone());
+        let mut settings = Settings::default();
+        for (serial, id) in [("EMPTY", &empty_id), ("MINE", &mine_id)] {
+            settings.assignments.insert(serial.into(), id.clone());
+        }
+        let mut s = State::new(vec![empty, mine, official, mini], settings);
+        let preferred = |serial: &str, kind, profile: &str| Preferred {
+            serial: serial.into(),
+            kind,
+            profile: profile.into(),
+        };
+        s.assign_preferred(&[
+            preferred("EMPTY", DeviceKind::Mk2, &official_id),
+            preferred("MINE", DeviceKind::Mk2, &official_id),
+            preferred("NEW", DeviceKind::Mk2, &official_id),
+            preferred("WRONGMODEL", DeviceKind::Mk2, &mini_id),
+            preferred("GONE", DeviceKind::Mk2, "not-a-profile"),
+        ]);
+        let assigned = &s.settings.assignments;
+        assert_eq!(assigned["EMPTY"], official_id);
+        assert_eq!(assigned["MINE"], mine_id);
+        assert_eq!(assigned["NEW"], official_id);
+        assert_eq!(assigned.len(), 3);
     }
 
     #[test]

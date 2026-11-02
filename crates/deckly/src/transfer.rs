@@ -3,7 +3,7 @@
 //! ever opened, and sizes and counts are bounded.
 
 use crate::backup;
-use crate::official::{self, Converted, RawProfile, Report};
+use crate::official::{self, Converted, Preferred, RawProfile, Report};
 use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use deckly_core::Profile;
@@ -30,6 +30,8 @@ pub enum Job {
     #[default]
     Idle,
     Busy(String),
+    /// The official app's setup was found on first start.
+    Offer(Box<Scan>),
     /// The import is read and waits for a go-ahead.
     Review(Box<Scan>),
     Done(Summary),
@@ -139,6 +141,31 @@ pub fn official_dir() -> Option<PathBuf> {
         return None;
     };
     dir.join("ProfilesV3").is_dir().then_some(dir)
+}
+
+/// On a first start, reads the official app's setup; finding any, offers it
+/// through `job`. Finding none shows nothing.
+pub fn offer(job: &SharedJob, ctx: &egui::Context, state: &Shared) {
+    if !runtime::lock(state).first_start() {
+        return;
+    }
+    let (job, ctx, state) = (job.clone(), ctx.clone(), state.clone());
+    std::thread::spawn(move || {
+        let Some(dir) = official_dir() else {
+            return;
+        };
+        let Ok(scan) = scan(&dir.join("ProfilesV3"), Some(&dir), &state) else {
+            return;
+        };
+        if scan.profiles.is_empty() {
+            return;
+        }
+        let mut slot = job.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(*slot, Job::Idle) {
+            *slot = Job::Offer(Box::new(scan));
+            ctx.request_repaint();
+        }
+    });
 }
 
 /// The files of a set of profiles: a folder or a zip archive.
@@ -254,6 +281,8 @@ pub struct Scan {
     /// Profile ids in the order the official app on this computer lists
     /// them. Backups do not hold it.
     order: Vec<String>,
+    /// The profile that app keeps for each device. Backups do not hold it.
+    preferred: Vec<Preferred>,
 }
 
 pub struct FoundPlugin {
@@ -283,6 +312,7 @@ pub fn scan(path: &Path, official: Option<&Path>, state: &Shared) -> Result<Scan
     }
     let (raws, skipped) = read_profiles(&mut tree, &names)?;
     let root = store::config_dir().ok_or("no configuration folder")?;
+    let devices = crate::os::official_devices_setting().unwrap_or_default();
     let mut scan = Scan {
         source: path.to_owned(),
         profiles: Vec::new(),
@@ -290,8 +320,8 @@ pub fn scan(path: &Path, official: Option<&Path>, state: &Shared) -> Result<Scan
         skipped,
         plugins: Vec::new(),
         replaces: 0,
-        order: crate::os::official_devices_setting()
-            .map_or_else(Vec::new, |value| official::profile_order(&value)),
+        order: official::profile_order(&devices),
+        preferred: official::preferred_profiles(&devices),
     };
     for (raw, dirs) in raws {
         let name = official::name_of(&raw.manifest).to_owned();
@@ -377,6 +407,7 @@ fn scan_native(
         skipped: Vec::new(),
         plugins: Vec::new(),
         replaces,
+        preferred: Vec::new(),
     })
 }
 
@@ -527,6 +558,21 @@ impl Scan {
     pub fn count(&self, kind: PluginKind) -> usize {
         self.plugins.iter().filter(|p| p.kind == kind).count()
     }
+
+    /// Big numbers for what this would bring in, as an import's result has.
+    pub fn totals(&self) -> Vec<(String, String)> {
+        let profiles = self.profiles.len();
+        let keys = self.profiles.iter().map(|c| c.report.keys).sum();
+        let plugins = self.count(PluginKind::Ready);
+        let mut totals = vec![
+            total(profiles, profiles, "profile"),
+            total(keys, keys, "key"),
+        ];
+        if plugins > 0 {
+            totals.push(total(plugins, plugins, "plugin"));
+        }
+        totals
+    }
 }
 
 /// Writes the profiles of a scan and copies its plugins.
@@ -556,8 +602,10 @@ pub fn commit(
                         ));
                     }
                 }
+                s.assign_preferred(&scan.preferred);
                 s.place_imported(&scan.order);
                 s.drop_placeholders();
+                s.save_settings();
                 n
             }
             Err(e) => {
@@ -1194,7 +1242,9 @@ mod tests {
             ],
             replaces: 0,
             order: Vec::new(),
+            preferred: Vec::new(),
         };
+        assert_eq!(scan.totals()[2], ("1".to_owned(), "plugin".to_owned()));
         let state = Arc::new(Mutex::new(crate::runtime::State::new(
             Vec::new(),
             deckly_core::Settings::default(),

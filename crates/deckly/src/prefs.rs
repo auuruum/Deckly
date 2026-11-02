@@ -107,6 +107,8 @@ pub struct Preferences {
     /// What the import dialog will bring in.
     import_profiles: bool,
     import_plugins: bool,
+    /// The logo the first start's offer shows.
+    logo: Option<TextureHandle>,
     preview: Option<(u64, TextureHandle)>,
     /// The Advanced Settings window, open for this device.
     advanced: Option<(String, &'static DeviceModel)>,
@@ -298,6 +300,7 @@ impl Preferences {
             job: SharedJob::default(),
             import_profiles: true,
             import_plugins: true,
+            logo: None,
             preview: None,
             advanced: None,
             cropper: Cropper::default(),
@@ -338,8 +341,15 @@ impl Preferences {
         self.tab = Tab::Devices;
     }
 
+    /// On a first start, looks for the official app to offer its setup.
+    pub fn offer_import(&self, ctx: &egui::Context, state: &Shared) {
+        transfer::offer(&self.job, ctx, state);
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, env: &mut Env<'_>) {
         if !self.open {
+            // With this window closed, jobs float over the main window.
+            self.job_dialog(ctx, env);
             return;
         }
         let builder = egui::ViewportBuilder::default()
@@ -772,13 +782,26 @@ impl Preferences {
         match &*job {
             Job::Idle => return,
             Job::Busy(text) => {
-                egui::Modal::new(egui::Id::new("job-busy")).show(ctx, |ui| {
-                    ui.set_width(380.0);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(text);
+                egui::Modal::new(egui::Id::new("job-busy"))
+                    .frame(card())
+                    .show(ctx, |ui| {
+                        ui.set_width(380.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(text);
+                        });
                     });
-                });
+            }
+            Job::Offer(scan) => {
+                let logo = self.logo.get_or_insert_with(|| logo_texture(ctx));
+                let answer = welcome(ctx, logo, &scan.totals());
+                if answer.is_some() {
+                    let mut s = runtime::lock(env.state);
+                    s.settings.import_offered = true;
+                    s.save_settings();
+                }
+                import = answer == Some(true);
+                close = answer == Some(false);
             }
             Job::Review(scan) => {
                 egui::Modal::new(egui::Id::new("job-review")).show(ctx, |ui| {
@@ -849,7 +872,7 @@ impl Preferences {
         } else if import {
             let taken = std::mem::take(&mut *job);
             drop(job);
-            if let Job::Review(scan) = taken {
+            if let Job::Offer(scan) | Job::Review(scan) = taken {
                 let (state, host) = (env.state.clone(), env.host.cloned());
                 let runtime = env.runtime.clone();
                 let (profiles, plugins) = (self.import_profiles, self.import_plugins);
@@ -1971,6 +1994,79 @@ fn finished(failed: &str, result: Result<Summary, String>) -> Job {
     }))
 }
 
+/// The look of the windows around an import.
+fn card() -> egui::Frame {
+    egui::Frame::new()
+        .fill(PREF_BODY)
+        .stroke(Stroke::new(1.0, KEY_BORDER))
+        .corner_radius(10)
+        .inner_margin(20)
+}
+
+/// The main button of such a window.
+fn primary(text: &str, width: f32) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE))
+        .fill(ACCENT)
+        .min_size(vec2(width, 32.0))
+}
+
+fn logo_texture(ctx: &egui::Context) -> TextureHandle {
+    const SIZE: u32 = 112;
+    let image = ColorImage::from_rgba_unmultiplied([SIZE as usize; 2], &logo::icon(SIZE).rgba);
+    ctx.load_texture("deckly-logo", image, TextureOptions::LINEAR)
+}
+
+/// The offer on a first start: what is waiting, and one button for all of it.
+/// Returns whether the user took it, once they answered.
+fn welcome(ctx: &egui::Context, logo: &TextureHandle, totals: &[(String, String)]) -> Option<bool> {
+    let mut answer = None;
+    egui::Modal::new(egui::Id::new("job-offer"))
+        .frame(card())
+        .show(ctx, |ui| {
+            ui.set_width(540.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new((logo.id(), vec2(56.0, 56.0))));
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Welcome to Deckly").font(bold(20.0)));
+                    ui.label(
+                        RichText::new("Your Stream Deck setup is ready to come along.")
+                            .color(TEXT_DIM),
+                    );
+                });
+            });
+            ui.add_space(14.0);
+            import_totals(ui, totals);
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(
+                    "One click brings your profiles, pictures and plugins over. The Stream \
+                     Deck app stays as it is, but close it afterwards: both apps cannot drive \
+                     a device at once.",
+                )
+                .color(TEXT_DIM),
+            );
+            ui.add_space(16.0);
+            let row = vec2(ui.available_width(), 32.0);
+            let right = egui::Layout::right_to_left(egui::Align::Center);
+            ui.allocate_ui_with_layout(row, right, |ui| {
+                if ui.add(primary("Import Everything", 160.0)).clicked() {
+                    answer = Some(true);
+                }
+                let later = egui::Button::new("Not Now").min_size(vec2(96.0, 32.0));
+                if ui
+                    .add(later)
+                    .on_hover_text("You can do this later in Preferences > General")
+                    .clicked()
+                {
+                    answer = Some(false);
+                }
+            });
+        });
+    answer
+}
+
 /// The window after an import: how much came across, then what did not and
 /// what to do about it. Returns whether the user closed it.
 fn import_result(ctx: &egui::Context, outcome: &Outcome) -> bool {
@@ -1994,14 +2090,9 @@ fn import_result(ctx: &egui::Context, outcome: &Outcome) -> bool {
             "Everything came across and is ready to use.",
         ),
     };
-    let frame = egui::Frame::new()
-        .fill(PREF_BODY)
-        .stroke(Stroke::new(1.0, KEY_BORDER))
-        .corner_radius(10)
-        .inner_margin(20);
     let mut close = false;
     egui::Modal::new(egui::Id::new("job-imported"))
-        .frame(frame)
+        .frame(card())
         .show(ctx, |ui| {
             ui.set_width(620.0);
             ui.horizontal(|ui| {
@@ -2030,10 +2121,7 @@ fn import_result(ctx: &egui::Context, outcome: &Outcome) -> bool {
             let row = vec2(ui.available_width(), 32.0);
             let right = egui::Layout::right_to_left(egui::Align::Center);
             ui.allocate_ui_with_layout(row, right, |ui| {
-                let done = egui::Button::new(RichText::new("Done").color(Color32::WHITE))
-                    .fill(ACCENT)
-                    .min_size(vec2(96.0, 32.0));
-                close = ui.add(done).clicked();
+                close = ui.add(primary("Done", 96.0)).clicked();
             });
         });
     close
@@ -2902,6 +2990,67 @@ mod tests {
         ] {
             assert!(says(&shapes, text), "{text}");
         }
+    }
+
+    #[test]
+    fn the_first_start_offers_everything_in_one_click() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let logo = logo_texture(&ctx);
+        let totals = [
+            ("7".to_owned(), "profiles".to_owned()),
+            ("716".to_owned(), "keys".to_owned()),
+            ("25".to_owned(), "plugins".to_owned()),
+        ];
+        let mut answer = None;
+        let mut pass = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(852.0, 742.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| answer = welcome(ui.ctx(), &logo, &totals),
+            );
+            output.textures_delta.clear();
+            (output.shapes, answer)
+        };
+        pass(vec![]);
+        pass(vec![]);
+        let (shapes, nothing) = pass(vec![]);
+        assert_eq!(nothing, None);
+        for text in [
+            "Welcome to Deckly",
+            "7",
+            "profiles",
+            "716",
+            "25",
+            "Import Everything",
+        ] {
+            assert!(says(&shapes, text), "{text}");
+        }
+        let import = text_rect(&shapes, "Import Everything").center();
+        let click = |pressed| egui::Event::PointerButton {
+            pos: import,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        pass(vec![egui::Event::PointerMoved(import)]);
+        pass(vec![click(true)]);
+        assert_eq!(pass(vec![click(false)]).1, Some(true));
+    }
+
+    fn text_rect(shapes: &[egui::epaint::ClippedShape], text: &str) -> Rect {
+        shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => {
+                    Some(t.galley.rect.translate(t.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .expect("the text is shown")
     }
 
     fn with_game() -> (Shared, Profile) {
