@@ -18,6 +18,7 @@ pub const MAX_FOLDERS: usize = 500;
 pub const MAX_FOLDER_DEPTH: usize = 16;
 pub const MAX_TITLE_CHARS: usize = 200;
 pub const MAX_PAGE_NAME_CHARS: usize = 64;
+pub const MAX_PROFILE_NAME_CHARS: usize = 64;
 /// The name of the profile made for a device that has none.
 pub const DEFAULT_PROFILE_NAME: &str = "Default Profile";
 /// Profile files larger than this are refused before parsing.
@@ -300,8 +301,95 @@ impl Profile {
         }
     }
 
+    /// An independent copy, including fresh ids and links to its own folders.
+    pub fn duplicate(&self, name: String) -> Self {
+        let mut copy = self.clone();
+        copy.id = new_id();
+        copy.name = name;
+        let mut ids = HashMap::new();
+        for page in copy.pages.iter_mut().chain(&mut copy.folders) {
+            let id = new_id();
+            ids.insert(page.id.clone(), id.clone());
+            page.id = id;
+        }
+        copy.for_each_key(|key| {
+            if key.action == FOLDER_ACTION
+                && let Some(target) = key.settings.get_mut("folder")
+                && let Some(id) = target.as_str().and_then(|id| ids.get(id))
+            {
+                *target = id.clone().into();
+            }
+        });
+        copy
+    }
+
+    /// A free name among profiles for the same model. Existing names are
+    /// compared without case; copy suffixes never accumulate on repeated copies.
+    pub fn available_name(&self, profiles: &[Profile]) -> String {
+        let taken: HashSet<String> = profiles
+            .iter()
+            .filter(|p| p.device == self.device && p.id != self.id)
+            .map(|p| p.name.trim().to_lowercase())
+            .collect();
+        let name: String = self
+            .name
+            .trim()
+            .chars()
+            .take(MAX_PROFILE_NAME_CHARS)
+            .collect();
+        if !taken.contains(&name.to_lowercase()) {
+            return name;
+        }
+        let mut base = name.as_str();
+        // Strip only whole trailing words, preserving names such as "Photocopy".
+        loop {
+            let without_number = base
+                .rsplit_once(' ')
+                .filter(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                .map_or(base, |(head, _)| head);
+            let stripped = without_number
+                .rsplit_once(' ')
+                .filter(|(_, word)| word.eq_ignore_ascii_case("copy"));
+            match stripped {
+                Some((head, _)) => base = head.trim_end(),
+                None => break,
+            }
+        }
+        if !taken.contains(&base.to_lowercase()) {
+            return base.to_owned();
+        }
+        for n in 0..=taken.len() {
+            let suffix = if n == 0 {
+                " copy".to_owned()
+            } else {
+                format!(" copy {n}")
+            };
+            let prefix: String = base
+                .chars()
+                .take(MAX_PROFILE_NAME_CHARS.saturating_sub(suffix.len()))
+                .collect();
+            let candidate = format!("{}{suffix}", prefix.trim_end());
+            if !taken.contains(&candidate.to_lowercase()) {
+                return candidate;
+            }
+        }
+        // There are more candidates than occupied names, so the loop always returns.
+        name
+    }
+
     pub fn folder(&self, id: &str) -> Option<&Page> {
         self.folders.iter().find(|f| f.id == id)
+    }
+
+    /// Appends an empty page unless the profile has reached the page limit.
+    pub fn add_page(&mut self) -> Option<String> {
+        if self.pages.len() >= MAX_PAGES {
+            return None;
+        }
+        let page = Page::new();
+        let id = page.id.clone();
+        self.pages.push(page);
+        Some(id)
     }
 
     pub fn folder_mut(&mut self, id: &str) -> Option<&mut Page> {
@@ -320,7 +408,7 @@ impl Profile {
 
     /// Visits every picture the profile points at: page icons and key images.
     pub fn for_each_picture(&mut self, mut visit: impl FnMut(&mut Option<PathBuf>)) {
-        for page in &mut self.pages {
+        for page in self.pages.iter_mut().chain(&mut self.folders) {
             visit(&mut page.icon);
         }
         self.for_each_key(|key| visit(&mut key.image));
@@ -535,6 +623,79 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn copies_keep_pages_actions_and_their_own_folder_links() {
+        let mut source = Profile::new("Scenes", DeviceKind::Mk2);
+        source.add_page();
+        source.pages[0].name = "Main".into();
+        source.pages[0].icon = Some("main.svg".into());
+        source.pages[0]
+            .keys
+            .insert(0, KeyConfig::new(FOLDER_ACTION, serde_json::json!({})));
+        source.normalize_folders();
+        source.folders[0].keys.insert(
+            1,
+            KeyConfig::new("com.example.action", serde_json::json!({"value": 42})),
+        );
+        let copy = source.duplicate("Scenes copy".into());
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.name, "Scenes copy");
+        assert_eq!(copy.pages.len(), 2);
+        for (a, b) in copy.pages.iter().zip(&source.pages) {
+            assert_ne!(a.id, b.id);
+            assert_eq!((&a.name, &a.icon), (&b.name, &b.icon));
+        }
+        assert_ne!(copy.folders[0].id, source.folders[0].id);
+        assert_eq!(
+            copy.pages[0].keys[&0].folder(),
+            Some(copy.folders[0].id.as_str())
+        );
+        assert_eq!(copy.folders[0].keys, source.folders[0].keys);
+        assert_eq!(Profile::from_json(&copy.to_json().unwrap()).unwrap(), copy);
+    }
+
+    #[test]
+    fn free_names_use_copy_suffixes_and_respect_model_case_and_length() {
+        let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
+        let mut existing = vec![Profile::new("Scenes", DeviceKind::Mini)];
+        assert_eq!(profile.available_name(&existing), "Scenes");
+        existing.push(Profile::new("SCENES", DeviceKind::Mk2));
+        assert_eq!(profile.available_name(&existing), "Scenes copy");
+        existing.push(Profile::new("Scenes copy", DeviceKind::Mk2));
+        existing.push(Profile::new("Scenes copy 2", DeviceKind::Mk2));
+        profile.name = "Scenes copy 2".into();
+        assert_eq!(profile.available_name(&existing), "Scenes copy 1");
+        let same_id = profile.clone();
+        assert_eq!(profile.available_name(&[same_id]), "Scenes copy 2");
+        assert_eq!(
+            profile.available_name(&[Profile::new("Scenes copy 2", DeviceKind::Mk2)]),
+            "Scenes"
+        );
+        profile.name = "Ж".repeat(MAX_PROFILE_NAME_CHARS);
+        existing.push(Profile::new(profile.name.clone(), DeviceKind::Mk2));
+        let name = profile.available_name(&existing);
+        assert_eq!(name.chars().count(), MAX_PROFILE_NAME_CHARS);
+        assert!(name.ends_with(" copy"));
+        profile.name = "Photocopy".into();
+        existing.push(Profile::new("Photocopy", DeviceKind::Mk2));
+        assert_eq!(profile.available_name(&existing), "Photocopy copy");
+    }
+
+    #[test]
+    fn adding_pages_preserves_existing_pages_and_stops_at_the_limit() {
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.pages[0]
+            .keys
+            .insert(1, KeyConfig::new("com.example.a", serde_json::json!({})));
+        let original = profile.pages[0].clone();
+        let id = profile.add_page().unwrap();
+        assert_eq!(profile.pages[0], original);
+        assert_eq!(profile.pages[1].id, id);
+        assert!(profile.pages[1].keys.is_empty());
+        while profile.add_page().is_some() {}
+        assert_eq!(profile.pages.len(), MAX_PAGES);
+        assert!(profile.add_page().is_none());
+    }
     #[test]
     fn round_trip() {
         let mut p = Profile::new("Test", DeviceKind::Mk2);

@@ -75,6 +75,57 @@ pub fn save_profile(profile: &Profile) -> Result<(), String> {
     profile.save(&path).map_err(|e| e.to_string())
 }
 
+/// Copies images as well as data, so deleting the original cannot break the copy.
+pub fn save_profile_copy(profile: Profile) -> Result<Profile, String> {
+    let root = config_dir().ok_or("no configuration folder")?;
+    let copy = copy_pictures(profile, &root)?;
+    if let Err(error) = save_profile(&copy) {
+        let _ = std::fs::remove_dir_all(root.join("images").join(&copy.id));
+        return Err(error);
+    }
+    Ok(copy)
+}
+
+fn copy_pictures(mut copy: Profile, root: &Path) -> Result<Profile, String> {
+    let dir = root.join("images").join(&copy.id);
+    let mut copied = std::collections::HashMap::new();
+    let mut result = Ok(());
+    copy.for_each_picture(|picture| {
+        let Some(from) = picture.as_ref() else { return };
+        if result.is_err() {
+            return;
+        }
+        if let Some(to) = copied.get(from) {
+            *picture = Some(PathBuf::clone(to));
+            return;
+        }
+        let extension = from
+            .extension()
+            .and_then(|e| e.to_str())
+            .filter(|e| e.len() <= 10 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or("image");
+        let to = dir.join(format!("{}.{}", uuid::Uuid::new_v4(), extension));
+        result = (|| {
+            let metadata = std::fs::metadata(from).map_err(|e| e.to_string())?;
+            if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
+                return Err("picture is too large or is not a file".to_owned());
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            std::fs::copy(from, &to).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        if result.is_ok() {
+            copied.insert(from.clone(), to.clone());
+            *picture = Some(to);
+        }
+    });
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(error);
+    }
+    Ok(copy)
+}
+
 /// Immutable pictures keep rendering caches and editor undo valid. Both
 /// created and imported key images are owned by the profile and backed up.
 pub fn save_key_image(profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
@@ -209,6 +260,39 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duplicate_owns_page_folder_and_nested_action_pictures() {
+        use deckly_core::{DeviceKind, KeyConfig, Page};
+        let root = std::env::temp_dir().join(format!("deckly-copy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("original.svg");
+        std::fs::write(&original, b"<svg/>").unwrap();
+        let mut source = Profile::new("Scenes", DeviceKind::Mk2);
+        source.pages[0].icon = Some(original.clone());
+        let mut folder = Page::new();
+        folder.icon = Some(original.clone());
+        let mut multi = KeyConfig::new(deckly_core::profile::MULTI_ACTION, serde_json::json!({}));
+        let mut nested = KeyConfig::new("com.example.a", serde_json::json!({"foo": 1}));
+        nested.image = Some(original.clone());
+        multi.groups[0].push(nested);
+        folder.keys.insert(1, multi);
+        source.folders.push(folder);
+        let mut copy = copy_pictures(source.duplicate("Scenes copy".into()), &root).unwrap();
+        std::fs::remove_file(&original).unwrap();
+        let mut pictures = 0;
+        let copy_id = copy.id.clone();
+        copy.for_each_picture(|picture| {
+            let Some(path) = picture.as_ref() else { return };
+            assert!(path.starts_with(root.join("images").join(&copy_id)));
+            assert_eq!(std::fs::read(path).unwrap(), b"<svg/>");
+            pictures += 1;
+        });
+        assert_eq!(pictures, 3);
+        assert!(copy_pictures(source.duplicate("Another".into()), &root).is_err());
+        assert_eq!(std::fs::read_dir(root.join("images")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn profile_path_rejects_unsafe_ids() {

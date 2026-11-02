@@ -22,6 +22,8 @@ use std::sync::mpsc::Sender;
 use zip::write::SimpleFileOptions;
 
 pub const EXTENSION: &str = "decklyBackup";
+pub const PROFILE_EXTENSION: &str = "decklyProfile";
+pub const PROFILE_FILE: &str = "profile.json";
 const FORMAT: u64 = 1;
 const INFO_FILE: &str = "backup.json";
 const SETTINGS_FILE: &str = "settings.json";
@@ -35,6 +37,34 @@ type Zip = zip::ZipWriter<BufWriter<File>>;
 
 fn options() -> SimpleFileOptions {
     SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+}
+
+/// A portable profile contains only its model, pages, actions and pictures.
+pub fn export_profile(path: &Path, mut profile: Profile) -> Result<Summary, String> {
+    let tmp = path.with_file_name(format!(".deckly-export-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let file = File::create(&tmp).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipWriter::new(BufWriter::new(file));
+        for (from, to) in take_pictures(&mut profile) {
+            add_file(&mut zip, &from, &to)
+                .map_err(|e| format!("Cannot export picture {}: {e}", from.display()))?;
+        }
+        let text = profile.to_json().map_err(|e| e.to_string())?;
+        add_bytes(&mut zip, PROFILE_FILE, text.as_bytes())?;
+        zip.finish()
+            .map_err(|e| e.to_string())?
+            .flush()
+            .map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        Ok(Summary {
+            title: "Profile exported".to_owned(),
+            lines: vec![format!("Saved to {}.", path.display())],
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Writes a backup; a failed one leaves no file behind.

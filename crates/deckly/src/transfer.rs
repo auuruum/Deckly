@@ -1,11 +1,12 @@
-//! Moving in from the official Stream Deck app: finds its data, reads its
-//! profiles from a folder or a backup file, and copies them and its plugins
-//! into Deckly. Sources are untrusted; only files listed from the source are
+//! Imports Deckly profile exports and the official Stream Deck app's profiles
+//! from a folder or backup, with its plugins. Sources are untrusted; only files listed from the source are
 //! ever opened, and sizes and counts are bounded.
 
+use crate::backup;
 use crate::official::{self, Converted, RawProfile, Report};
 use crate::runtime::{self, Msg, Shared};
 use crate::store;
+use deckly_core::Profile;
 use deckly_core::profile::MAX_FILE_BYTES;
 use deckly_plugin_host::Host;
 use deckly_plugin_host::manifest::{Manifest, ManifestError, needs_official_app};
@@ -233,6 +234,9 @@ pub enum PluginKind {
 pub fn scan(path: &Path, official: Option<&Path>, state: &Shared) -> Result<Scan, String> {
     let (mut tree, names) = Tree::open(path)?;
     let known: HashSet<&str> = names.iter().map(String::as_str).collect();
+    if known.contains(backup::PROFILE_FILE) {
+        return scan_native(path, &mut tree, &known, state);
+    }
     let (raws, skipped) = read_profiles(&mut tree, &names)?;
     let root = store::config_dir().ok_or("no configuration folder")?;
     let mut scan = Scan {
@@ -282,6 +286,74 @@ pub fn scan(path: &Path, official: Option<&Path>, state: &Shared) -> Result<Scan
         scan.plugins = find_plugins(&dir.join("Plugins"), &usage, state);
     }
     Ok(scan)
+}
+
+fn scan_native(
+    path: &Path,
+    tree: &mut Tree,
+    known: &HashSet<&str>,
+    state: &Shared,
+) -> Result<Scan, String> {
+    let bytes = tree.read(backup::PROFILE_FILE, MAX_FILE_BYTES)?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    let mut profile = Profile::from_json(text).map_err(|e| e.to_string())?;
+    if profile.id.len() > 128
+        || profile.id.is_empty()
+        || !profile
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("invalid profile id".into());
+    }
+    let root = store::config_dir().ok_or("no configuration folder")?;
+    let prefix = format!("images/{}/", profile.id);
+    let mut images = Vec::new();
+    profile.for_each_picture(|picture| {
+        let Some(name) = picture.as_ref().and_then(|p| p.to_str()) else {
+            *picture = None;
+            return;
+        };
+        if !safe_name(name) || !name.starts_with(&prefix) || !known.contains(name) {
+            *picture = None;
+            return;
+        }
+        let to = root.join(name);
+        images.push((name.to_owned(), to.clone()));
+        *picture = Some(to);
+    });
+    let replaces = usize::from(runtime::lock(state).profile(&profile.id).is_some());
+    let mut report = Report::default();
+    profile.for_each_key(|_| report.keys += 1);
+    Ok(Scan {
+        source: path.to_owned(),
+        order: vec![profile.id.clone()],
+        profiles: vec![Converted { profile, report }],
+        images,
+        skipped: Vec::new(),
+        plugins: Vec::new(),
+        replaces,
+    })
+}
+
+/// Keep ids (and cross-profile links), but make names distinct within a model.
+fn name_imports(imported: &mut [Profile], existing: &[Profile]) {
+    let replacing: HashSet<&str> = imported.iter().map(|p| p.id.as_str()).collect();
+    let mut names: Vec<Profile> = existing
+        .iter()
+        .filter(|p| !replacing.contains(p.id.as_str()))
+        .filter(|p| {
+            !p.is_placeholder()
+                || !imported
+                    .iter()
+                    .any(|q| q.device == p.device && !q.is_placeholder())
+        })
+        .cloned()
+        .collect();
+    for profile in imported {
+        profile.name = profile.available_name(&names);
+        names.push(profile.clone());
+    }
 }
 
 /// A profile and the folder each of its pages is in.
@@ -432,6 +504,16 @@ pub fn commit(
         match write_profiles(&scan, &mut report, state, Some(progress)) {
             Ok(n) => {
                 let mut s = runtime::lock(state);
+                for converted in &scan.profiles {
+                    if let Some(profile) = s.profile(&converted.profile.id)
+                        && profile.name != converted.profile.name
+                    {
+                        summary.lines.push(format!(
+                            "Renamed \"{}\" to \"{}\" because the name is taken.",
+                            converted.profile.name, profile.name
+                        ));
+                    }
+                }
                 s.place_imported(&scan.order);
                 s.drop_placeholders();
                 drop(s);
@@ -567,15 +649,18 @@ fn write_profiles(
         std::fs::write(to, bytes).map_err(|e| e.to_string())?;
     }
     show("Saving profiles");
-    let mut saved = Vec::new();
+    let mut saved: Vec<Profile> = scan.profiles.iter().map(|c| c.profile.clone()).collect();
+    let mut state = runtime::lock(state);
+    name_imports(&mut saved, &state.profiles);
     for converted in &scan.profiles {
         merge_report(report, &converted.report);
-        store::save_profile(&converted.profile)?;
-        saved.push(converted.profile.clone());
+    }
+    for profile in &saved {
+        store::save_profile(profile)?;
     }
     fold_plugin_actions(report);
     let n = saved.len();
-    runtime::lock(state).adopt_profiles(saved);
+    state.adopt_profiles(saved);
     Ok(n)
 }
 
@@ -690,6 +775,140 @@ mod tests {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
 
+    #[test]
+    fn imports_resolve_names_within_a_batch_and_keep_ids_and_placeholders() {
+        use deckly_core::{DeviceKind, Page};
+        let existing = Profile::new("Scenes", DeviceKind::Mk2);
+        let mut replacement = existing.clone();
+        let first = Profile::new("Scenes", DeviceKind::Mk2);
+        let second = Profile::new("Scenes", DeviceKind::Mk2);
+        let first_id = first.id.clone();
+        let mut profiles = vec![replacement.clone(), first, second];
+        name_imports(&mut profiles, std::slice::from_ref(&existing));
+        assert_eq!(
+            profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["Scenes", "Scenes copy", "Scenes copy 1"]
+        );
+        assert_eq!(profiles[1].id, first_id);
+        replacement.name = "Renamed".into();
+        name_imports(std::slice::from_mut(&mut replacement), &[existing]);
+        assert_eq!(replacement.name, "Renamed");
+        let placeholder = Profile::new("Default Profile", DeviceKind::Mk2);
+        let mut real = Profile::new("Default Profile", DeviceKind::Mk2);
+        real.pages.push(Page::new());
+        name_imports(std::slice::from_mut(&mut real), &[placeholder]);
+        assert_eq!(real.name, "Default Profile");
+    }
+
+    #[test]
+    fn a_native_export_round_trips_pages_folders_settings_and_pictures() {
+        use deckly_core::{DeviceKind, KeyConfig, Settings};
+        let root =
+            std::env::temp_dir().join(format!("deckly-profile-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("page.svg");
+        std::fs::write(&image, b"<svg/>").unwrap();
+        let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
+        profile.pages[0].icon = Some(image.clone());
+        profile.pages[0].keys.insert(
+            0,
+            KeyConfig::new(deckly_core::profile::FOLDER_ACTION, serde_json::json!({})),
+        );
+        profile.normalize_folders();
+        let mut nested = KeyConfig::new("com.example.action", serde_json::json!({"foo": "bar"}));
+        nested.image = Some(image.clone());
+        profile.folders[0].keys.insert(1, nested);
+        let file = root.join("Scenes.decklyProfile");
+        backup::export_profile(&file, profile.clone()).unwrap();
+        std::fs::remove_file(&image).unwrap();
+        let state = Arc::new(Mutex::new(crate::runtime::State::new(
+            vec![],
+            Settings::default(),
+        )));
+        let read = scan(&file, None, &state).unwrap();
+        assert_eq!(read.profiles.len(), 1);
+        assert_eq!(read.replaces, 0);
+        assert!(read.plugins.is_empty());
+        let mut imported = read.profiles.into_iter().next().unwrap().profile;
+        let (mut tree, names) = Tree::open(&file).unwrap();
+        assert!(
+            names
+                .iter()
+                .all(|n| n == backup::PROFILE_FILE || n.starts_with("images/"))
+        );
+        for (from, _) in &read.images {
+            assert_eq!(tree.read(from, MAX_IMAGE_BYTES).unwrap(), b"<svg/>");
+        }
+        assert_eq!(read.images.len(), 2);
+        imported.for_each_picture(|p| {
+            if p.is_some() {
+                *p = Some(image.clone());
+            }
+        });
+        assert_eq!(imported, profile);
+        let existing_bytes = std::fs::read(&file).unwrap();
+        assert!(backup::export_profile(&file, profile).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), existing_bytes);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_profiles_cannot_import_images_outside_their_folder() {
+        use deckly_core::{DeviceKind, KeyConfig, Settings};
+        let root =
+            std::env::temp_dir().join(format!("deckly-profile-paths-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("hostile.decklyProfile");
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        profile.id = "abc".into();
+        for (index, path) in [
+            "images/abc/ok.svg",
+            "images/abc/../../evil.svg",
+            "images/other/icon.svg",
+            "/secret.svg",
+            "images/abc/missing.svg",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut key = KeyConfig::new("com.example.a", serde_json::json!({}));
+            key.image = Some(path.into());
+            profile.pages[0].keys.insert(index as u8, key);
+        }
+        let write = |profile: &Profile| {
+            let mut zip = zip::ZipWriter::new(File::create(&file).unwrap());
+            zip.start_file(backup::PROFILE_FILE, SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(profile.to_json().unwrap().as_bytes())
+                .unwrap();
+            for path in [
+                "images/abc/ok.svg",
+                "images/abc/../../evil.svg",
+                "images/other/icon.svg",
+                "/secret.svg",
+            ] {
+                zip.start_file(path, SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"svg").unwrap();
+            }
+            zip.finish().unwrap();
+        };
+        let state = Arc::new(Mutex::new(crate::runtime::State::new(
+            vec![],
+            Settings::default(),
+        )));
+        write(&profile);
+        let read = scan(&file, None, &state).unwrap();
+        assert_eq!(read.images.len(), 1);
+        assert_eq!(read.images[0].0, "images/abc/ok.svg");
+        let keys = &read.profiles[0].profile.pages[0].keys;
+        assert!(keys[&0].image.is_some());
+        assert!((1..5).all(|i| keys[&i].image.is_none()));
+        profile.id = "../escape".into();
+        write(&profile);
+        assert!(scan(&file, None, &state).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn unsafe_names_are_refused() {
         assert!(safe_name("Profiles/a.sdProfile/manifest.json"));

@@ -16,7 +16,7 @@ use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use crate::transfer::{self, Job, PluginKind, SharedJob, Summary};
-use deckly_core::profile::MAX_PAGE_NAME_CHARS;
+use deckly_core::profile::{MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_NAME_CHARS};
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
 use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, KeyPress, Orientation, Page, Profile, TitleAlign,
@@ -40,7 +40,6 @@ const STRIP_HEIGHT: f32 = 35.0;
 const LABEL_X: f32 = 20.0;
 const LABEL_WIDTH: f32 = 182.0;
 const VALUE_X: f32 = 224.0;
-const MAX_PROFILE_NAME_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
@@ -105,6 +104,8 @@ pub struct Preferences {
     /// The Advanced Settings window, open for this device.
     advanced: Option<(String, &'static DeviceModel)>,
     cropper: Cropper,
+    /// Select a duplicated profile when its background save finishes.
+    pending_profile: Option<String>,
 }
 
 /// A profile as the Profiles tab lists it.
@@ -119,6 +120,48 @@ struct PageRow {
     name: String,
     title: String,
     icon: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+enum ProfileCommand {
+    Rename,
+    Duplicate,
+    Export,
+    AddPage,
+    Delete,
+    Import,
+}
+
+/// The row menu and the options button expose the same commands.
+fn profile_commands(ui: &mut Ui, profile: &ProfileRow, can_delete: bool) -> Option<ProfileCommand> {
+    let mut selected = None;
+    for (command, glyph, label, enabled) in [
+        (ProfileCommand::Rename, icon::PENCIL_SIMPLE, "Rename", true),
+        (ProfileCommand::Duplicate, icon::COPY, "Duplicate", true),
+        (ProfileCommand::Export, icon::EXPORT, "Export…", true),
+        (
+            ProfileCommand::AddPage,
+            icon::FILE_PLUS,
+            "Add Page",
+            profile.pages.len() < MAX_PAGES,
+        ),
+        (ProfileCommand::Delete, icon::TRASH, "Delete", can_delete),
+        (
+            ProfileCommand::Import,
+            icon::DOWNLOAD_SIMPLE,
+            "Import…",
+            true,
+        ),
+    ] {
+        if ui
+            .add_enabled(enabled, egui::Button::new(format!("{glyph}  {label}")))
+            .clicked()
+        {
+            selected = Some(command);
+            ui.close();
+        }
+    }
+    selected
 }
 
 impl ProfileRow {
@@ -175,6 +218,7 @@ impl Preferences {
             preview: None,
             advanced: None,
             cropper: Cropper::default(),
+            pending_profile: None,
         }
     }
 
@@ -528,7 +572,7 @@ impl Preferences {
             Job::Review(scan) => {
                 egui::Modal::new(egui::Id::new("job-review")).show(ctx, |ui| {
                     ui.set_width(420.0);
-                    ui.heading("Import from Stream Deck");
+                    ui.heading("Import profiles");
                     ui.add_space(8.0);
                     ui.checkbox(
                         &mut self.import_profiles,
@@ -564,7 +608,8 @@ impl Preferences {
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         close = ui.button("Cancel").clicked();
-                        let any = self.import_profiles || (self.import_plugins && ready > 0);
+                        let any = (self.import_profiles && !scan.profiles.is_empty())
+                            || (self.import_plugins && ready > 0);
                         import = ui.add_enabled(any, egui::Button::new("Import")).clicked();
                     });
                 });
@@ -814,6 +859,14 @@ impl Preferences {
     // ----- Profiles ------------------------------------------------------
 
     fn profiles(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        if self
+            .pending_profile
+            .as_ref()
+            .is_some_and(|id| runtime::lock(env.state).profile(id).is_some())
+        {
+            self.profile = self.pending_profile.take();
+            self.page = None;
+        }
         let list = at(o, 21.0, 56.0, 220.0, 387.0);
         frame(ui, at(o, 20.0, 55.0, 222.0, 414.0));
         let details = at(o, 262.0, 55.0, 458.0, 414.0);
@@ -861,6 +914,7 @@ impl Preferences {
         let mut cancel = false;
         let mut start: Option<(String, String)> = None;
         let mut reorder = None;
+        let mut command = None;
         let can_delete = profiles.len() > 1;
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical()
@@ -996,22 +1050,8 @@ impl Preferences {
                             start = Some((id.clone(), name.clone()));
                         }
                         resp.context_menu(|ui| {
-                            if ui
-                                .button(format!("{}  Rename", icon::PENCIL_SIMPLE))
-                                .clicked()
-                            {
-                                start = Some((id.clone(), name.clone()));
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    can_delete,
-                                    egui::Button::new(format!("{}  Delete", icon::TRASH)),
-                                )
-                                .clicked()
-                            {
-                                self.confirm_delete = Some(id.clone());
-                                ui.close();
+                            if let Some(pick) = profile_commands(ui, p, can_delete) {
+                                command = Some((id.clone(), pick));
                             }
                         });
                         if open {
@@ -1091,6 +1131,22 @@ impl Preferences {
             .clicked()
         {
             self.confirm_delete = self.profile.clone();
+        }
+        let options = icon_button(ui, at(o, 69.0, 444.0, 24.0, 24.0), icon::GEAR, true)
+            .on_hover_text("Profile options");
+        if let Some(profile) = profiles
+            .iter()
+            .find(|p| Some(&p.id) == self.profile.as_ref())
+        {
+            egui::Popup::menu(&options).show(|ui| {
+                if let Some(pick) = profile_commands(ui, profile, can_delete) {
+                    command = Some((profile.id.clone(), pick));
+                }
+            });
+        }
+        if let Some((id, command)) = command {
+            self.finish_rename(env);
+            self.profile_command(ui.ctx(), env, &id, command);
         }
 
         // Details of the selected page or profile.
@@ -1215,6 +1271,102 @@ impl Preferences {
     fn finish_rename(&mut self, env: &mut Env<'_>) {
         if let Some(r) = self.renaming.take() {
             rename_profile(env, &r.id, &r.text);
+        }
+    }
+
+    fn profile_command(
+        &mut self,
+        ctx: &egui::Context,
+        env: &mut Env<'_>,
+        id: &str,
+        command: ProfileCommand,
+    ) {
+        let profile = runtime::lock(env.state).profile(id).cloned();
+        let Some(profile) = profile else { return };
+        self.confirm_delete = None;
+        match command {
+            ProfileCommand::Rename => {
+                self.page = None;
+                self.renaming = Some(Rename::new(profile.id, profile.name));
+            }
+            ProfileCommand::Delete => {
+                self.page = None;
+                self.confirm_delete = Some(profile.id);
+            }
+            ProfileCommand::Duplicate => {
+                // A new id makes the source's name count as occupied.
+                let mut copy = profile.duplicate(profile.name.clone());
+                copy.name = copy.available_name(&runtime::lock(env.state).profiles);
+                self.pending_profile = Some(copy.id.clone());
+                let state = env.state.clone();
+                let runtime = env.runtime.clone();
+                transfer::start(&self.job, ctx, "Duplicating profile", move |_| {
+                    let result = store::save_profile_copy(copy).map(|copy| {
+                        let name = copy.name.clone();
+                        let id = copy.id.clone();
+                        let mut state = runtime::lock(&state);
+                        state.adopt_profiles(vec![copy]);
+                        state.place_imported(&[id]);
+                        let _ = runtime.send(Msg::Refresh);
+                        Summary {
+                            title: "Profile duplicated".into(),
+                            lines: vec![format!("Created \"{name}\".")],
+                        }
+                    });
+                    finished("Duplicate failed", result)
+                });
+            }
+            ProfileCommand::Export => {
+                let file = transfer::clean_file_name(&profile.name)
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "Profile".into());
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Deckly profile", &[backup::PROFILE_EXTENSION])
+                    .set_file_name(format!("{file}.{}", backup::PROFILE_EXTENSION))
+                    .save_file()
+                {
+                    transfer::start(&self.job, ctx, "Exporting profile", move |_| {
+                        finished("Export failed", backup::export_profile(&path, profile))
+                    });
+                }
+            }
+            ProfileCommand::AddPage => {
+                let mut state = runtime::lock(env.state);
+                let Some(profile) = state.profile_mut(id) else {
+                    return;
+                };
+                let Some(page) = profile.add_page() else {
+                    return;
+                };
+                match store::save_profile(profile) {
+                    Ok(()) => {
+                        self.page = Some(page);
+                        self.expanded.insert(id.to_owned());
+                    }
+                    Err(error) => {
+                        profile.pages.pop();
+                        state.notify(format!("Cannot save profile: {error}"));
+                    }
+                }
+                let _ = env.runtime.send(Msg::Refresh);
+            }
+            ProfileCommand::Import => self.import_profile(ctx, env),
+        }
+    }
+
+    fn import_profile(&mut self, ctx: &egui::Context, env: &Env<'_>) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter(
+                "Profiles",
+                &[
+                    backup::PROFILE_EXTENSION,
+                    "streamDeckProfile",
+                    "streamDeckProfilesBackup",
+                ],
+            )
+            .pick_file()
+        {
+            self.scan(ctx, env, path, None);
         }
     }
 

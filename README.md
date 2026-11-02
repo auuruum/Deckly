@@ -80,6 +80,21 @@ undo history are gone. The panel must support StatusNotifierItem; stock GNOME
 needs the AppIndicator extension. Without a tray, closing the window quits
 Deckly as before.
 
+## Profiles
+
+Preferences > Profiles offers Rename, Duplicate, Export, Add Page, Delete and
+Import from a profile's context menu or the options button below the list.
+Duplicate copies pages, folders, actions and pictures into an independent
+profile. Add Page appends an empty page and selects it in the list.
+
+Export saves a portable `.decklyProfile` with the profile and its pictures.
+Use Import in the same menu to bring it into Deckly on another computer; this
+is Deckly's own format. The importer also accepts `.streamDeckProfile` and
+`.streamDeckProfilesBackup`. If another profile for the same model has the
+name, the importer chooses a free name using `copy`, `copy 1`, and so on.
+Profiles with the same id are replaced, as shown before import; their links
+from other profiles keep working.
+
 ## Linux and macOS
 
 In an Open action, use **Applications…** to search installed applications by
