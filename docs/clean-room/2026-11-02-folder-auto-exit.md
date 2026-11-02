@@ -36,6 +36,9 @@
   proprietary strings, code, images and profiles were not copied into the tree.
 - The owner's screenshot of 7.6.0 shows that the reset control opens a modal
   question with a "do not ask again" checkbox, a confirm and a cancel button.
+- The owner reports (2026-11-02, by eye, on their own device with the official
+  app) that while the countdown runs a circle appears over the Exit key's arrow
+  and fills up like a circular progress bar until the folder closes.
 
 ## Inferred
 
@@ -70,6 +73,11 @@
   actual key-event routing, Multi Action completion/cancellation and Key Logic.
   The existing blocking event loop wakes at the deadline, including while the
   window is hidden; no polling thread was added.
+- While a countdown runs, the folder's Exit key draws a ring that fills clockwise
+  from the top, on the device and in the editor. The event loop also wakes once
+  per percent, at most every 50 ms, only during a countdown; the key image goes
+  out only when its percent changed. `the_exit_key_shows_its_countdown_as_a_ring`
+  and `a_countdown_reports_its_progress_and_stops_with_its_timer` check this.
 - The official importer preserves parent rules and individual overrides from
   profile folders, `.streamDeckProfile` and `.streamDeckProfilesBackup`.
   `official::tests::*auto_exit*`,
@@ -86,6 +94,8 @@
 
 ## Unknown / not verified
 
+- The original circle's exact radius, width, colors and start angle were not
+  measured; the look of Deckly's ring is its own choice.
 - The original application's exact key-down/key-up, overlapping-key and
   sequence-completion ordering was not observed. No function pseudocode was
   reused. Deckly's event-order rules above are deliberate implementation choices.

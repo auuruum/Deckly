@@ -6,6 +6,9 @@ use deckly_core::{AutoExit, KeyConfig};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// The countdown ring moves on at most this often, for short delays.
+const MIN_FRAME: Duration = Duration::from_millis(50);
+
 #[derive(Default)]
 pub(super) struct Timers {
     revisions: HashMap<String, u64>,
@@ -15,6 +18,12 @@ pub(super) struct Timers {
 struct Timer {
     source: Source,
     at: Instant,
+}
+
+impl Timer {
+    fn length(&self) -> Duration {
+        Duration::from_secs(u64::from(self.source.policy.delay))
+    }
 }
 
 /// The location and policy of the actual press, rather than whatever key
@@ -40,6 +49,22 @@ impl Timers {
 
     pub(super) fn deadline(&self) -> Option<Instant> {
         self.pending.values().map(|t| t.at).min()
+    }
+
+    /// How far a profile's countdown is, in percent.
+    pub(super) fn progress(&self, profile: &str, now: Instant) -> Option<u8> {
+        let timer = self.pending.get(profile)?;
+        let left = timer.at.saturating_duration_since(now).as_millis() * 100;
+        let left = left.checked_div(timer.length().as_millis())?;
+        // left is at most 100.
+        Some(100u128.saturating_sub(left) as u8)
+    }
+
+    /// When a countdown's ring next changes: one percent on, so a key image
+    /// goes out no more often than it differs.
+    pub(super) fn next_frame(&self, now: Instant) -> Option<Instant> {
+        let frame = self.pending.values().map(|t| t.length() / 100).min()?;
+        Some(now + frame.max(MIN_FRAME))
     }
 
     fn revision(&self, profile: &str) -> u64 {
@@ -222,6 +247,43 @@ mod tests {
         assert!(s.expire_folder_exits(now + Duration::from_secs(3)));
         assert!(s.folders.is_empty());
         assert_eq!(s.folder_exit.deadline(), None);
+    }
+
+    #[test]
+    fn a_countdown_reports_its_progress_and_stops_with_its_timer() {
+        let (mut s, id, _) = setup(10);
+        let now = Instant::now();
+        let progress = |s: &State, ms| s.folder_exit.progress(&id, now + Duration::from_millis(ms));
+        assert_eq!(progress(&s, 0), None);
+        assert_eq!(s.folder_exit.next_frame(now), None);
+        s.arm_folder_exit(source(&s), now);
+        assert_eq!(progress(&s, 0), Some(0));
+        assert_eq!(progress(&s, 5000), Some(50));
+        assert_eq!(progress(&s, 10_000), Some(100));
+        assert_eq!(progress(&s, 60_000), Some(100));
+        assert_eq!(
+            s.live(s.profile(&id).unwrap()).exit.map(|p| p < 100),
+            Some(true)
+        );
+        // Ten seconds move one percent every tenth of a second.
+        assert_eq!(
+            s.folder_exit.next_frame(now),
+            Some(now + Duration::from_millis(100))
+        );
+        let mut again = source(&s);
+        s.pause_folder_exit(&mut again);
+        assert_eq!(progress(&s, 0), None);
+    }
+
+    #[test]
+    fn a_short_countdown_is_limited_in_frames_and_zero_has_none() {
+        let now = Instant::now();
+        let (mut s, _, _) = setup(1);
+        s.arm_folder_exit(source(&s), now);
+        assert_eq!(s.folder_exit.next_frame(now), Some(now + MIN_FRAME));
+        let (mut s, id, _) = setup(0);
+        s.arm_folder_exit(source(&s), now);
+        assert_eq!(s.folder_exit.progress(&id, now), None);
     }
 
     #[test]

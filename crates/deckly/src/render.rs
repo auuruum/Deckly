@@ -13,12 +13,14 @@ use deckly_core::{
 };
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
+use std::f32::consts::TAU;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 const EMPTY: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_BACKGROUND: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_COLOR: [u8; 3] = [0xE6, 0xE7, 0xEA];
+const RING_TRACK: [u8; 3] = [0x48, 0x4A, 0x50];
 const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;
 
@@ -29,6 +31,8 @@ pub struct Live {
     pub page: usize,
     /// The key is held down.
     pub pressed: bool,
+    /// How far the folder's Auto Exit countdown is, in percent.
+    pub exit: Option<u8>,
 }
 
 impl Default for Live {
@@ -36,6 +40,7 @@ impl Default for Live {
         Self {
             page: 1,
             pressed: false,
+            exit: None,
         }
     }
 }
@@ -109,6 +114,11 @@ impl Renderer {
         {
             draw_title(&mut img, font, title, &style, size);
         }
+        if key.action == actions::PARENT_FOLDER
+            && let Some(percent) = live.exit
+        {
+            draw_ring(&mut img, percent);
+        }
         if let Some(mark) = overlay.and_then(|o| o.mark)
             && let Some(font) = &self.icon_font
         {
@@ -140,6 +150,9 @@ impl Renderer {
             }
             if key.action == actions::PAGE_INDICATOR {
                 live.page.hash(&mut h);
+            }
+            if key.action == actions::PARENT_FOLDER {
+                live.exit.hash(&mut h);
             }
             if key.action == actions::MULTI_ACTION_SWITCH {
                 actions::switch_side(key).hash(&mut h);
@@ -292,6 +305,29 @@ fn draw_mark(img: &mut RgbaImage, font: &FontArc, mark: Mark) {
     };
     let size = img.width() as f32 * 0.6;
     draw_icon_colored(img, font, glyph, size, color);
+}
+
+/// The Auto Exit countdown: a ring around the key's picture that fills
+/// clockwise from the top.
+fn draw_ring(img: &mut RgbaImage, percent: u8) {
+    let size = img.width() as f32;
+    let (center, radius, half_width) = (size / 2.0, size * 0.4, size * 0.03);
+    let filled = f32::from(percent.min(100)) / 100.0 * TAU;
+    for y in 0..img.height() {
+        for x in 0..img.width() {
+            let (dx, dy) = (x as f32 + 0.5 - center, y as f32 + 0.5 - center);
+            let cover = half_width + 0.5 - ((dx * dx + dy * dy).sqrt() - radius).abs();
+            if cover > 0.0 {
+                let angle = dx.atan2(-dy).rem_euclid(TAU);
+                let color = if angle <= filled {
+                    ICON_COLOR
+                } else {
+                    RING_TRACK
+                };
+                blend(img, x as i32, y as i32, color, cover);
+            }
+        }
+    }
 }
 
 /// Turns a key-sized image for the user's orientation and the model, then
@@ -911,6 +947,40 @@ mod tests {
         assert_eq!(
             r.key_hash(Some(&other), one, None),
             r.key_hash(Some(&other), two, None)
+        );
+    }
+
+    #[test]
+    fn the_exit_key_shows_its_countdown_as_a_ring() {
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::PARENT_FOLDER, json!({}));
+        let other = KeyConfig::new(actions::HOTKEY, json!({}));
+        let at = |percent| Live {
+            exit: Some(percent),
+            ..Live::default()
+        };
+        assert_ne!(
+            r.key_hash(Some(&key), at(40), None),
+            r.key_hash(Some(&key), at(41), None)
+        );
+        assert_ne!(
+            r.key_hash(Some(&key), Live::default(), None),
+            r.key_hash(Some(&key), at(0), None)
+        );
+        let bright = |img: &RgbaImage, x, y| img.get_pixel(x, y).0[0] > 128;
+        // It fills clockwise from the top, so half of it is the right side.
+        let half = r.render(Some(&key), 72, at(50), None);
+        assert!(bright(&half, 64, 36));
+        assert!(!bright(&half, 7, 36));
+        assert!(bright(&r.render(Some(&key), 72, at(100), None), 7, 36));
+        // Other keys do not depend on the countdown.
+        assert_eq!(
+            r.key_hash(Some(&other), Live::default(), None),
+            r.key_hash(Some(&other), at(50), None)
+        );
+        assert_eq!(
+            r.render(Some(&other), 72, Live::default(), None),
+            r.render(Some(&other), 72, at(50), None)
         );
     }
 

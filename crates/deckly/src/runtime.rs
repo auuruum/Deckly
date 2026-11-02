@@ -198,6 +198,7 @@ impl State {
         Live {
             page: self.page(profile) + 1,
             pressed: false,
+            exit: self.folder_exit.progress(&profile.id, Instant::now()),
         }
     }
 
@@ -612,14 +613,21 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
             };
             let followed = follow_window(&state, &links);
             let pressed = press_timers(&tools, &mut groups);
-            let exited = lock(&state).expire_folder_exits(Instant::now());
+            let exited = {
+                let mut s = lock(&state);
+                let counting = s.folder_exit.deadline();
+                let exited = s.expire_folder_exits(Instant::now());
+                // A cancelled countdown takes its ring off the key too.
+                exited || s.folder_exit.deadline() != counting
+            };
             if pressed || followed || exited {
                 refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                 repaint();
             }
             // Wait for the next message, until a device should sleep, until
             // a plugin's Alert/OK mark ends, until a Key Logic press is
-            // decided, or until the foreground has settled.
+            // decided, until the foreground has settled, or until a folder's
+            // countdown moves on.
             let (mark_end, settled) = {
                 let s = lock(&state);
                 (s.next_mark_end(), s.follower.deadline())
@@ -629,6 +637,7 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 .chain(mark_end)
                 .chain(settled)
                 .chain(lock(&state).folder_exit.deadline())
+                .chain(lock(&state).folder_exit.next_frame(Instant::now()))
                 .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
                 .min();
             let msg = match wake {
