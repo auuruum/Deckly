@@ -1,7 +1,9 @@
 //! Linux: X11 window managers keep the active window in a root window
-//! property, and a change of it arrives as an event. Wayland keeps this from
-//! other programs on purpose and has no common way to ask, and XWayland only
-//! sees part of the windows, so a Wayland session reports that it cannot.
+//! property, and a change of it arrives as an event. Wayland has no common way
+//! to ask and XWayland only sees part of the windows, so a Wayland session goes
+//! through `wayland`.
+
+mod wayland;
 
 use super::Report;
 use std::error::Error;
@@ -16,17 +18,14 @@ use x11rb::protocol::xproto::{
 const MAX_CLASS_WORDS: u32 = 64;
 
 pub fn watch(report: Report) {
-    if is_wayland() {
-        report(Err(
-            "Wayland does not tell applications which window is active. \
-             Use an X11 session to switch profiles by window."
-                .into(),
-        ));
-        return;
-    }
     let failed = report.clone();
     let run = move || {
-        if let Err(e) = follow(&report) {
+        let followed = if is_wayland() {
+            wayland::follow(&report)
+        } else {
+            follow(&report)
+        };
+        if let Err(e) = followed {
             report(Err(format!("Cannot follow the active window: {e}")));
         }
     };
@@ -110,11 +109,16 @@ fn active_application(
     let pid = connection.get_property(false, window, atoms.pid, AtomEnum::CARDINAL, 0, 1)?;
     if let Some(reply) = gone_is_none(pid.reply())?
         && let Some(pid) = reply.value32().and_then(|mut values| values.next())
-        && let Ok(path) = std::fs::read_link(format!("/proc/{pid}/exe"))
     {
-        names.extend(path.to_str().map(str::to_owned));
+        names.extend(program(pid));
     }
     Ok(names)
+}
+
+/// The path of a process's program, if Deckly may look into it.
+fn program(pid: u32) -> Option<String> {
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    path.to_str().map(str::to_owned)
 }
 
 fn gone_is_none<T>(reply: Result<T, ReplyError>) -> Result<Option<T>, Box<dyn Error>> {

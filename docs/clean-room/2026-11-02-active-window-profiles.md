@@ -3,15 +3,16 @@
 - Date: 2026-11-02
 - Method: public OS documentation (Microsoft `SetWinEventHook`,
   `QueryFullProcessImageNameW`, `GetApplicationUserModelId`,
-  `SHGetPropertyStoreForWindow`; freedesktop EWMH; Apple `NSWorkspace`), a
-  read-only listing of the Start menu's applications and of top-level windows on
-  the owner's Windows 10 22H2 machine, Deckly source inspection and Rust tests.
+  `SHGetPropertyStoreForWindow`; freedesktop EWMH; the wlr foreign toplevel
+  protocol definition; Apple `NSWorkspace`), a read-only listing of the Start
+  menu's applications and of top-level windows on the owner's Windows 10 22H2
+  machine, Deckly source inspection and Rust tests.
   The official application was not inspected for this entry; the only thing
   taken from it is an earlier observation of its Preferences window, which has
   an application picker for automatic switching on the Profiles tab
   (`2026-10-26-preferences.md`).
-- Hardware: none opened. No window was moved or focused and no input was
-  injected.
+- Hardware: none opened. No input was injected. Focus was moved only for the
+  Wayland observations below.
 
 ## Decisions
 
@@ -121,16 +122,45 @@ last path part, ignoring case. Test: `a_rule_matches_by_the_last_part_of_a_name_
 
 - Documented (EWMH): the root window's `_NET_ACTIVE_WINDOW`, with
   `_NET_WM_PID` and `WM_CLASS` on the window. Changes arrive as property events.
-- Wayland has no common way to learn the active window. A session with
-  `WAYLAND_DISPLAY` set or `XDG_SESSION_TYPE=wayland` reports that as an error,
-  shown next to the setting and under the rule list, and nothing is watched.
-  XWayland would only see part of the windows.
+- Wayland has no common way to learn the active window, and XWayland would only
+  see part of the windows. A session with `WAYLAND_DISPLAY` set or
+  `XDG_SESSION_TYPE=wayland` asks for the compositor's foreign toplevel manager
+  instead. One that does not offer it reports that as an error, shown next to
+  the setting and under the rule list, and nothing is watched.
+- Documented (`wlr-foreign-toplevel-management-unstable-v1`): a client that binds
+  the manager hears of every window, each with an application id and a state
+  array in which `activated` marks the focused one. `done` ends a window's
+  changes. The protocol gives no process.
+- Observed on CachyOS with Hyprland 0.57.0, Wayland session, by moving focus with
+  Hyprland's dispatchers and reading the reports of
+  `the_compositor_reports_the_active_window` (ignored by default: it needs a
+  compositor):
+  - The manager binds with no prompt, and the windows already open are listed
+    at once, so the first report names the focused window.
+  - Each move to another application is reported with no polling. A move to an
+    empty workspace reports an empty list, as for an unnamed application.
+  - Deckly's own window reports nothing.
+  - Hyprland's `j/activewindow` request gives the process of the focused window.
+    AyuGram has the application id `com.ayugram.desktop` and the program
+    `/usr/bin/AyuGram`, so a rule made with Choose File could not match the id
+    alone. That decided asking Hyprland for the process. The answer counts only
+    if its class is the reported application id. Tests:
+    `finds_the_process_of_the_focused_window`,
+    `focus_that_moved_on_gives_no_process`.
+- Inferred: one focus change arrives as two windows that finish separately. The
+  order is not relied on. Test: `focus_moves_in_either_order`.
 - A desktop entry's id is `StartupWMClass`, else the desktop file's name.
   Inferred: most entries are named after their class. Those that are neither
   do not match; Choose File takes the program instead.
-- Only compile-checked. Tests under `cfg(target_os = "linux")` were not run.
+- The X11 path is only compile-checked: it did not run in an X11 session.
+- Not observed: a profile switching on a device in the running application with
+  this watcher. The rule logic is tested without one.
 - Unknown: window managers that do not set `_NET_ACTIVE_WINDOW` stay silent,
-  with no error.
+  with no error. Which other compositors offer the manager: GNOME, KDE, Sway and
+  others were not tried. Outside Hyprland no process is known, so rules match
+  the application id only, and Deckly's windows are known only by the ids
+  `deckly` and `deckly-web`. The second is inferred: no window of the helper was
+  observed under this protocol. On Hyprland its program path identifies it.
 
 ### macOS
 
