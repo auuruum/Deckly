@@ -1347,9 +1347,7 @@ impl App {
                 .and_then(|p| p.icon.as_deref())
                 .and_then(|path| prefs::page_picture(ui.ctx(), path));
             if let Some(picture) = picture {
-                let area = Rect::from_center_size(r.center(), Vec2::splat(14.0));
-                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                painter.image(picture.id(), area, whole, color);
+                prefs::paint_page_picture(&painter, &picture, r.center(), 14.0, color);
             } else {
                 painter.text(
                     r.center(),

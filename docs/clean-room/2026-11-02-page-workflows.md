@@ -28,6 +28,17 @@
   `right_click_selects_the_page_and_delete_requires_confirmation` (egui pointer
   events, including the disabled last-page menu item).
 
+## Implemented: icon alignment
+
+- The owner's screenshot shows the drag handle glyph above the row's vertical
+  center. These glyphs were positioned using the surrounding system font's
+  line rectangle, which includes different whitespace than the icon's ink.
+- The profile carets, drag handles, page numbers and Preferences icon buttons
+  now center the visible glyph mesh. Non-square page pictures keep their aspect
+  ratio and center in the list, details and main window page strip.
+- Check: `page_controls_center_visible_glyphs_and_preserve_picture_aspect_ratio`
+  checks visible bounds at 100%, 125%, 150% and 200% scale, plus a 2:1 picture.
+
 ## Manual verification
 
 The owner previously asked to do real mouse testing themselves. Native window

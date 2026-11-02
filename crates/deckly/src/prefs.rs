@@ -961,15 +961,15 @@ impl Preferences {
                         );
                         let caret_resp =
                             ui.interact(caret, ui.id().with(("caret", id)), Sense::click());
-                        ui.painter().text(
+                        centered_glyph(
+                            ui,
                             caret.center(),
-                            Align2::CENTER_CENTER,
                             if open {
                                 icon::CARET_DOWN
                             } else {
                                 icon::CARET_RIGHT
                             },
-                            font(12.0),
+                            12.0,
                             if caret_resp.hovered() || selected {
                                 TEXT
                             } else {
@@ -986,11 +986,11 @@ impl Preferences {
                         let grip = ui
                             .interact(handle, ui.id().with(("handle", id)), Sense::drag())
                             .on_hover_and_drag_cursor(CursorIcon::Grab);
-                        ui.painter().text(
+                        centered_glyph(
+                            ui,
                             handle.center(),
-                            Align2::CENTER_CENTER,
                             icon::LIST,
-                            font(15.0),
+                            15.0,
                             if grip.hovered() || grip.dragged() || selected {
                                 TEXT
                             } else {
@@ -1758,9 +1758,7 @@ fn page_glyph(ui: &Ui, center: Pos2, size: f32, page: &PageRow, number: usize) {
         .as_deref()
         .and_then(|path| page_picture(ui.ctx(), path));
     if let Some(picture) = picture {
-        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        ui.painter()
-            .image(picture.id(), area, whole, Color32::WHITE);
+        paint_page_picture(ui.painter(), &picture, center, size, Color32::WHITE);
     } else {
         ui.painter().rect_stroke(
             area,
@@ -1768,14 +1766,34 @@ fn page_glyph(ui: &Ui, center: Pos2, size: f32, page: &PageRow, number: usize) {
             Stroke::new(1.5, TEXT),
             egui::StrokeKind::Inside,
         );
-        ui.painter().text(
-            center,
-            Align2::CENTER_CENTER,
-            number.to_string(),
-            font(size * 0.6),
-            TEXT,
-        );
+        centered_glyph(ui, center, &number.to_string(), size * 0.6, TEXT);
     }
+}
+
+/// Center visible ink, not the surrounding system font line metrics.
+fn centered_glyph(ui: &Ui, center: Pos2, glyph: &str, size: f32, color: Color32) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(glyph.to_owned(), font(size), color);
+    if galley.mesh_bounds.is_finite() {
+        let origin = center - galley.mesh_bounds.center().to_vec2();
+        ui.painter().galley(origin, galley, color);
+    }
+}
+
+/// Page icons keep their aspect ratio in the list, details and page strip.
+pub(crate) fn paint_page_picture(
+    painter: &egui::Painter,
+    picture: &TextureHandle,
+    center: Pos2,
+    size: f32,
+    color: Color32,
+) {
+    let pixels = picture.size_vec2();
+    let fitted = pixels * (size / pixels.max_elem().max(1.0));
+    let area = Rect::from_center_size(center, fitted);
+    let whole = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+    painter.image(picture.id(), area, whole, color);
 }
 
 /// The picture at `path` as a texture. Both windows ask every frame, so it
@@ -1974,13 +1992,7 @@ pub(crate) fn icon_button(ui: &mut Ui, rect: Rect, glyph: &str, enabled: bool) -
     } else {
         TEXT_DIM
     };
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        glyph,
-        font(14.0),
-        color,
-    );
+    centered_glyph(ui, rect.center(), glyph, 14.0, color);
     resp
 }
 
@@ -2079,6 +2091,59 @@ fn combo(ui: &mut Ui, rect: Rect, id: &str, selected: &str, items: impl FnOnce(&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_controls_center_visible_glyphs_and_preserve_picture_aspect_ratio() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            ctx.set_pixels_per_point(scale);
+            let center = pos2(100.0, 100.0);
+            let texture = ctx.load_texture(
+                "wide-page-icon",
+                ColorImage::filled([40, 20], Color32::WHITE),
+                TextureOptions::LINEAR,
+            );
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for glyph in [
+                    icon::LIST,
+                    icon::CARET_RIGHT,
+                    icon::CARET_DOWN,
+                    icon::GEAR,
+                    "1",
+                    "10",
+                    "100",
+                ] {
+                    centered_glyph(ui, center, glyph, 15.0, TEXT);
+                }
+                paint_page_picture(ui.painter(), &texture, center, 20.0, Color32::WHITE);
+            });
+            output.textures_delta.clear();
+            let mut glyphs = 0;
+            let mut pictures = 0;
+            for shape in output.shapes {
+                match shape.shape {
+                    egui::Shape::Text(text) => {
+                        let ink = text.galley.mesh_bounds.translate(text.pos.to_vec2());
+                        assert!(
+                            (ink.center() - center).length() < 0.01,
+                            "scale {scale}: {ink:?}"
+                        );
+                        glyphs += 1;
+                    }
+                    egui::Shape::Mesh(mesh) if mesh.texture_id == texture.id() => {
+                        let bounds = mesh.calc_bounds();
+                        assert_eq!(bounds.center(), center);
+                        assert_eq!(bounds.size(), vec2(20.0, 10.0));
+                        pictures += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(glyphs, 7);
+            assert_eq!(pictures, 1);
+        }
+    }
 
     #[test]
     fn right_click_selects_the_page_and_delete_requires_confirmation() {
