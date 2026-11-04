@@ -35,7 +35,12 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 - [ ] Key title fonts: font family, bold, italic, underline. There is one font
       now.
-- [ ] Animated keys: GIF and video. Only the first frame of a GIF shows now.
+- [x] Animated keys: GIF.
+      Done: GIF, animated WebP and APNG key images play with their own
+      delays, within frame, size and rate limits; a broken file shows a
+      warning on the key.
+- [ ] Animated keys: video. Needs a decoder; the options are in
+      docs/clean-room/2026-11-04-animated-keys.md.
 - [ ] Wallpaper across all keys.
 
 ## Plugin SDK
