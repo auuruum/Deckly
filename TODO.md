@@ -33,8 +33,16 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Key look
 
-- [ ] Key title fonts: font family, bold, italic, underline. There is one font
-      now.
+- [x] Key title fonts: font family, bold, italic, underline.
+      Done: the title popup and Preferences > Style choose any installed
+      family (type a letter to jump) with bold, italic and underline. A
+      missing font draws in the default one; imports list missing fonts.
+- [ ] Fix the font menu (found while testing title fonts):
+      - It has no scroll bar.
+      - Type-to-jump is unreliable: scrolled past "n" with the list showing
+        "a b c i j", typing "n" does not jump to the families starting with
+        "n". It only works once an "n" family is already visible (scroll to
+        "m", see "n", then type "n").
 - [x] Animated keys: GIF.
       Done: GIF, animated WebP and APNG key images play with their own
       delays, within frame, size and rate limits; a broken file shows a

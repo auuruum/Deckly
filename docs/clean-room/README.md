@@ -39,6 +39,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-11-02 | [Keys while the computer is locked](2026-11-02-lock-keys.md) | Which actions run on the lock screen, fail-open choice, lock detection per system and what is unverified |
 | 2026-11-02 | [Profiles by active window](2026-11-02-active-window-profiles.md) | Rules on profiles, going back and manual switches, what names each system gives an application, what is unverified |
 | 2026-11-04 | [Animated keys](2026-11-04-animated-keys.md) | GIF, WebP and APNG playback, limits, wakeups, video options, what is unverified |
+| 2026-11-04 | [Key title fonts](2026-11-04-title-fonts.md) | Font family, bold, italic and underline, system fonts and fallbacks, official profile fields, what is unverified |
 
 ## Open questions
 

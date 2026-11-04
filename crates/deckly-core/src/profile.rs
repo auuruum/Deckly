@@ -224,7 +224,7 @@ impl ActionDelays {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TitleStyle {
     pub show: bool,
@@ -232,14 +232,46 @@ pub struct TitleStyle {
     /// Font size in points at the 72 px key size; scaled for larger keys.
     pub size: u8,
     pub align: TitleAlign,
+    /// Font family as the system names it. Empty is Deckly's default font;
+    /// a family that is not installed is drawn with it too.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub font: String,
+    /// Titles were always bold before the font options existed, so bold is
+    /// the default and old profiles look the same.
+    #[serde(skip_serializing_if = "is_true")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub underline: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl TitleStyle {
     pub const MIN_SIZE: u8 = 6;
     pub const MAX_SIZE: u8 = 40;
+    pub const MAX_FONT_CHARS: usize = 64;
 
     pub fn sanitize(&mut self) {
         self.size = self.size.clamp(Self::MIN_SIZE, Self::MAX_SIZE);
+        let font = self.font.trim();
+        if font.len() != self.font.len()
+            || font.chars().count() > Self::MAX_FONT_CHARS
+            || font.chars().any(char::is_control)
+        {
+            self.font = font
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(Self::MAX_FONT_CHARS)
+                .collect();
+        }
     }
 }
 
@@ -250,6 +282,10 @@ impl Default for TitleStyle {
             color: [0xFF, 0xFF, 0xFF],
             size: 12,
             align: TitleAlign::Bottom,
+            font: String::new(),
+            bold: true,
+            italic: false,
+            underline: false,
         }
     }
 }
@@ -1053,11 +1089,59 @@ mod tests {
         let keys = &p.pages[0].keys;
         assert_eq!(keys[&0].title_style, None);
         assert_eq!(
-            keys[&1].title_style.map(|s| s.size),
+            keys[&1].title_style.as_ref().map(|s| s.size),
             Some(TitleStyle::MAX_SIZE)
         );
         assert_eq!(keys[&2].title_style, None);
         assert!(!p.to_json().unwrap().contains("\"title_style\": null"));
+    }
+
+    #[test]
+    fn title_styles_without_font_options_keep_their_look() {
+        let text = r#"{"show":false,"color":[1,2,3],"size":20,"align":"top"}"#;
+        let style: TitleStyle = serde_json::from_str(text).unwrap();
+        assert_eq!(style.font, "");
+        assert!(style.bold);
+        assert!(!style.italic && !style.underline);
+        // Untouched font options are not written, so the file is unchanged.
+        let back: serde_json::Value = serde_json::to_value(&style).unwrap();
+        assert_eq!(
+            back,
+            serde_json::from_str::<serde_json::Value>(text).unwrap()
+        );
+    }
+
+    #[test]
+    fn font_options_round_trip() {
+        let mut p = Profile::new("Fonts", DeviceKind::Mk2);
+        let mut key = KeyConfig::new("a", serde_json::json!({}));
+        key.title_style = Some(TitleStyle {
+            font: "DejaVu Serif".into(),
+            bold: false,
+            italic: true,
+            underline: true,
+            ..TitleStyle::default()
+        });
+        p.pages[0].keys.insert(0, key);
+        let back = Profile::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn font_names_are_trimmed_and_limited() {
+        let long = "F".repeat(TitleStyle::MAX_FONT_CHARS + 10);
+        let mut style = TitleStyle {
+            font: format!("  {long}\n"),
+            ..TitleStyle::default()
+        };
+        style.sanitize();
+        assert_eq!(style.font, "F".repeat(TitleStyle::MAX_FONT_CHARS));
+        style.font = " Noto\u{7}Sans ".into();
+        style.sanitize();
+        assert_eq!(style.font, "NotoSans");
+        style.font = "Noto Sans".into();
+        style.sanitize();
+        assert_eq!(style.font, "Noto Sans");
     }
 
     fn folder_key(id: &str) -> KeyConfig {

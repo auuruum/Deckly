@@ -726,7 +726,9 @@ pub fn commit(
              Set them up again in each plugin.",
         ));
     }
-    outcome.sections.extend(report_sections(&report));
+    outcome
+        .sections
+        .extend(report_sections(&report, crate::fonts::installed));
     outcome.sections.sort_by_key(|section| section.tone);
     outcome
 }
@@ -792,6 +794,10 @@ fn merge_report(into: &mut Report, from: &Report) {
     into.state_variants += from.state_variants;
     into.hotkeys_changed += from.hotkeys_changed;
     into.missing_images += from.missing_images;
+    into.outlines += from.outlines;
+    for (family, n) in &from.fonts {
+        *into.fonts.entry(family.clone()).or_default() += n;
+    }
     for (id, n) in &from.unsupported {
         *into.unsupported.entry(id.clone()).or_default() += n;
     }
@@ -858,8 +864,26 @@ fn to_install(
     list
 }
 
-fn report_sections(report: &Report) -> Vec<Section> {
+/// `installed` tells whether this computer has a font family.
+fn report_sections(report: &Report, installed: impl Fn(&str) -> bool) -> Vec<Section> {
     let mut sections = Vec::new();
+    let fonts: Vec<(String, usize)> = report
+        .fonts
+        .iter()
+        .filter(|(family, _)| !installed(family))
+        .map(|(family, n)| (family.clone(), *n))
+        .collect();
+    if !fonts.is_empty() {
+        let title = count(fonts.len(), "font") + " not installed here";
+        sections.push(Section {
+            names: fonts,
+            ..Section::new(
+                Tone::Todo,
+                title,
+                "Their titles use the default font until the font is installed.",
+            )
+        });
+    }
     if !report.unsupported.is_empty() {
         let title = count(report.unsupported.len(), "official action") + " not in Deckly yet";
         sections.push(Section {
@@ -891,6 +915,11 @@ fn report_sections(report: &Report) -> Vec<Section> {
             report.missing_images,
             "key picture",
             "missing from the source.",
+        ),
+        (
+            report.outlines,
+            "title",
+            "set an outline thickness; Deckly draws its own outline.",
         ),
     ];
     let lines: Vec<String> = notes
@@ -1349,6 +1378,28 @@ mod tests {
         assert_eq!(done.sections[0].tone, Tone::Problem);
         assert_eq!(done.sections[0].lines, ["Alpha: plugins are not available"]);
         assert_eq!(done.sections[1].names, [("Beta".to_owned(), 0)]);
+    }
+
+    #[test]
+    fn the_report_names_fonts_this_computer_lacks_and_outlines() {
+        let mut report = Report::default();
+        report.fonts.insert("Verdana".into(), 3);
+        report.fonts.insert("DejaVu Sans".into(), 1);
+        report.outlines = 2;
+        let sections = report_sections(&report, |family| family == "DejaVu Sans");
+        assert_eq!(sections[0].title, "1 font not installed here");
+        assert_eq!(sections[0].tone, Tone::Todo);
+        assert_eq!(sections[0].names, [("Verdana".to_owned(), 3)]);
+        let notes = sections.last().unwrap();
+        assert_eq!(
+            notes.lines,
+            ["2 titles set an outline thickness; Deckly draws its own outline."]
+        );
+        assert!(
+            report_sections(&report, |_| true)
+                .iter()
+                .all(|s| !s.title.contains("font"))
+        );
     }
 
     #[test]

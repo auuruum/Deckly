@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Plugin images are decoded at the largest key size used today.
@@ -924,21 +924,10 @@ pub fn decode_plugin_image(data: &str, dir: &Path) -> Result<RgbaImage, String> 
     }
 }
 
-fn fonts() -> Arc<resvg::usvg::fontdb::Database> {
-    static FONTS: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
-    FONTS
-        .get_or_init(|| {
-            let mut db = resvg::usvg::fontdb::Database::new();
-            db.load_system_fonts();
-            Arc::new(db)
-        })
-        .clone()
-}
-
 fn render_svg(bytes: &[u8]) -> Result<RgbaImage, String> {
     use resvg::{tiny_skia, usvg};
     let options = usvg::Options {
-        fontdb: fonts(),
+        fontdb: crate::fonts::system(),
         ..Default::default()
     };
     let tree = usvg::Tree::from_data(bytes, &options).map_err(|e| e.to_string())?;

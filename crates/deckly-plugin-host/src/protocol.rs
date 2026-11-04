@@ -231,6 +231,32 @@ fn device_json(d: &DeviceInfo) -> Value {
     })
 }
 
+/// How a key's title is drawn, as `titleParametersDidChange` reports it.
+pub struct TitleParameters<'a> {
+    /// Empty is the host's default font.
+    pub family: &'a str,
+    pub size: u8,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub show: bool,
+    /// `top`, `middle` or `bottom`.
+    pub align: &'a str,
+    pub color: [u8; 3],
+}
+
+impl TitleParameters<'_> {
+    /// The SDK's names for the four styles.
+    fn style(&self) -> &'static str {
+        match (self.bold, self.italic) {
+            (false, false) => "Regular",
+            (true, false) => "Bold",
+            (false, true) => "Italic",
+            (true, true) => "Bold Italic",
+        }
+    }
+}
+
 /// One placed action as events describe it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
@@ -285,20 +311,21 @@ impl Instance {
         .to_string()
     }
 
-    pub fn title_parameters(&self, title: &str, show: bool, size: u8, align: &str) -> String {
+    pub fn title_parameters(&self, title: &str, params: &TitleParameters<'_>) -> String {
         let mut payload = self.payload();
         if let Some(map) = payload.as_object_mut() {
             map.insert("title".into(), title.into());
+            let [r, g, b] = params.color;
             map.insert(
                 "titleParameters".into(),
                 json!({
-                    "fontFamily": "",
-                    "fontSize": size,
-                    "fontStyle": "",
-                    "fontUnderline": false,
-                    "showTitle": show,
-                    "titleAlignment": align,
-                    "titleColor": "#ffffff",
+                    "fontFamily": params.family,
+                    "fontSize": params.size,
+                    "fontStyle": params.style(),
+                    "fontUnderline": params.underline,
+                    "showTitle": params.show,
+                    "titleAlignment": params.align,
+                    "titleColor": format!("#{r:02x}{g:02x}{b:02x}"),
                 }),
             );
         }
@@ -502,6 +529,43 @@ mod tests {
         let v: Value = serde_json::from_str(&single.event("willAppear")).unwrap();
         assert!(v["payload"].get("state").is_none());
         assert_eq!(v["payload"]["settings"], json!({}));
+    }
+
+    #[test]
+    fn title_parameters_carry_the_font() {
+        let i = Instance {
+            action: "com.a.b.act".into(),
+            context: "ctx".into(),
+            device: "dev".into(),
+            settings: json!({}),
+            column: 0,
+            row: 0,
+            state: None,
+            in_multi_action: false,
+            desired_state: None,
+        };
+        let mut params = TitleParameters {
+            family: "Noto Serif",
+            size: 14,
+            bold: true,
+            italic: true,
+            underline: true,
+            show: true,
+            align: "top",
+            color: [0xFF, 0x80, 0x00],
+        };
+        let v: Value = serde_json::from_str(&i.title_parameters("Hi", &params)).unwrap();
+        assert_eq!(v["event"], "titleParametersDidChange");
+        let p = &v["payload"]["titleParameters"];
+        assert_eq!(p["fontFamily"], "Noto Serif");
+        assert_eq!(p["fontStyle"], "Bold Italic");
+        assert_eq!(p["fontUnderline"], true);
+        assert_eq!(p["titleColor"], "#ff8000");
+        assert_eq!(v["payload"]["title"], "Hi");
+        params.bold = false;
+        params.italic = false;
+        let v: Value = serde_json::from_str(&i.title_parameters("Hi", &params)).unwrap();
+        assert_eq!(v["payload"]["titleParameters"]["fontStyle"], "Regular");
     }
 
     #[test]

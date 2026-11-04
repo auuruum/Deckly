@@ -1353,9 +1353,17 @@ fn update_shown(host: Option<&Host>, slot: &mut Option<Shown>, new: Option<Shown
                         deckly_core::TitleAlign::Middle => "middle",
                         deckly_core::TitleAlign::Bottom => "bottom",
                     };
-                    let msg =
-                        n.instance
-                            .title_parameters(&n.title, n.style.show, n.style.size, align);
+                    let params = deckly_plugin_host::TitleParameters {
+                        family: &n.style.font,
+                        size: n.style.size,
+                        bold: n.style.bold,
+                        italic: n.style.italic,
+                        underline: n.style.underline,
+                        show: n.style.show,
+                        align,
+                        color: n.style.color,
+                    };
+                    let msg = n.instance.title_parameters(&n.title, &params);
                     host.send(&n.plugin, msg);
                 }
             }
@@ -1636,7 +1644,7 @@ fn refresh(
     let mut work: Vec<(Handle, Vec<KeyView>, HashMap<String, Shown>)> = Vec::new();
     {
         let s = lock(state);
-        renderer.title_defaults = s.settings.title_style;
+        renderer.title_defaults = s.settings.title_style.clone();
         renderer.key_press = s.settings.key_press;
         for d in &s.devices {
             // A screensaver keeps its keys until the device wakes.

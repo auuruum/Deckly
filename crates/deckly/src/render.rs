@@ -6,6 +6,7 @@
 
 use crate::actions;
 use crate::animation::{self, Animation};
+use crate::fonts::{self, Face};
 use crate::plugins::{self, Mark, Overlay, PageTile};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
@@ -183,9 +184,9 @@ impl Renderer {
         let title = shown_title(key, overlay);
         if style.show
             && !title.trim().is_empty()
-            && let Some(font) = &self.title_font
+            && let Some(face) = fonts::face(&style.font, style.bold, style.italic)
         {
-            draw_title(&mut img, font, title, &style, size);
+            draw_title(&mut img, &face, title, &style, size);
         }
         if key.action == actions::PARENT_FOLDER
             && let Some(percent) = live.exit
@@ -208,7 +209,9 @@ impl Renderer {
 
     /// The title style a key is drawn with.
     pub fn title_style(&self, key: &KeyConfig) -> TitleStyle {
-        key.title_style.unwrap_or(self.title_defaults)
+        key.title_style
+            .clone()
+            .unwrap_or_else(|| self.title_defaults.clone())
     }
 
     /// Changes whenever anything that affects a key's pixels changes.
@@ -569,32 +572,10 @@ fn decode_image(path: &Path) -> Result<RgbaImage, String> {
     Ok(imageops::crop_imm(&img, (w - side) / 2, (h - side) / 2, side, side).to_image())
 }
 
+/// The default title font, bold, as titles were drawn before they had a
+/// font of their own.
 pub(crate) fn load_title_font() -> Option<FontArc> {
-    let candidates: &[&str] = if cfg!(windows) {
-        &[
-            r"C:\Windows\Fonts\segoeuib.ttf",
-            r"C:\Windows\Fonts\arialbd.ttf",
-        ]
-    } else if cfg!(target_os = "macos") {
-        &["/System/Library/Fonts/Supplemental/Arial Bold.ttf"]
-    } else {
-        &[
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-        ]
-    };
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path)
-            && let Ok(font) = FontArc::try_from_vec(bytes)
-        {
-            return Some(font);
-        }
-    }
-    // egui's bundled font is always available.
-    let defaults = eframe::egui::FontDefinitions::default();
-    let data = defaults.font_data.get("Ubuntu-Light")?;
-    FontArc::try_from_vec(data.font.to_vec()).ok()
+    fonts::face("", true, false).map(|f| f.font)
 }
 
 fn blend(img: &mut RgbaImage, x: i32, y: i32, color: [u8; 3], coverage: f32) {
@@ -690,7 +671,8 @@ fn draw_line(
     }
 }
 
-fn draw_title(img: &mut RgbaImage, font: &FontArc, title: &str, style: &TitleStyle, size: u32) {
+fn draw_title(img: &mut RgbaImage, face: &Face, title: &str, style: &TitleStyle, size: u32) {
+    let font = &face.font;
     let k = size as f32 / 72.0;
     let scale = PxScale::from(f32::from(style.size) * 1.2 * k);
     let sf = font.as_scaled(scale);
@@ -703,14 +685,165 @@ fn draw_title(img: &mut RgbaImage, font: &FontArc, title: &str, style: &TitleSty
         TitleAlign::Middle => (size as f32 - block) / 2.0,
         TitleAlign::Bottom => size as f32 - pad - block,
     };
-    let o = k.max(1.0);
+    let ink = Ink {
+        embolden: if face.embolden {
+            (scale.y / 24.0).max(0.5)
+        } else {
+            0.0
+        },
+        slant: if face.slant { SLANT } else { 0.0 },
+        underline: style.underline,
+    };
+    let o = k.max(1.0) as i32;
+    let mut mask = Coverage::new(img.width(), img.height());
     for (i, line) in lines.iter().enumerate() {
         let baseline = top + sf.ascent() + line_height * i as f32;
+        mask.clear();
+        mask.line(font, scale, line, baseline, ink);
         // A dark outline keeps titles readable on any image.
-        for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o)] {
-            draw_line(img, font, scale, line, (dx, baseline + dy), [0, 0, 0]);
+        for (dx, dy) in [(-o, 0), (o, 0), (0, -o), (0, o)] {
+            mask.blend_onto(img, dx, dy, [0, 0, 0]);
         }
-        draw_line(img, font, scale, line, (0.0, baseline), style.color);
+        mask.blend_onto(img, 0, 0, style.color);
+    }
+}
+
+/// How far a slanted title leans: horizontal pixels per pixel of height.
+const SLANT: f32 = 0.21;
+
+/// What a title adds to its font's glyphs.
+#[derive(Clone, Copy, Default)]
+struct Ink {
+    /// Extra stroke width in pixels, for a font without a bold face.
+    embolden: f32,
+    /// Shear for a font without an italic face.
+    slant: f32,
+    underline: bool,
+}
+
+/// How much of each pixel a line of text covers, so that its outline,
+/// bolder strokes and underline are drawn once each.
+struct Coverage {
+    width: u32,
+    height: u32,
+    cover: Vec<f32>,
+}
+
+impl Coverage {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            cover: vec![0.0; width as usize * height as usize],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.cover.fill(0.0);
+    }
+
+    fn put(&mut self, x: i32, y: i32, cover: f32) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let i = y as usize * self.width as usize + x as usize;
+        if let Some(v) = self.cover.get_mut(i) {
+            *v = v.max(cover.clamp(0.0, 1.0));
+        }
+    }
+
+    /// One line of text, centred across the image.
+    fn line(&mut self, font: &FontArc, scale: PxScale, line: &str, baseline: f32, ink: Ink) {
+        let sf = font.as_scaled(scale);
+        let width = line_width(font, scale, line) + ink.embolden;
+        let start = (self.width as f32 - width) / 2.0;
+        let mut x = start;
+        let mut prev = None;
+        for c in line.chars() {
+            let id = sf.glyph_id(c);
+            if let Some(p) = prev {
+                x += sf.kern(p, id);
+            }
+            let g = id.with_scale_and_position(scale, point(x, baseline));
+            if let Some(outline) = font.outline_glyph(g) {
+                let b = outline.px_bounds();
+                let (bx, by) = (b.min.x as i32, b.min.y as i32);
+                outline.draw(|gx, gy, cov| self.put(bx + gx as i32, by + gy as i32, cov));
+            }
+            x += sf.h_advance(id);
+            prev = Some(id);
+        }
+        self.embolden(ink.embolden);
+        // The shear turns around the middle of lowercase letters.
+        self.shear(ink.slant, baseline - sf.ascent() * 0.35);
+        if ink.underline {
+            let thickness = (scale.y * 0.06).max(1.0);
+            let top = baseline + (scale.y * 0.1).max(1.0);
+            let (first, last) = (start.floor() as i32, (start + width).ceil() as i32);
+            for y in top.floor() as i32..(top + thickness).ceil() as i32 {
+                let row = (y as f32 + 1.0).min(top + thickness) - (y as f32).max(top);
+                for x in first..last {
+                    let column = (x as f32 + 1.0).min(start + width) - (x as f32).max(start);
+                    self.put(x, y, row.clamp(0.0, 1.0) * column.clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+
+    /// Widens strokes to the right by `amount` pixels, in steps of at most
+    /// one pixel so that fractions stay smooth.
+    fn embolden(&mut self, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        let steps = amount.ceil().max(1.0);
+        let step = amount / steps;
+        let w = self.width as usize;
+        for _ in 0..steps as u32 {
+            for row in self.cover.chunks_mut(w.max(1)) {
+                for x in (1..row.len()).rev() {
+                    let moved = row[x] * (1.0 - step) + row[x - 1] * step;
+                    row[x] = row[x].max(moved);
+                }
+            }
+        }
+    }
+
+    /// Leans the text right by `slant` pixels per pixel above `pivot`.
+    fn shear(&mut self, slant: f32, pivot: f32) {
+        if slant == 0.0 {
+            return;
+        }
+        let w = self.width as usize;
+        let mut source = vec![0.0; w];
+        for (y, row) in self.cover.chunks_mut(w.max(1)).enumerate() {
+            let shift = (pivot - (y as f32 + 0.5)) * slant;
+            let whole = shift.floor();
+            let part = shift - whole;
+            source.copy_from_slice(row);
+            for (x, out) in row.iter_mut().enumerate() {
+                let at = |i: f32| {
+                    let i = x as f32 - whole - i;
+                    if i >= 0.0 && i < w as f32 {
+                        source[i as usize]
+                    } else {
+                        0.0
+                    }
+                };
+                *out = at(0.0) * (1.0 - part) + at(1.0) * part;
+            }
+        }
+    }
+
+    /// Paints `color` where the text is, moved by `dx`, `dy`.
+    fn blend_onto(&self, img: &mut RgbaImage, dx: i32, dy: i32, color: [u8; 3]) {
+        for (i, &cover) in self.cover.iter().enumerate() {
+            if cover > 0.0 {
+                let x = (i % self.width as usize) as i32 + dx;
+                let y = (i / self.width as usize) as i32 + dy;
+                blend(img, x, y, color, cover);
+            }
+        }
     }
 }
 
@@ -749,6 +882,98 @@ mod tests {
             r.render(Some(&key), 0, Live::default(), None).dimensions(),
             (8, 8)
         );
+    }
+
+    fn titled(style: TitleStyle) -> KeyConfig {
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.title = "Agh".into();
+        key.title_style = Some(TitleStyle {
+            align: TitleAlign::Middle,
+            ..style
+        });
+        key
+    }
+
+    fn lit(img: &RgbaImage) -> usize {
+        img.pixels().filter(|p| p.0[0] > 128).count()
+    }
+
+    #[test]
+    fn font_options_change_the_pixels_and_the_hash() {
+        let mut r = Renderer::new();
+        let plain = titled(TitleStyle::default());
+        let base = r.render(Some(&plain), 144, Live::default(), None);
+        let base_hash = r.key_hash(Some(&plain), Live::default(), None);
+        let variants = [
+            TitleStyle {
+                bold: false,
+                ..TitleStyle::default()
+            },
+            TitleStyle {
+                italic: true,
+                ..TitleStyle::default()
+            },
+            TitleStyle {
+                underline: true,
+                ..TitleStyle::default()
+            },
+        ];
+        for style in variants {
+            let key = titled(style.clone());
+            assert_ne!(r.render(Some(&key), 144, Live::default(), None), base);
+            assert_ne!(r.key_hash(Some(&key), Live::default(), None), base_hash);
+        }
+        let underlined = titled(TitleStyle {
+            underline: true,
+            ..TitleStyle::default()
+        });
+        let img = r.render(Some(&underlined), 144, Live::default(), None);
+        assert!(lit(&img) > lit(&base));
+    }
+
+    #[test]
+    fn a_missing_font_family_draws_with_the_default_font() {
+        let mut r = Renderer::new();
+        let default = titled(TitleStyle::default());
+        let missing = titled(TitleStyle {
+            font: "No Such Font Family 1234".into(),
+            ..TitleStyle::default()
+        });
+        assert_eq!(
+            r.render(Some(&missing), 72, Live::default(), None),
+            r.render(Some(&default), 72, Live::default(), None)
+        );
+        // Still a different style, so choosing the font re-renders the key.
+        assert_ne!(
+            r.key_hash(Some(&missing), Live::default(), None),
+            r.key_hash(Some(&default), Live::default(), None)
+        );
+    }
+
+    #[test]
+    fn synthetic_bold_and_slant_stay_inside_the_key() {
+        let face = fonts::face("", false, false).unwrap();
+        let synthetic = Face {
+            embolden: true,
+            slant: true,
+            ..face.clone()
+        };
+        let style = TitleStyle {
+            size: TitleStyle::MAX_SIZE,
+            underline: true,
+            ..TitleStyle::default()
+        };
+        let long = "WWWWWWWWWWWWWWWWWWWW\nW\nW\nW\nW\nW\nW";
+        for size in [8, 72, 1024] {
+            let mut plain = RgbaImage::from_pixel(size, size, EMPTY);
+            draw_title(&mut plain, &face, long, &style, size);
+            let mut bold = RgbaImage::from_pixel(size, size, EMPTY);
+            draw_title(&mut bold, &synthetic, long, &style, size);
+            assert_eq!(bold.dimensions(), (size, size));
+            if size >= 72 {
+                assert!(lit(&bold) > lit(&plain));
+            }
+        }
     }
 
     #[test]
