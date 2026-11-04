@@ -37,6 +37,12 @@ Planned features, chosen by the project owner on 2026-11-02.
       Done: the title popup and Preferences > Style choose any installed
       family (type a letter to jump) with bold, italic and underline. A
       missing font draws in the default one; imports list missing fonts.
+- [ ] Fix the font menu (found while testing title fonts):
+      - It has no scroll bar.
+      - Type-to-jump is unreliable: scrolled past "n" with the list showing
+        "a b c i j", typing "n" does not jump to the families starting with
+        "n". It only works once an "n" family is already visible (scroll to
+        "m", see "n", then type "n").
 - [ ] Animated keys: GIF and video. Only the first frame of a GIF shows now.
 - [ ] Wallpaper across all keys.
 
