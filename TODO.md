@@ -36,7 +36,9 @@ Planned features, chosen by the project owner on 2026-11-02.
 - [ ] Key title fonts: font family, bold, italic, underline. There is one font
       now.
 - [ ] Animated keys: GIF and video. Only the first frame of a GIF shows now.
-- [ ] Wallpaper across all keys.
+- [x] Wallpaper across all keys.
+      Done: the button beside the page strip spreads one picture over the
+      keys of a page or folder, gaps included; drag and zoom to place it.
 
 ## Plugin SDK
 
