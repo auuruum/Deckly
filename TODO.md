@@ -52,6 +52,11 @@ Planned features, chosen by the project owner on 2026-11-02.
 - [x] Wallpaper across all keys.
       Done: the button beside the page strip spreads one picture over the
       keys of a page or folder, gaps included; drag and zoom to place it.
+- [ ] Review the key shrink effect. The editor preview and device rendering
+      both shrink the wallpaper tile with the pressed key. Consider keeping
+      the wallpaper at full size so it stays aligned across keys while the
+      action icon shrinks. Check how this should work for custom key images,
+      especially when the background and icon are saved as one image.
 - [ ] Profile-wide wallpaper. A wallpaper is set per page or folder now. Add
       one picture on the profile that pages and folders fall back to until
       they get their own, with a way to clear it on a single page. Check in
