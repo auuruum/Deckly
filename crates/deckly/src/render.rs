@@ -5,6 +5,7 @@
 //! (at a larger size) and to the device (as a JPEG at the key size).
 
 use crate::actions;
+use crate::animation::{self, Animation};
 use crate::plugins::{self, Mark, Overlay, PageTile};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
@@ -16,6 +17,8 @@ use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 const EMPTY: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_BACKGROUND: Rgba<u8> = Rgba([0, 0, 0, 255]);
@@ -33,6 +36,8 @@ pub struct Live {
     pub pressed: bool,
     /// How far the folder's Auto Exit countdown is, in percent.
     pub exit: Option<u8>,
+    /// The frame an animated key image shows; see [`Renderer::animate`].
+    pub frame: u32,
 }
 
 impl Default for Live {
@@ -41,6 +46,50 @@ impl Default for Live {
             page: 1,
             pressed: false,
             exit: None,
+            frame: 0,
+        }
+    }
+}
+
+/// A custom picture as read from its file.
+enum Picture {
+    Still(RgbaImage),
+    Animated(Arc<Animation>),
+    /// The file is there but cannot be shown; the key shows a warning.
+    Broken,
+    /// No such file: the key shows its action's icon.
+    Missing,
+}
+
+impl Picture {
+    fn load(path: &Path) -> Self {
+        let broken = |e: String| {
+            eprintln!("deckly: cannot load key image {}: {e}", path.display());
+            if path.exists() {
+                Picture::Broken
+            } else {
+                Picture::Missing
+            }
+        };
+        if animation::may_animate(path) {
+            match animation::load(path) {
+                Ok(Some(animation)) => return Picture::Animated(animation),
+                Ok(None) => {}
+                // The first picture may still be readable.
+                Err(e) => {
+                    return decode_image(path).map_or_else(|_| broken(e), Picture::Still);
+                }
+            }
+        }
+        decode_image(path).map_or_else(broken, Picture::Still)
+    }
+
+    /// The picture to show at `frame`.
+    fn at(&self, frame: u32) -> Option<&RgbaImage> {
+        match self {
+            Picture::Still(img) => Some(img),
+            Picture::Animated(a) => a.frame(frame as usize),
+            Picture::Broken | Picture::Missing => None,
         }
     }
 }
@@ -53,7 +102,7 @@ pub struct Renderer {
     pub key_press: KeyPress,
     title_font: Option<FontArc>,
     icon_font: Option<FontArc>,
-    images: HashMap<PathBuf, Option<RgbaImage>>,
+    images: HashMap<PathBuf, Picture>,
 }
 
 impl Renderer {
@@ -70,6 +119,26 @@ impl Renderer {
     /// Forgets decoded custom images so changed files are read again.
     pub fn clear_image_cache(&mut self) {
         self.images.clear();
+        animation::clear_cache();
+    }
+
+    /// Sets the frame an animated key shows at `now` and returns when the
+    /// next one is due. Keys that do not move get frame 0 and no time.
+    pub fn animate(
+        &mut self,
+        key: Option<&KeyConfig>,
+        live: Live,
+        now: Instant,
+    ) -> (Live, Option<Instant>) {
+        let path = key.and_then(|k| k.image.as_deref());
+        match path.map(|p| self.picture(p)) {
+            Some(Picture::Animated(a)) => {
+                let (frame, next) = a.at(now.saturating_duration_since(animation::clock()));
+                let frame = u32::try_from(frame).unwrap_or(0);
+                (Live { frame, ..live }, Some(now + next))
+            }
+            _ => (Live { frame: 0, ..live }, None),
+        }
     }
 
     /// Draws a key. `overlay` is what its plugin shows, for plugin keys.
@@ -85,11 +154,15 @@ impl Renderer {
             return RgbaImage::from_pixel(size, size, EMPTY);
         };
         let style = self.title_style(key);
+        let broken = key
+            .image
+            .as_deref()
+            .is_some_and(|p| matches!(self.picture(p), Picture::Broken));
         // The user's own image wins over the plugin's.
         let picture = key
             .image
             .as_deref()
-            .and_then(|p| self.custom_image(p))
+            .and_then(|p| self.picture(p).at(live.frame))
             .map(|src| fit_image(src, size))
             .or_else(|| overlay?.image.as_ref().map(|i| fit_image(&i.img, size)))
             .or_else(|| Some(self.page_picture(overlay?.page.as_ref()?, size)));
@@ -119,7 +192,10 @@ impl Renderer {
         {
             draw_ring(&mut img, percent);
         }
-        if let Some(mark) = overlay.and_then(|o| o.mark)
+        let mark = overlay
+            .and_then(|o| o.mark)
+            .or(broken.then_some(Mark::Alert));
+        if let Some(mark) = mark
             && let Some(font) = &self.icon_font
         {
             draw_mark(&mut img, font, mark);
@@ -144,6 +220,7 @@ impl Renderer {
             key.title.hash(&mut h);
             self.title_style(key).hash(&mut h);
             key.image.hash(&mut h);
+            live.frame.hash(&mut h);
             // Multimedia icons and the switch below depend on settings.
             if key.action == actions::MULTIMEDIA {
                 actions::str_setting(&key.settings, "media").hash(&mut h);
@@ -190,17 +267,16 @@ impl Renderer {
         page_tile(icon.as_ref(), page.number, self.title_font.as_ref(), size)
     }
 
-    fn custom_image(&mut self, path: &Path) -> Option<&RgbaImage> {
+    fn picture(&mut self, path: &Path) -> &Picture {
         self.images
             .entry(path.to_owned())
-            .or_insert_with(|| match decode_image(path) {
-                Ok(img) => Some(img),
-                Err(e) => {
-                    eprintln!("deckly: cannot load key image {}: {e}", path.display());
-                    None
-                }
-            })
-            .as_ref()
+            .or_insert_with(|| Picture::load(path))
+    }
+
+    /// A picture that does not move, such as a page icon: the first frame
+    /// of an animation.
+    fn custom_image(&mut self, path: &Path) -> Option<&RgbaImage> {
+        self.picture(path).at(0)
     }
 }
 
@@ -673,6 +749,79 @@ mod tests {
             r.render(Some(&key), 0, Live::default(), None).dimensions(),
             (8, 8)
         );
+    }
+
+    #[test]
+    fn animated_keys_show_the_frame_of_the_moment() {
+        use crate::animation::testing;
+        let path = testing::temp("key.gif");
+        testing::gif(&path, 32, &[([255, 0, 0], 100), ([0, 0, 255], 100)]);
+        let mut r = Renderer::new();
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.image = Some(path.clone());
+        let start = animation::clock();
+        let (first, next) = r.animate(Some(&key), Live::default(), start);
+        assert_eq!(first.frame, 0);
+        assert_eq!(next, Some(start + std::time::Duration::from_millis(100)));
+        let later = start + std::time::Duration::from_millis(150);
+        let (second, next) = r.animate(Some(&key), Live::default(), later);
+        assert_eq!(second.frame, 1);
+        assert_eq!(next, Some(start + std::time::Duration::from_millis(200)));
+        assert_ne!(
+            r.key_hash(Some(&key), first, None),
+            r.key_hash(Some(&key), second, None)
+        );
+        let red = r.render(Some(&key), 72, first, None);
+        let blue = r.render(Some(&key), 72, second, None);
+        assert_eq!(red.get_pixel(4, 4).0, [255, 0, 0, 255]);
+        assert_eq!(blue.get_pixel(4, 4).0, [0, 0, 255, 255]);
+        for model in DeviceModel::ALL {
+            let data = r.device_image(Some(&key), second, None, model, Orientation::Standard);
+            let decoded = image::load_from_memory(&data).unwrap();
+            assert_eq!(decoded.width(), model.key_image_size);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn keys_that_do_not_move_ask_for_no_wakeups() {
+        let mut r = Renderer::new();
+        let still = KeyConfig::new(actions::HOTKEY, json!({}));
+        let live = Live {
+            frame: 7,
+            ..Live::default()
+        };
+        let now = Instant::now();
+        assert_eq!(r.animate(Some(&still), live, now), (Live::default(), None));
+        assert_eq!(r.animate(None, live, now).1, None);
+    }
+
+    #[test]
+    fn a_broken_picture_shows_a_warning() {
+        use crate::animation::testing;
+        let path = testing::temp("broken.gif");
+        std::fs::write(&path, b"GIF89a broken").unwrap();
+        let mut r = Renderer::new();
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.image = Some(path.clone());
+        let (live, next) = r.animate(Some(&key), Live::default(), Instant::now());
+        assert_eq!(next, None);
+        let img = r.render(Some(&key), 72, live, None);
+        let amber = img
+            .pixels()
+            .filter(|p| p.0[0] > 200 && p.0[1] > 140 && p.0[2] < 100)
+            .count();
+        assert!(amber > 20, "no warning sign drawn");
+        // A missing file is not broken: the action's icon, no warning.
+        key.image = Some(testing::temp("missing.gif"));
+        let img = r.render(Some(&key), 72, live, None);
+        assert_eq!(
+            img.pixels()
+                .filter(|p| p.0[0] > 200 && p.0[1] > 140 && p.0[2] < 100)
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
