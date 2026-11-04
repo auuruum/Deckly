@@ -144,8 +144,9 @@ sits at the bottom. Registry value names `auto_launch_enabled` and
 - A device's default profile is shown when the device connects. A device seen
   for the first time takes the profile it shows as its default, so a new install
   starts with the box ticked; unticking it later is kept.
-- The Style tab covers show title, position, size and colour; Deckly has one
-  title font, so font family and bold/italic/underline are not offered.
+- The Style tab covers show title, position, font family, size,
+  bold/italic/underline and colour
+  (see [2026-11-04-title-fonts.md](2026-11-04-title-fonts.md)).
   The inspector gets a button that makes a key follow the global style again.
 - The General tab shows Deckly's version, the open-at-login switch, the
   configuration folder and the unofficial notice.

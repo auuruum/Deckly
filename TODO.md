@@ -33,8 +33,10 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Key look
 
-- [ ] Key title fonts: font family, bold, italic, underline. There is one font
-      now.
+- [x] Key title fonts: font family, bold, italic, underline.
+      Done: the title popup and Preferences > Style choose any installed
+      family (type a letter to jump) with bold, italic and underline. A
+      missing font draws in the default one; imports list missing fonts.
 - [ ] Animated keys: GIF and video. Only the first frame of a GIF shows now.
 - [ ] Wallpaper across all keys.
 
