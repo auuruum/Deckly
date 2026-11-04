@@ -25,6 +25,7 @@ mod sequence;
 mod store;
 mod theme;
 mod transfer;
+mod wallpaper;
 
 fn main() -> eframe::Result {
     // Deckly runs each plugin through a copy of itself in guard mode.

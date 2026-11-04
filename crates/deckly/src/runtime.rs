@@ -18,6 +18,7 @@ use crate::store;
 use deckly_core::profile::{DEFAULT_PROFILE_NAME, MAX_FOLDER_DEPTH};
 use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, LockLook, Orientation, Page, Profile, Settings, TitleStyle,
+    Wallpaper,
 };
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
 use deckly_plugin_host::{Host, Instance, Status, protocol};
@@ -1616,6 +1617,15 @@ fn member_views(
     views
 }
 
+/// What one device shows: its keys, the plugin actions inside them, and
+/// the wallpaper of its page.
+type DeviceWork = (
+    Handle,
+    Vec<KeyView>,
+    HashMap<String, Shown>,
+    Option<Wallpaper>,
+);
+
 fn refresh(
     state: &Shared,
     devices: &DeviceManager,
@@ -1624,7 +1634,7 @@ fn refresh(
     host: Option<&Host>,
 ) {
     // Collect the work under the lock, render without it.
-    let mut work: Vec<(Handle, Vec<KeyView>, HashMap<String, Shown>)> = Vec::new();
+    let mut work: Vec<DeviceWork> = Vec::new();
     {
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style;
@@ -1674,10 +1684,10 @@ fn refresh(
                     }
                 })
                 .collect();
-            work.push((d.handle, keys, members));
+            work.push((d.handle, keys, members, page.wallpaper.clone()));
         }
     }
-    for (handle, keys, members) in work {
+    for (handle, keys, members, wallpaper) in work {
         let Some(link) = links.get_mut(&handle) else {
             continue;
         };
@@ -1688,7 +1698,13 @@ fn refresh(
                 update_shown(host, slot, view.shown);
             }
             let (key, live, overlay) = (view.key, view.live, view.overlay);
-            let hash = renderer.key_hash(key.as_ref(), live, overlay.as_ref());
+            let backdrop = wallpaper.as_ref().map(|wallpaper| render::Backdrop {
+                wallpaper,
+                model: link.model,
+                // index < key_count, which is a u8.
+                index: index as u8,
+            });
+            let hash = renderer.key_hash_on(key.as_ref(), live, overlay.as_ref(), backdrop);
             let Some(slot) = link.sent.get_mut(index) else {
                 continue;
             };
@@ -1698,12 +1714,13 @@ fn refresh(
             *slot = Some(hash);
             // index < key_count, which is a u8.
             let physical = link.orientation.map_key(index as u8, count);
-            let image = renderer.device_image(
+            let image = renderer.device_image_on(
                 key.as_ref(),
                 live,
                 overlay.as_ref(),
                 link.model,
                 link.orientation,
+                backdrop,
             );
             devices.set_image(handle, physical, image);
         }

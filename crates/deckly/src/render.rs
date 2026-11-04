@@ -9,13 +9,14 @@ use crate::plugins::{self, Mark, Overlay, PageTile};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
     DeviceModel, ImageFormat, KeyConfig, KeyPress, Orientation, Rotation, TitleAlign, TitleStyle,
-    Turn,
+    Turn, Wallpaper,
 };
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const EMPTY: Rgba<u8> = Rgba([0, 0, 0, 255]);
 const ICON_BACKGROUND: Rgba<u8> = Rgba([0, 0, 0, 255]);
@@ -23,6 +24,20 @@ const ICON_COLOR: [u8; 3] = [0xE6, 0xE7, 0xEA];
 const RING_TRACK: [u8; 3] = [0x48, 0x4A, 0x50];
 const MAX_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_TITLE_LINES: usize = 5;
+/// Wallpapers are kept at most this large: more than any device panel or
+/// the editor's largest grid needs.
+pub const MAX_WALLPAPER_SIDE: u32 = 2048;
+/// Decoded wallpapers kept; more start the cache over.
+const MAX_WALLPAPERS: usize = 8;
+
+/// Where a key sits under its page's wallpaper.
+#[derive(Clone, Copy)]
+pub struct Backdrop<'a> {
+    pub wallpaper: &'a Wallpaper,
+    pub model: &'a DeviceModel,
+    /// The key, row by row as the user sees the keys.
+    pub index: u8,
+}
 
 /// What a key shows that is not in its configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -54,6 +69,7 @@ pub struct Renderer {
     title_font: Option<FontArc>,
     icon_font: Option<FontArc>,
     images: HashMap<PathBuf, Option<RgbaImage>>,
+    wallpapers: HashMap<PathBuf, Option<Arc<RgbaImage>>>,
 }
 
 impl Renderer {
@@ -64,12 +80,14 @@ impl Renderer {
             title_font: load_title_font(),
             icon_font: FontArc::try_from_slice(egui_phosphor::Variant::Regular.font_bytes()).ok(),
             images: HashMap::new(),
+            wallpapers: HashMap::new(),
         }
     }
 
     /// Forgets decoded custom images so changed files are read again.
     pub fn clear_image_cache(&mut self) {
         self.images.clear();
+        self.wallpapers.clear();
     }
 
     /// Draws a key. `overlay` is what its plugin shows, for plugin keys.
@@ -80,23 +98,44 @@ impl Renderer {
         live: Live,
         overlay: Option<&Overlay>,
     ) -> RgbaImage {
+        self.render_on(key, size, live, overlay, None)
+    }
+
+    /// Draws a key over its piece of the page's wallpaper, if it has one.
+    pub fn render_on(
+        &mut self,
+        key: Option<&KeyConfig>,
+        size: u32,
+        live: Live,
+        overlay: Option<&Overlay>,
+        backdrop: Option<Backdrop<'_>>,
+    ) -> RgbaImage {
         let size = size.clamp(8, 1024);
+        let tile = backdrop.and_then(|b| self.wallpaper_tile(b, size));
         let Some(key) = key else {
-            return RgbaImage::from_pixel(size, size, EMPTY);
+            return tile.unwrap_or_else(|| RgbaImage::from_pixel(size, size, EMPTY));
         };
         let style = self.title_style(key);
+        let under = tile.as_ref();
         // The user's own image wins over the plugin's.
         let picture = key
             .image
             .as_deref()
             .and_then(|p| self.custom_image(p))
-            .map(|src| fit_image(src, size))
-            .or_else(|| overlay?.image.as_ref().map(|i| fit_image(&i.img, size)))
+            .map(|src| fit_over(src, size, under))
+            .or_else(|| {
+                overlay?
+                    .image
+                    .as_ref()
+                    .map(|i| fit_over(&i.img, size, under))
+            })
             .or_else(|| Some(self.page_picture(overlay?.page.as_ref()?, size)));
         let mut img = match picture {
             Some(img) => img,
             None => {
-                let mut img = RgbaImage::from_pixel(size, size, ICON_BACKGROUND);
+                let mut img = tile
+                    .clone()
+                    .unwrap_or_else(|| RgbaImage::from_pixel(size, size, ICON_BACKGROUND));
                 if key.action == actions::PAGE_INDICATOR {
                     if let Some(font) = &self.title_font {
                         draw_number(&mut img, font, live.page);
@@ -137,7 +176,24 @@ impl Renderer {
 
     /// Changes whenever anything that affects a key's pixels changes.
     pub fn key_hash(&self, key: Option<&KeyConfig>, live: Live, overlay: Option<&Overlay>) -> u64 {
+        self.key_hash_on(key, live, overlay, None)
+    }
+
+    /// [`Self::key_hash`] for a key over a wallpaper.
+    pub fn key_hash_on(
+        &self,
+        key: Option<&KeyConfig>,
+        live: Live,
+        overlay: Option<&Overlay>,
+        backdrop: Option<Backdrop<'_>>,
+    ) -> u64 {
         let mut h = DefaultHasher::new();
+        if let Some(b) = backdrop {
+            b.wallpaper.hash(&mut h);
+            (b.model.columns, b.model.rows, b.model.key_image_size).hash(&mut h);
+            b.model.panel_size().hash(&mut h);
+            b.index.hash(&mut h);
+        }
         if let Some(key) = key {
             overlay.hash(&mut h);
             key.action.hash(&mut h);
@@ -169,6 +225,7 @@ impl Renderer {
 
     /// Key image for the device: its size, the model's and the user's
     /// orientation, and the model's file format.
+    #[cfg(test)]
     pub fn device_image(
         &mut self,
         key: Option<&KeyConfig>,
@@ -177,8 +234,49 @@ impl Renderer {
         model: &DeviceModel,
         orientation: Orientation,
     ) -> Vec<u8> {
-        let img = self.render(key, model.key_image_size, live, overlay);
+        self.device_image_on(key, live, overlay, model, orientation, None)
+    }
+
+    /// [`Self::device_image`] for a key over a wallpaper.
+    pub fn device_image_on(
+        &mut self,
+        key: Option<&KeyConfig>,
+        live: Live,
+        overlay: Option<&Overlay>,
+        model: &DeviceModel,
+        orientation: Orientation,
+        backdrop: Option<Backdrop<'_>>,
+    ) -> Vec<u8> {
+        let img = self.render_on(key, model.key_image_size, live, overlay, backdrop);
         encode_key(img, model, orientation)
+    }
+
+    /// A page's wallpaper picture, decoded once.
+    pub fn wallpaper(&mut self, path: &Path) -> Option<Arc<RgbaImage>> {
+        if !self.wallpapers.contains_key(path) && self.wallpapers.len() >= MAX_WALLPAPERS {
+            self.wallpapers.clear();
+        }
+        self.wallpapers
+            .entry(path.to_owned())
+            .or_insert_with(|| match decode_wallpaper(path) {
+                Ok(img) => Some(Arc::new(img)),
+                Err(e) => {
+                    eprintln!("deckly: cannot load wallpaper {}: {e}", path.display());
+                    None
+                }
+            })
+            .clone()
+    }
+
+    fn wallpaper_tile(&mut self, backdrop: Backdrop<'_>, size: u32) -> Option<RgbaImage> {
+        let src = self.wallpaper(&backdrop.wallpaper.image)?;
+        wallpaper_tile(
+            &src,
+            backdrop.wallpaper,
+            backdrop.model,
+            backdrop.index,
+            size,
+        )
     }
 
     fn page_picture(&mut self, page: &PageTile, size: u32) -> RgbaImage {
@@ -218,6 +316,135 @@ fn fit_image(src: &RgbaImage, size: u32) -> RgbaImage {
     }
     // Lanczos keeps fine edges sharp when a large picture shrinks to a key.
     imageops::resize(&flat, size, size, imageops::FilterType::Lanczos3)
+}
+
+/// [`fit_image`] over a background: transparent parts of the picture show
+/// `under` instead of black.
+fn fit_over(src: &RgbaImage, size: u32, under: Option<&RgbaImage>) -> RgbaImage {
+    let Some(under) = under.filter(|u| u.dimensions() == (size, size)) else {
+        return fit_image(src, size);
+    };
+    // Premultiplied, so hidden colours of transparent pixels do not bleed.
+    let mut premultiplied = src.clone();
+    for px in premultiplied.pixels_mut() {
+        let a = u32::from(px.0[3]);
+        for c in &mut px.0[..3] {
+            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+    let scaled = imageops::resize(&premultiplied, size, size, imageops::FilterType::Lanczos3);
+    let mut out = under.clone();
+    for (o, s) in out.pixels_mut().zip(scaled.pixels()) {
+        let keep = 255 - u32::from(s.0[3]);
+        for (dst, &src) in o.0[..3].iter_mut().zip(&s.0[..3]) {
+            let under = (u32::from(*dst) * keep + 127) / 255;
+            *dst = (u32::from(src) + under).min(255) as u8;
+        }
+        o.0[3] = 255;
+    }
+    out
+}
+
+/// The part of a picture of `src` pixels a wallpaper shows across a panel
+/// of `panel` pixels: left, top, width and height, in picture pixels.
+pub fn wallpaper_view(src: (u32, u32), wallpaper: &Wallpaper, panel: (u32, u32)) -> [f32; 4] {
+    let (sw, sh) = (src.0.max(1) as f32, src.1.max(1) as f32);
+    let (pw, ph) = (panel.0.max(1) as f32, panel.1.max(1) as f32);
+    // At the lowest zoom the picture just covers the panel.
+    let cover = (pw / sw).max(ph / sh);
+    let zoom = f32::from(
+        wallpaper
+            .zoom
+            .clamp(Wallpaper::MIN_ZOOM, Wallpaper::MAX_ZOOM),
+    ) / 100.0;
+    let scale = cover * zoom;
+    let (w, h) = ((pw / scale).min(sw), (ph / scale).min(sh));
+    let end = f32::from(Wallpaper::END);
+    let cx = f32::from(wallpaper.x.min(Wallpaper::END)) / end * sw;
+    let cy = f32::from(wallpaper.y.min(Wallpaper::END)) / end * sh;
+    let left = (cx - w / 2.0).clamp(0.0, sw - w);
+    let top = (cy - h / 2.0).clamp(0.0, sh - h);
+    [left, top, w, h]
+}
+
+/// One key's piece of a wallpaper at `size` pixels. The panel includes the
+/// gaps between keys, so the picture runs on behind the frame between them.
+pub fn wallpaper_tile(
+    src: &RgbaImage,
+    wallpaper: &Wallpaper,
+    model: &DeviceModel,
+    index: u8,
+    size: u32,
+) -> Option<RgbaImage> {
+    let rect = *model.key_rects().get(usize::from(index))?;
+    let panel = model.panel_size();
+    let [left, top, w, h] = wallpaper_view(src.dimensions(), wallpaper, panel);
+    let (fx, fy) = (w / panel.0.max(1) as f32, h / panel.1.max(1) as f32);
+    let (x0, y0) = (left + rect.x as f32 * fx, top + rect.y as f32 * fy);
+    let (x1, y1) = (x0 + rect.size as f32 * fx, y0 + rect.size as f32 * fy);
+    let (sw, sh) = src.dimensions();
+    let (cx, cy) = (x0.floor() as u32, y0.floor() as u32);
+    if cx >= sw || cy >= sh {
+        return None;
+    }
+    let cw = (x1.ceil() as u32).min(sw).saturating_sub(cx).max(1);
+    let ch = (y1.ceil() as u32).min(sh).saturating_sub(cy).max(1);
+    let piece = imageops::crop_imm(src, cx, cy, cw, ch).to_image();
+    let size = size.clamp(1, 1024);
+    Some(imageops::resize(
+        &piece,
+        size,
+        size,
+        imageops::FilterType::Triangle,
+    ))
+}
+
+/// The whole panel of a wallpaper at `width` pixels, for the editor.
+pub fn wallpaper_panel(
+    src: &RgbaImage,
+    wallpaper: &Wallpaper,
+    model: &DeviceModel,
+    width: u32,
+) -> RgbaImage {
+    let panel = model.panel_size();
+    let width = width.clamp(1, MAX_WALLPAPER_SIDE);
+    let height = ((width as f32 * panel.1 as f32 / panel.0.max(1) as f32).round() as u32).max(1);
+    let [left, top, w, h] = wallpaper_view(src.dimensions(), wallpaper, panel);
+    let (cx, cy) = (left.floor() as u32, top.floor() as u32);
+    let cw = ((left + w).ceil() as u32)
+        .min(src.width())
+        .saturating_sub(cx)
+        .max(1);
+    let ch = ((top + h).ceil() as u32)
+        .min(src.height())
+        .saturating_sub(cy)
+        .max(1);
+    let piece = imageops::crop_imm(src, cx, cy, cw, ch).to_image();
+    imageops::resize(&piece, width, height, imageops::FilterType::Triangle)
+}
+
+/// Reads a wallpaper and keeps it no larger than [`MAX_WALLPAPER_SIDE`].
+pub fn decode_wallpaper(path: &Path) -> Result<RgbaImage, String> {
+    let img = plugins::decode_picture(path)?;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err("the picture is empty".into());
+    }
+    let longest = w.max(h);
+    if longest <= MAX_WALLPAPER_SIDE {
+        return Ok(img);
+    }
+    let scale = MAX_WALLPAPER_SIDE as f32 / longest as f32;
+    let (nw, nh) = (
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    );
+    Ok(imageops::resize(
+        &img,
+        nw,
+        nh,
+        imageops::FilterType::Triangle,
+    ))
 }
 
 /// A Go to Page key's picture: a white tile in the middle of the key with
@@ -673,6 +900,188 @@ mod tests {
             r.render(Some(&key), 0, Live::default(), None).dimensions(),
             (8, 8)
         );
+    }
+
+    /// A picture whose red channel counts across and green down.
+    fn ramp(w: u32, h: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            Rgba([
+                (x * 255 / w.max(2)) as u8,
+                (y * 255 / h.max(2)) as u8,
+                0,
+                255,
+            ])
+        })
+    }
+
+    #[test]
+    fn the_wallpaper_view_covers_the_panel_and_stays_inside_the_picture() {
+        let mut wall = Wallpaper::new("w.png".into());
+        // A square picture on a wide panel: full width, a band of height.
+        let [l, t, w, h] = wallpaper_view((1000, 1000), &wall, (480, 272));
+        assert_eq!((l, w), (0.0, 1000.0));
+        assert!((h - 1000.0 * 272.0 / 480.0).abs() < 0.01);
+        assert!((t - (1000.0 - h) / 2.0).abs() < 0.01);
+        wall.zoom = 200;
+        let [_, _, w2, h2] = wallpaper_view((1000, 1000), &wall, (480, 272));
+        assert!((w2 - 500.0).abs() < 0.01 && (h2 - h / 2.0).abs() < 0.01);
+        // Far corners stop at the picture's edges.
+        wall.x = 0;
+        wall.y = Wallpaper::END;
+        let [l, t, w, h] = wallpaper_view((1000, 1000), &wall, (480, 272));
+        assert_eq!(l, 0.0);
+        assert!((t + h - 1000.0).abs() < 0.01 && w <= 1000.0);
+        // Out-of-range values and empty sizes do not escape either.
+        let wild = Wallpaper {
+            zoom: 0,
+            x: u16::MAX,
+            y: u16::MAX,
+            ..Wallpaper::new("w.png".into())
+        };
+        let [l, t, w, h] = wallpaper_view((0, 0), &wild, (0, 0));
+        assert!(l >= 0.0 && t >= 0.0 && l + w <= 1.0 && t + h <= 1.0);
+    }
+
+    #[test]
+    fn wallpapers_split_across_the_keys_of_every_model() {
+        let src = ramp(960, 540);
+        let wall = Wallpaper::new("w.png".into());
+        for model in DeviceModel::ALL {
+            let count = model.key_count();
+            let tiles: Vec<RgbaImage> = (0..count)
+                .map(|i| wallpaper_tile(&src, &wall, model, i, 72).unwrap())
+                .collect();
+            assert!(
+                tiles.iter().all(|t| t.dimensions() == (72, 72)),
+                "{}",
+                model.name
+            );
+            assert!(wallpaper_tile(&src, &wall, model, count, 72).is_none());
+            let at = |i: u8| tiles[usize::from(i)].get_pixel(36, 36).0;
+            let cols = model.columns;
+            for i in 0..count {
+                // Left to right the picture runs on; top to bottom too.
+                if i % cols + 1 < cols {
+                    assert!(at(i)[0] < at(i + 1)[0], "{} key {i}", model.name);
+                }
+                if i + cols < count && model.rows > 1 {
+                    assert!(at(i)[1] < at(i + cols)[1], "{} key {i}", model.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keys_draw_over_their_piece_of_the_wallpaper() {
+        let path = std::env::temp_dir().join(format!("deckly-wall-{}.png", uuid::Uuid::new_v4()));
+        RgbaImage::from_pixel(400, 300, Rgba([20, 160, 90, 255]))
+            .save(&path)
+            .unwrap();
+        let wall = Wallpaper::new(path.clone());
+        let model = DeviceModel::of(deckly_core::DeviceKind::Mk2);
+        let backdrop = |index| {
+            Some(Backdrop {
+                wallpaper: &wall,
+                model,
+                index,
+            })
+        };
+        let mut r = Renderer::new();
+        // Empty keys and action icons show it; the title still draws.
+        let empty = r.render_on(None, 72, Live::default(), None, backdrop(0));
+        assert_eq!(empty.get_pixel(2, 2).0, [20, 160, 90, 255]);
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.title = "Hi".into();
+        let drawn = r.render_on(Some(&key), 72, Live::default(), None, backdrop(1));
+        assert_eq!(drawn.get_pixel(2, 2).0, [20, 160, 90, 255]);
+        assert_ne!(drawn, empty);
+        // A see-through key picture lets it through; an opaque one covers it.
+        let half = std::env::temp_dir().join(format!("deckly-half-{}.png", uuid::Uuid::new_v4()));
+        let mut picture = RgbaImage::from_pixel(64, 64, Rgba([255, 255, 255, 0]));
+        for y in 0..64 {
+            for x in 32..64 {
+                picture.put_pixel(x, y, Rgba([200, 0, 0, 255]));
+            }
+        }
+        picture.save(&half).unwrap();
+        key.title.clear();
+        key.image = Some(half.clone());
+        let mixed = r.render_on(Some(&key), 72, Live::default(), None, backdrop(2));
+        assert_eq!(mixed.get_pixel(4, 36).0, [20, 160, 90, 255]);
+        assert_eq!(mixed.get_pixel(68, 36).0, [200, 0, 0, 255]);
+        // The piece, the page's wallpaper and its place all change the hash.
+        let plain = r.key_hash(Some(&key), Live::default(), None);
+        let first = r.key_hash_on(Some(&key), Live::default(), None, backdrop(2));
+        let other = r.key_hash_on(Some(&key), Live::default(), None, backdrop(3));
+        assert!(plain != first && first != other);
+        let moved = Wallpaper {
+            x: 0,
+            ..wall.clone()
+        };
+        let moved_hash = r.key_hash_on(
+            Some(&key),
+            Live::default(),
+            None,
+            Some(Backdrop {
+                wallpaper: &moved,
+                model,
+                index: 2,
+            }),
+        );
+        assert_ne!(moved_hash, first);
+        // Device images keep their size and format.
+        let data = r.device_image_on(
+            None,
+            Live::default(),
+            None,
+            model,
+            Orientation::Standard,
+            backdrop(14),
+        );
+        let decoded = image::load_from_memory(&data).unwrap();
+        assert_eq!(decoded.width(), model.key_image_size);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(half);
+    }
+
+    #[test]
+    fn a_missing_wallpaper_leaves_the_keys_as_they_were() {
+        let wall = Wallpaper::new("does/not/exist.png".into());
+        let model = DeviceModel::of(deckly_core::DeviceKind::Mk2);
+        let backdrop = Some(Backdrop {
+            wallpaper: &wall,
+            model,
+            index: 0,
+        });
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::HOTKEY, json!({}));
+        assert_eq!(
+            r.render_on(Some(&key), 72, Live::default(), None, backdrop),
+            r.render(Some(&key), 72, Live::default(), None)
+        );
+        assert_eq!(
+            r.render_on(None, 72, Live::default(), None, backdrop),
+            r.render(None, 72, Live::default(), None)
+        );
+    }
+
+    #[test]
+    fn large_wallpapers_are_kept_small() {
+        let path = std::env::temp_dir().join(format!("deckly-big-{}.png", uuid::Uuid::new_v4()));
+        RgbaImage::from_pixel(4000, 100, Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        let img = decode_wallpaper(&path).unwrap();
+        assert_eq!(img.width(), MAX_WALLPAPER_SIDE);
+        assert_eq!(img.height(), 51);
+        let panel = wallpaper_panel(
+            &img,
+            &Wallpaper::new(path.clone()),
+            &DeviceModel::ALL[0],
+            380,
+        );
+        assert_eq!(panel.width(), 380);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

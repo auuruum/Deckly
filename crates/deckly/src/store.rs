@@ -133,7 +133,22 @@ pub fn save_key_image(profile: &str, image: &RgbaImage) -> Result<PathBuf, Strin
     write_key_image(&root, profile, image)
 }
 
+/// Page wallpapers are kept the same way, larger.
+pub fn save_wallpaper(profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    let root = config_dir().ok_or("no configuration folder")?;
+    write_png(&root, profile, image, crate::render::MAX_WALLPAPER_SIDE)
+}
+
 fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    write_png(root, profile, image, 512)
+}
+
+fn write_png(
+    root: &Path,
+    profile: &str,
+    image: &RgbaImage,
+    max_side: u32,
+) -> Result<PathBuf, String> {
     if profile.is_empty()
         || !profile
             .chars()
@@ -142,7 +157,7 @@ fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<Path
     {
         return Err("invalid profile id".into());
     }
-    if image.width() == 0 || image.height() == 0 || image.width().max(image.height()) > 512 {
+    if image.width() == 0 || image.height() == 0 || image.width().max(image.height()) > max_side {
         return Err("invalid key image size".into());
     }
     let dir = root.join("images").join(profile);
@@ -332,6 +347,9 @@ mod tests {
         assert!(write_key_image(&root, "", &image).is_err());
         assert!(write_key_image(&root, "safe", &RgbaImage::new(513, 1)).is_err());
         assert!(write_key_image(&root, "safe", &RgbaImage::new(0, 0)).is_err());
+        let wide = RgbaImage::new(crate::render::MAX_WALLPAPER_SIDE, 10);
+        assert!(write_png(&root, "safe", &wide, crate::render::MAX_WALLPAPER_SIDE).is_ok());
+        assert!(write_key_image(&root, "safe", &wide).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -13,10 +13,11 @@ use crate::os::tray::Command;
 use crate::os::{Hotkey, MediaKey};
 use crate::plugins::{self, KeyImage, Overlay};
 use crate::prefs::{self, Preferences};
-use crate::render::{Live, Renderer};
+use crate::render::{Backdrop, Live, Renderer};
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
+use crate::wallpaper::WallpaperEditor;
 use deckly_core::profile::{self, MAX_FOLDER_DEPTH, MAX_GROUP_ACTIONS};
 use deckly_core::{ActionDelays, AutoExit, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
 use deckly_plugin_host::{Host, Status};
@@ -131,6 +132,14 @@ impl View {
         }
     }
 
+    /// The page or folder on the canvas.
+    fn shown<'a>(&self, profile: &'a Profile) -> Option<&'a Page> {
+        match self.path.last() {
+            Some(id) => profile.folder(id),
+            None => profile.pages.get(self.page),
+        }
+    }
+
     fn keys<'a>(&self, profile: &'a mut Profile) -> Option<&'a mut BTreeMap<u8, KeyConfig>> {
         match self.path.last() {
             Some(id) => profile.folder_mut(id).map(|f| &mut f.keys),
@@ -225,6 +234,7 @@ pub struct App {
     recording_hotkey: bool,
     app_picker: Option<crate::app_picker::Picker>,
     image_editor: Option<crate::image_editor::Editor>,
+    wallpaper_editor: Option<WallpaperEditor>,
     clipboard: Option<KeyClipboard>,
     pending_paste: Option<PendingPaste>,
     pending_folder_exit_reset: Option<FolderExitReset>,
@@ -277,6 +287,7 @@ impl App {
             recording_hotkey: false,
             app_picker: None,
             image_editor: None,
+            wallpaper_editor: None,
             clipboard: None,
             pending_paste: None,
             pending_folder_exit_reset: None,
@@ -411,16 +422,17 @@ impl App {
         px: u32,
         live: Live,
         overlay: Option<&Overlay>,
+        backdrop: Option<Backdrop<'_>>,
     ) -> egui::TextureId {
         let px = px.clamp(32, 288);
-        let hash = self.renderer.key_hash(key, live, overlay);
+        let hash = self.renderer.key_hash_on(key, live, overlay, backdrop);
         if let Some(t) = self.textures.get(&(hash, px)) {
             return t.id();
         }
         if self.textures.len() > 512 {
             self.textures.clear();
         }
-        let img = self.renderer.render(key, px, live, overlay);
+        let img = self.renderer.render_on(key, px, live, overlay, backdrop);
         let color = ColorImage::from_rgba_unmultiplied([px as usize, px as usize], img.as_raw());
         let tex = ctx.load_texture(format!("key-{hash:x}-{px}"), color, TextureOptions::LINEAR);
         let id = tex.id();
@@ -1073,10 +1085,17 @@ impl App {
         if overlays.values().any(|o| o.mark.is_some()) {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
+        let wallpaper = view.shown(profile).and_then(|p| p.wallpaper.clone());
+        self.wallpaper_button(ui, &geo, profile, view);
         let Some(keys) = view.keys(profile) else {
             return;
         };
         for index in 0..model.key_count() {
+            let backdrop = wallpaper.as_ref().map(|wallpaper| Backdrop {
+                wallpaper,
+                model,
+                index,
+            });
             let (c, r) = (
                 f32::from(index % model.columns),
                 f32::from(index / model.columns),
@@ -1111,7 +1130,22 @@ impl App {
             let inner = rect.shrink(border);
             match &config {
                 Some(key) => {
-                    let tex = self.texture(ui.ctx(), Some(key), tex_px, live, overlays.get(&index));
+                    let tex = self.texture(
+                        ui.ctx(),
+                        Some(key),
+                        tex_px,
+                        live,
+                        overlays.get(&index),
+                        backdrop,
+                    );
+                    painter.add(
+                        egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
+                            .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
+                    );
+                }
+                // An empty key shows its piece of the wallpaper.
+                None if backdrop.is_some() => {
+                    let tex = self.texture(ui.ctx(), None, tex_px, live, None, backdrop);
                     painter.add(
                         egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
                             .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
@@ -1309,6 +1343,70 @@ impl App {
         }
 
         drag_preview(ui.ctx());
+    }
+
+    /// The wallpaper button at the right end of the page strip's row. It
+    /// opens the wallpaper of the page or folder on the canvas.
+    fn wallpaper_button(
+        &mut self,
+        ui: &mut Ui,
+        geo: &CanvasGeometry,
+        profile: &Profile,
+        view: &View,
+    ) {
+        let Some(page) = view.shown(profile) else {
+            return;
+        };
+        let y = geo.grid.bottom() + CanvasGeometry::PAGER_GAP * geo.scale.min(1.0);
+        let r = Rect::from_center_size(pos2(geo.grid.right() - 12.0, y), vec2(24.0, 20.0));
+        let resp = ui
+            .interact(r, ui.id().with("wallpaper"), Sense::click())
+            .on_hover_text("Wallpaper across all keys");
+        let open = self
+            .wallpaper_editor
+            .as_ref()
+            .is_some_and(|w| w.page == page.id);
+        let color = if open || page.wallpaper.is_some() || resp.hovered() {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        ui.painter().text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            icon::IMAGE_SQUARE,
+            font(15.0),
+            color,
+        );
+        if resp.clicked() {
+            self.wallpaper_editor = (!open).then(|| WallpaperEditor::new(&profile.id, &page.id));
+        }
+    }
+
+    /// The open Wallpaper window. Returns the undo group of its changes.
+    fn wallpaper_window(&mut self, ctx: &egui::Context, profile: &mut Profile) -> Option<u64> {
+        let editor = self.wallpaper_editor.as_mut()?;
+        let model = profile.model();
+        let page_id = editor.page.clone();
+        let page = (editor.profile == profile.id)
+            .then(|| {
+                let at = profile.pages.iter().position(|p| p.id == page_id);
+                match at {
+                    Some(i) => profile.pages.get_mut(i),
+                    None => profile.folder_mut(&page_id),
+                }
+            })
+            .flatten();
+        // The page went away or another profile is on the canvas.
+        let Some(page) = page else {
+            self.wallpaper_editor = None;
+            return None;
+        };
+        let group = editor.show(ctx, page, model, &mut self.renderer);
+        if group.is_none() {
+            self.wallpaper_editor = None;
+        }
+        group
     }
 
     /// Page chips under the grid: one rounded strip with the page numbers
@@ -1881,7 +1979,8 @@ impl App {
                 Some(member) => {
                     let context = plugins::member_context(page_id, index, slot, 0);
                     let overlay = runtime::lock(&self.state).overlay(&context, member);
-                    let tex = self.texture(ui.ctx(), Some(member), px, live, overlay.as_ref());
+                    let tex =
+                        self.texture(ui.ctx(), Some(member), px, live, overlay.as_ref(), None);
                     painter.add(
                         egui::epaint::RectShape::filled(
                             inner,
@@ -2020,6 +2119,11 @@ impl App {
                 (key.action == actions::PARENT_FOLDER).then(|| key.auto_exit.unwrap_or_default())
             })
         });
+        let model = profile.model();
+        let wallpaper = view
+            .shown(profile)
+            .and_then(|p| p.wallpaper.clone())
+            .filter(|_| top_level);
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;
             self.image_editor = None;
@@ -2104,12 +2208,18 @@ impl App {
             // Key preview and image controls.
             ui.vertical(|ui| {
                 ui.set_width(110.0);
+                let backdrop = wallpaper.as_ref().map(|wallpaper| Backdrop {
+                    wallpaper,
+                    model,
+                    index,
+                });
                 let tex = self.texture(
                     ui.ctx(),
                     Some(key),
                     (96.0 * ppp) as u32,
                     view.live,
                     overlay.as_ref(),
+                    backdrop,
                 );
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
                 ui.painter().add(
@@ -3081,13 +3191,15 @@ impl eframe::App for App {
 
         self.paste_confirmation(&ctx, &mut profile, &view);
         self.folder_exit_confirmation(&ctx, &mut profile, &view);
+        let wallpaper_edit = self.wallpaper_window(&ctx, &mut profile);
 
         // Write the edited copy back. Profile switches made this frame
         // already changed which profile is current; only write if it still
         // exists.
         let group = inspector_edit
             .filter(|(_, edited)| edited == &profile)
-            .map(|(id, _)| id);
+            .map(|(id, _)| id)
+            .or(wallpaper_edit);
         self.finish_edit(
             &ctx,
             &mut profile,
@@ -4390,6 +4502,7 @@ mod clipboard_tests {
             recording_hotkey: false,
             app_picker: None,
             image_editor: None,
+            wallpaper_editor: None,
             clipboard: None,
             pending_paste: None,
             pending_folder_exit_reset: None,
