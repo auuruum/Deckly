@@ -198,6 +198,9 @@ pub struct App {
     runtime: Sender<Msg>,
     renderer: Renderer,
     textures: HashMap<(u64, u32), TextureHandle>,
+    /// One texture per animated key and size, redrawn as its frames change,
+    /// with the hash of the frame it holds.
+    animated: HashMap<(u64, u32), (u64, TextureHandle)>,
     selected_device: Option<String>,
     offline_profile: Option<String>,
     selected_key: Option<u8>,
@@ -257,6 +260,7 @@ impl App {
             runtime: background.runtime.clone(),
             renderer: Renderer::new(),
             textures: HashMap::new(),
+            animated: HashMap::new(),
             selected_device: None,
             offline_profile: None,
             selected_key: None,
@@ -413,7 +417,39 @@ impl App {
         overlay: Option<&Overlay>,
     ) -> egui::TextureId {
         let px = px.clamp(32, 288);
+        let now = std::time::Instant::now();
+        let (live, next) = self.renderer.animate(key, live, now);
         let hash = self.renderer.key_hash(key, live, overlay);
+        if let Some(next) = next {
+            ctx.request_repaint_after(next.saturating_duration_since(now));
+            let slot = self
+                .renderer
+                .key_hash(key, Live { frame: 0, ..live }, overlay);
+            if let Some((shown, tex)) = self.animated.get_mut(&(slot, px)) {
+                if *shown != hash {
+                    let img = self.renderer.render(key, px, live, overlay);
+                    let size = [px as usize, px as usize];
+                    let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                    tex.set(color, TextureOptions::LINEAR);
+                    *shown = hash;
+                }
+                return tex.id();
+            }
+            if self.animated.len() > 64 {
+                self.animated.clear();
+            }
+            let img = self.renderer.render(key, px, live, overlay);
+            let color =
+                ColorImage::from_rgba_unmultiplied([px as usize, px as usize], img.as_raw());
+            let tex = ctx.load_texture(
+                format!("key-{slot:x}-{px}-animated"),
+                color,
+                TextureOptions::LINEAR,
+            );
+            let id = tex.id();
+            self.animated.insert((slot, px), (hash, tex));
+            return id;
+        }
         if let Some(t) = self.textures.get(&(hash, px)) {
             return t.id();
         }
@@ -4373,6 +4409,7 @@ mod clipboard_tests {
             runtime: background.runtime.clone(),
             renderer: Renderer::new(),
             textures: HashMap::new(),
+            animated: HashMap::new(),
             selected_device: None,
             offline_profile: None,
             selected_key: Some(0),

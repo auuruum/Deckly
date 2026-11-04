@@ -81,6 +81,8 @@ impl Original {
 
 enum Work {
     Loaded(String, RgbaImage),
+    /// A key picture that moves; it is kept as its file.
+    Animated(PathBuf),
     Saved(PathBuf),
 }
 
@@ -194,8 +196,8 @@ impl Editor {
         }
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
-                "Images (first frame)",
-                &["svg", "png", "jpg", "jpeg", "webp", "gif", "bmp"],
+                "Images",
+                &["svg", "png", "apng", "jpg", "jpeg", "webp", "gif", "bmp"],
             )
             .pick_file()
         {
@@ -206,7 +208,12 @@ impl Editor {
     }
 
     fn load(&mut self, ctx: &egui::Context, path: PathBuf) {
+        // Keys play animations; page icons and layers use the first frame.
+        let animate = !self.original.is_page();
         self.start(ctx, move || {
+            if animate && crate::animation::load(&path)?.is_some() {
+                return Ok(Work::Animated(path));
+            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().chars().take(80).collect())
@@ -215,7 +222,7 @@ impl Editor {
         });
     }
 
-    fn receive(&mut self) -> Option<PathBuf> {
+    fn receive(&mut self, ctx: &egui::Context, profile: &str) -> Option<PathBuf> {
         let receiver = self.receiver.as_ref()?;
         let result = match receiver.try_recv() {
             Ok(result) => result,
@@ -228,6 +235,13 @@ impl Editor {
         self.saving = false;
         match result {
             Ok(Work::Saved(path)) => return Some(path),
+            Ok(Work::Animated(source)) => {
+                let profile = profile.to_owned();
+                self.saving = true;
+                self.start(ctx, move || {
+                    store::save_key_animation(&profile, &source).map(Work::Saved)
+                });
+            }
             Ok(Work::Loaded(name, image)) => {
                 let mut layer = Layer::new(Content::Picture(name, Arc::new(image)));
                 if self.draft.layers.is_empty() {
@@ -299,7 +313,7 @@ impl Editor {
 
     pub fn show(&mut self, ctx: &egui::Context, profile: &str) -> Selection {
         let before = self.snapshot();
-        if let Some(path) = self.receive() {
+        if let Some(path) = self.receive(ctx, profile) {
             return Selection::Image(path);
         }
         let mut cancel = false;
