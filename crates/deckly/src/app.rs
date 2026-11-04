@@ -2042,7 +2042,7 @@ impl App {
         if key.action != actions::OPEN {
             self.app_picker = None;
         }
-        let defaults = self.renderer.title_defaults;
+        let defaults = self.renderer.title_defaults.clone();
         let def = actions::find(&key.action);
         let (overlay, plugin) = {
             let s = runtime::lock(&self.state);
@@ -2173,7 +2173,7 @@ impl App {
                                             },
                                         ),
                                 );
-                                title_style_button(ui, &mut key.title_style, defaults);
+                                title_style_button(ui, &mut key.title_style, &defaults);
                                 if top_level
                                     && key.action != actions::PARENT_FOLDER
                                     && let Some(folder_exit) = folder_exit
@@ -2958,7 +2958,7 @@ impl eframe::App for App {
         }
         let (title_style, key_press) = {
             let s = runtime::lock(&self.state);
-            (s.settings.title_style, s.settings.key_press)
+            (s.settings.title_style.clone(), s.settings.key_press)
         };
         self.renderer.title_defaults = title_style;
         self.renderer.key_press = key_press;
@@ -3307,17 +3307,17 @@ fn open_path(state: &Shared, path: &str) {
 /// position, size and colour, like the official app's. Editing makes the key
 /// keep its own style; the reset button makes it follow the global style
 /// again.
-fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: TitleStyle) {
+fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: &TitleStyle) {
     let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 24.0), Sense::click());
     let resp = resp.on_hover_text("Title style");
-    let popup = egui::Popup::from_toggle_button_response(&resp)
-        // Clicks in the colour picker's own popup must not close this one.
-        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
-        .align(egui::RectAlign::BOTTOM_END)
-        .gap(4.0)
-        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)));
-    let popup_id = popup.get_id();
-    let lit = popup.is_open() || resp.hovered();
+    // egui remembers one open popup at a time, and the font menu and the
+    // colour picker inside are popups too, so this one keeps its own state.
+    let open_id = resp.id.with("open");
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    if resp.clicked() {
+        open = !open;
+    }
+    let lit = open || resp.hovered();
     let p = ui.painter();
     if lit {
         p.rect_filled(rect, CornerRadius::same(3), FIELD);
@@ -3339,10 +3339,18 @@ fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: Tit
         color,
     );
 
-    let mut s = style.unwrap_or(defaults);
+    let mut s = style.clone().unwrap_or_else(|| defaults.clone());
     let mut reset = false;
+    let popup = egui::Popup::from_response(&resp)
+        .open_bool(&mut open)
+        // Clicks in the font menu and the colour picker must not close it.
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(4.0)
+        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)));
     let shown = popup.show(|ui| {
-        let (area, _) = ui.allocate_exact_size(vec2(252.0, 61.0), Sense::hover());
+        let size = prefs::TITLE_STYLE_SIZE + vec2(38.0, 0.0);
+        let (area, _) = ui.allocate_exact_size(size, Sense::hover());
         prefs::title_style_controls(ui, area.min, &mut s);
         let r = Rect::from_min_size(area.min + vec2(228.0, 0.0), Vec2::splat(24.0));
         ui.painter().rect_stroke(
@@ -3369,12 +3377,13 @@ fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: Tit
             .layer_id_at(pos)
             .is_none_or(|l| matches!(l.order, egui::Order::Background | egui::Order::Middle))
     {
-        egui::Popup::close_id(ui.ctx(), popup_id);
+        open = false;
     }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
 
     if reset {
         *style = None;
-    } else if s != style.unwrap_or(defaults) {
+    } else if s != *style.as_ref().unwrap_or(defaults) {
         *style = Some(s);
     }
 }

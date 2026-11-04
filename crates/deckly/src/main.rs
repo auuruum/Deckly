@@ -11,6 +11,7 @@ mod background;
 mod backup;
 mod clipboard;
 mod cropper;
+mod fonts;
 mod history;
 mod image_editor;
 mod lock_gate;

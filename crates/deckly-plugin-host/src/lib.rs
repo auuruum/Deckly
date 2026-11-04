@@ -19,7 +19,7 @@ mod wine;
 
 pub use guard::{GUARD_ARG, run_guard};
 pub use manifest::{Entry, Manifest};
-pub use protocol::{AppInfo, Command, DeviceInfo, Instance};
+pub use protocol::{AppInfo, Command, DeviceInfo, Instance, TitleParameters};
 
 use server::{Server, ServerEvent};
 use std::collections::HashMap;
