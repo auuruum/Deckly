@@ -341,6 +341,7 @@ impl Run<'_> {
             icon: (!picture.is_empty())
                 .then(|| (self.image)(id, picture))
                 .flatten(),
+            wallpaper: None,
             keys: BTreeMap::new(),
         };
         for controller in list(source, "Controllers") {

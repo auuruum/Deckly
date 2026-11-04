@@ -49,7 +49,14 @@ Planned features, chosen by the project owner on 2026-11-02.
       warning on the key.
 - [ ] Animated keys: video. Needs a decoder; the options are in
       docs/clean-room/2026-11-04-animated-keys.md.
-- [ ] Wallpaper across all keys.
+- [x] Wallpaper across all keys.
+      Done: the button beside the page strip spreads one picture over the
+      keys of a page or folder, gaps included; drag and zoom to place it.
+- [ ] Profile-wide wallpaper. A wallpaper is set per page or folder now. Add
+      one picture on the profile that pages and folders fall back to until
+      they get their own, with a way to clear it on a single page. Check in
+      the official app whether it has this and how it behaves, and record it
+      in `docs/clean-room/`.
 
 ## Plugin SDK
 
