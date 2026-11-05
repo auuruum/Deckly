@@ -1,5 +1,8 @@
 # Key press feedback on the device
 
+See [Key appearance](2026-11-05-key-appearance.md) for the later wallpaper
+compositing behavior.
+
 - **Date:** 2026-10-28
 - **Target:** Stream Deck app for Windows 7.6.0.23012
 - **Device:** Stream Deck MK.2 (15 keys)

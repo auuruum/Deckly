@@ -41,6 +41,7 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-11-04 | [Animated keys](2026-11-04-animated-keys.md) | GIF, WebP and APNG playback, limits, wakeups, video options, what is unverified |
 | 2026-11-04 | [Key title fonts](2026-11-04-title-fonts.md) | Font family, bold, italic and underline, system fonts and fallbacks, official profile fields, what is unverified |
 | 2026-11-04 | [Wallpaper across all keys](2026-11-04-key-wallpaper.md) | Page wallpaper model, cutting by the device layout, drawing order, editor window, what is unverified |
+| 2026-11-05 | [Key appearance](2026-11-05-key-appearance.md) | Profile wallpaper, press layers, font scrolling and optional video import |
 
 ## Open questions
 

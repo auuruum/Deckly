@@ -60,7 +60,9 @@ HEVC in MP4, VP9 in WebM). Options, none added yet:
 5. `openh264` (Cisco's C decoder built from source) with a pure-Rust MP4
    demuxer: covers most MP4 files; C code compiled into the app.
 
-Waiting for the owner's choice.
+Deckly subsequently chose the external conversion approach and stores the
+result as APNG. See [Key appearance](2026-11-05-key-appearance.md) for the
+limits and current validation.
 
 ## Deckly decisions
 

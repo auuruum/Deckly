@@ -469,7 +469,7 @@ fn restore_plugins(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deckly_core::{DeviceKind, KeyConfig};
+    use deckly_core::{DeviceKind, KeyConfig, Wallpaper};
     use serde_json::json;
 
     fn temp(name: &str) -> PathBuf {
@@ -499,8 +499,10 @@ mod tests {
         multi.groups[0].push(pictured(r"C:\pics\c.png"));
         p.pages[0].keys.insert(2, multi);
         p.pages[0].icon = Some(r"C:\pics\page.svg".into());
+        p.wallpaper = Some(Wallpaper::new("/home/me/wall.png".into()));
         let files = take_pictures(&mut p);
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), 4);
+        assert!(p.wallpaper.unwrap().image.starts_with("images/abc"));
         let icon = p.pages[0].icon.as_ref().unwrap();
         assert!(icon.starts_with("images/abc"));
         let keys = &p.pages[0].keys;
@@ -524,6 +526,7 @@ mod tests {
 
         let mut p = Profile::new("Test", DeviceKind::Mk2);
         p.id = "abc".into();
+        p.wallpaper = Some(Wallpaper::new("images/abc/0-a.png".into()));
         p.pages[0].keys.insert(0, pictured("images/abc/0-a.png"));
         p.pages[0].keys.insert(1, pictured("images/other/0-b.png"));
         p.pages[0].keys.insert(2, pictured("../evil.png"));
@@ -534,6 +537,7 @@ mod tests {
         let root = dir.join("root");
         let mut backup = Reader::open(&file).unwrap();
         restore_pictures(&mut p, &mut backup, &root).unwrap();
+        assert_eq!(p.wallpaper.unwrap().image, root.join("images/abc/0-a.png"));
         let keys = &p.pages[0].keys;
         assert_eq!(keys[&0].image, Some(root.join("images/abc/0-a.png")));
         assert!(root.join("images/abc/0-a.png").is_file());

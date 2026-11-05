@@ -379,6 +379,9 @@ mod tests {
         );
         assert_eq!(crate::render::decode_file(&first).unwrap(), image);
         let mut profile = Profile::new("Test", deckly_core::DeviceKind::Mk2);
+        profile.wallpaper = Some(deckly_core::Wallpaper::new(second));
+        profile.add_page();
+        profile.pages[1].wallpaper_disabled = true;
         let mut key = deckly_core::KeyConfig::new(crate::actions::WEBSITE, serde_json::json!({}));
         key.image = Some(first.clone());
         profile.pages[0].keys.insert(0, key);

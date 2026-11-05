@@ -265,16 +265,37 @@ between snapshots. It lasts until the dialog closes. Search fields keep
 their own text undo. After **Set image**, the profile's Undo restores the
 previous assigned image.
 
-Uploads accept PNG, JPEG, WebP, GIF and BMP (the first frame), up to 16 MiB
-and 4096 pixels per edge. Imported pictures keep their aspect ratio. The
-creator saves a flattened 288 × 288 PNG into the profile's image folder;
-the original file is no longer needed, and backups include the result.
+The creator accepts still images, including the first frame of animated
+images, and saves a 288 × 288 PNG into the profile's image folder.
+Uploading an animated GIF, WebP or APNG directly to a key keeps the
+animation. Backups include the saved image.
 Layer drafts last while the dialog is open. **Add current key image** starts
 further work from the previously applied PNG as one picture layer.
 
 The catalog, creator and renderer use shared Rust/egui code on Linux,
 Windows and macOS; only file selection uses a native dialog. Windows and
 macOS are compile-checked; visual acceptance of this workflow is pending.
+
+### Video keys
+
+Choose **Image… → Import video…** on a key to import a local MP4, M4V,
+MOV, WebM or MKV file. This requires FFmpeg 7 or newer on the PATH inherited
+by Deckly, with the source codec and the APNG encoder enabled. Deckly
+center-crops the first ten seconds to a 96 × 96, 10 fps silent loop and saves
+it with the profile. The loop plays on other installations without FFmpeg.
+Input is limited to 64 MiB and 16,777,216 decoded pixels per frame.
+
+### Key wallpaper
+
+Open **Wallpaper** beside the page numbers. Choose **Profile** to set the
+default, or use the **Page** or **Folder** tab to choose a local image.
+**Use Profile** restores inheritance and **No Wallpaper** disables it for
+the current page or folder. Zoom and drag adjust the image for the selected
+scope. Deckly profiles and backups carry the wallpapers and overrides.
+
+On a key press, the icon, title and any custom key image shrink together
+over the fixed wallpaper. If an image already contains its own background,
+that background moves with the image.
 
 ## Undo and redo
 

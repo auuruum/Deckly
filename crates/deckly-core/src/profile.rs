@@ -63,6 +63,9 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub device: DeviceKind,
+    /// Default for pages and folders without a wallpaper override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<Wallpaper>,
     pub pages: Vec<Page>,
     /// Folders, each one page of keys opened by a folder key. Only folders
     /// that a key leads to are kept.
@@ -139,6 +142,9 @@ pub struct Page {
     /// One picture spread over all keys of the page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<Wallpaper>,
+    /// An explicit choice to leave this page or folder without wallpaper.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wallpaper_disabled: bool,
     #[serde(default)]
     pub keys: BTreeMap<u8, KeyConfig>,
 }
@@ -189,6 +195,27 @@ impl Wallpaper {
         self.zoom = self.zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
         self.x = self.x.min(Self::END);
         self.y = self.y.min(Self::END);
+    }
+
+    fn sanitize_optional(wallpaper: &mut Option<Self>) {
+        if let Some(wall) = wallpaper {
+            if wall.image.as_os_str().is_empty() {
+                *wallpaper = None;
+            } else {
+                wall.sanitize();
+            }
+        }
+    }
+
+    fn visit_picture(wallpaper: &mut Option<Self>, visit: &mut impl FnMut(&mut Option<PathBuf>)) {
+        if let Some(wall) = wallpaper {
+            let mut image = Some(std::mem::take(&mut wall.image));
+            visit(&mut image);
+            match image {
+                Some(image) => wall.image = image,
+                None => *wallpaper = None,
+            }
+        }
     }
 }
 
@@ -379,6 +406,17 @@ impl Page {
         }
     }
 
+    pub fn effective_wallpaper<'a>(
+        &'a self,
+        default: Option<&'a Wallpaper>,
+    ) -> Option<&'a Wallpaper> {
+        if self.wallpaper_disabled {
+            None
+        } else {
+            self.wallpaper.as_ref().or(default)
+        }
+    }
+
     /// The name people see for the page at `index`.
     pub fn title(&self, index: usize) -> String {
         if self.name.is_empty() {
@@ -475,6 +513,7 @@ impl Profile {
             id: new_id(),
             name: name.into(),
             device,
+            wallpaper: None,
             pages: vec![Page::new()],
             folders: Vec::new(),
             applications: Vec::new(),
@@ -600,18 +639,12 @@ impl Profile {
         }
     }
 
-    /// Visits every picture the profile points at: page icons and key images.
+    /// Visits every picture the profile points at, including wallpapers.
     pub fn for_each_picture(&mut self, mut visit: impl FnMut(&mut Option<PathBuf>)) {
+        Wallpaper::visit_picture(&mut self.wallpaper, &mut visit);
         for page in self.pages.iter_mut().chain(&mut self.folders) {
             visit(&mut page.icon);
-            if let Some(wallpaper) = &mut page.wallpaper {
-                let mut image = Some(std::mem::take(&mut wallpaper.image));
-                visit(&mut image);
-                match image {
-                    Some(image) => wallpaper.image = image,
-                    None => page.wallpaper = None,
-                }
-            }
+            Wallpaper::visit_picture(&mut page.wallpaper, &mut visit);
         }
         self.for_each_key(|key| visit(&mut key.image));
     }
@@ -622,11 +655,13 @@ impl Profile {
         self.name == DEFAULT_PROFILE_NAME
             && self.folders.is_empty()
             && self.applications.is_empty()
+            && self.wallpaper.is_none()
             && matches!(self.pages.as_slice(), [page]
                 if page.keys.is_empty()
                     && page.name.is_empty()
                     && page.icon.is_none()
-                    && page.wallpaper.is_none())
+                    && page.wallpaper.is_none()
+                    && !page.wallpaper_disabled)
     }
 
     /// Gives every folder key a folder of its own and drops folders no key
@@ -666,6 +701,7 @@ impl Profile {
     /// of the app can rely on them.
     pub fn sanitize(&mut self) {
         let key_count = self.model().key_count();
+        Wallpaper::sanitize_optional(&mut self.wallpaper);
         self.pages.truncate(MAX_PAGES);
         if self.pages.is_empty() {
             self.pages.push(Page::new());
@@ -677,16 +713,10 @@ impl Profile {
             }
             page.name = page.name.trim().chars().take(MAX_PAGE_NAME_CHARS).collect();
             page.keys.retain(|&index, _| index < key_count);
-            if let Some(wallpaper) = &mut page.wallpaper {
-                wallpaper.sanitize();
-            }
-            if page
-                .wallpaper
-                .as_ref()
-                .is_some_and(|w| w.image.as_os_str().is_empty())
-            {
+            if page.wallpaper_disabled {
                 page.wallpaper = None;
             }
+            Wallpaper::sanitize_optional(&mut page.wallpaper);
             for key in page.keys.values_mut() {
                 sanitize_title(key);
                 key.sanitize_groups();
@@ -1166,6 +1196,39 @@ mod tests {
         });
         let back = Profile::from_json(&p.to_json().unwrap()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn profile_wallpaper_respects_page_and_folder_overrides_after_saving() {
+        let mut p = Profile::new(DEFAULT_PROFILE_NAME, DeviceKind::Mk2);
+        let default = Wallpaper::new("default.png".into());
+        let local = Wallpaper::new("folder.png".into());
+        p.wallpaper = Some(default.clone());
+        assert!(!p.is_placeholder());
+        p.add_page();
+        p.pages[1].wallpaper_disabled = true;
+        p.pages[0]
+            .keys
+            .insert(0, KeyConfig::new(FOLDER_ACTION, serde_json::json!({})));
+        p.normalize_folders();
+        assert_eq!(
+            p.folders[0].effective_wallpaper(p.wallpaper.as_ref()),
+            Some(&default)
+        );
+        p.folders[0].wallpaper = Some(local.clone());
+        let p = Profile::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(
+            p.pages[0].effective_wallpaper(p.wallpaper.as_ref()),
+            Some(&default)
+        );
+        assert_eq!(p.pages[1].effective_wallpaper(p.wallpaper.as_ref()), None);
+        assert_eq!(
+            p.folders[0].effective_wallpaper(p.wallpaper.as_ref()),
+            Some(&local)
+        );
+        let mut disabled = p.folders[0].clone();
+        disabled.wallpaper_disabled = true;
+        assert_eq!(disabled.effective_wallpaper(p.wallpaper.as_ref()), None);
     }
 
     #[test]
