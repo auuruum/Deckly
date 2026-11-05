@@ -2750,52 +2750,77 @@ fn font_menu(ui: &mut Ui, rect: Rect, family: &mut String) {
     } else {
         family.clone()
     };
-    let resp = ui
-        .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-            ui.spacing_mut().interact_size.y = rect.height();
-            let text = RichText::new(shown).font(font(13.0));
-            egui::ComboBox::from_id_salt("title-font")
-                .selected_text(if missing { text.color(TEXT_DIM) } else { text })
-                .width(rect.width())
-                .height(320.0)
-                .truncate()
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(family.is_empty(), "Default").clicked() {
-                        family.clear();
-                    }
-                    match &families {
-                        Some(list) => {
-                            let (jump, typed) = type_ahead(ui, list);
-                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            for (i, name) in list.iter().enumerate() {
-                                let on = name.eq_ignore_ascii_case(family);
-                                let mut resp = ui.selectable_label(on, name);
-                                if jump == Some(i) {
-                                    resp = resp.highlight();
-                                    if typed {
-                                        resp.scroll_to_me(Some(egui::Align::Center));
-                                    }
-                                    if enter {
-                                        name.clone_into(family);
-                                        ui.close();
-                                    }
-                                }
-                                if resp.clicked() {
-                                    name.clone_into(family);
-                                }
-                            }
-                        }
-                        None => {
-                            ui.label(RichText::new("Loading fonts").color(TEXT_DIM));
-                        }
-                    }
-                })
-                .response
-        })
-        .inner;
+    let text = RichText::new(shown).font(font(13.0));
+    let resp = ui.put(
+        rect,
+        egui::Button::new(if missing { text.color(TEXT_DIM) } else { text })
+            .right_text(RichText::new(icon::CARET_DOWN).font(font(11.0)))
+            .truncate(),
+    );
+    egui::Popup::menu(&resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(rect.width())
+        .show(|ui| {
+            ui.set_width(rect.width());
+            if let Some(list) = &families {
+                font_list(ui, list, family);
+            } else {
+                ui.label(RichText::new("Loading fonts").color(TEXT_DIM));
+            }
+        });
     if missing {
         resp.on_hover_text("Not installed here; titles use the default font");
     }
+}
+
+fn font_list(
+    ui: &mut Ui,
+    names: &[String],
+    family: &mut String,
+) -> egui::scroll_area::ScrollAreaOutput<()> {
+    const HEIGHT: f32 = 320.0;
+    const ROW: f32 = 22.0;
+    ui.spacing_mut().interact_size.y = ROW;
+    ui.spacing_mut().scroll = egui::style::ScrollStyle {
+        foreground_color: true,
+        ..egui::style::ScrollStyle::solid()
+    };
+    let (jump, typed) = type_ahead(ui, names);
+    let mut scroll = egui::ScrollArea::vertical().max_height(HEIGHT);
+    if let Some(index) = jump.filter(|_| typed) {
+        // The first row is Default. Move the viewport before building the
+        // visible rows, so a clipped match does not need a widget response.
+        let pitch = ROW + ui.spacing().item_spacing.y;
+        let middle = (index as f32 + 1.0) * pitch + ROW / 2.0;
+        let end =
+            ((names.len() + 1) as f32 * pitch - ui.spacing().item_spacing.y - HEIGHT).max(0.0);
+        scroll = scroll.vertical_scroll_offset((middle - HEIGHT / 2.0).clamp(0.0, end));
+    }
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    scroll.show_rows(ui, ROW, names.len() + 1, |ui, rows| {
+        for row in rows {
+            let index = row.checked_sub(1);
+            let name = index.and_then(|i| names.get(i));
+            let selected = name.map_or(family.is_empty(), |n| n.eq_ignore_ascii_case(family));
+            let targeted = jump.is_some() && jump == index;
+            let mut resp = ui.add_sized(
+                [ui.available_width(), ROW],
+                egui::Button::selectable(selected, name.map_or("Default", String::as_str))
+                    .truncate(),
+            );
+            if targeted {
+                resp = resp.highlight();
+            }
+            if resp.clicked() || (targeted && enter) {
+                if let Some(name) = name {
+                    name.clone_into(family);
+                } else {
+                    family.clear();
+                }
+                ui.close();
+            }
+        }
+    })
 }
 
 /// Reads what was typed into an open list. Returns the item to jump to and
@@ -3049,6 +3074,50 @@ mod tests {
         assert_eq!(t.find(&names), None);
         assert_eq!(TypeAhead::default().find(&names), None);
         assert_eq!(t.find(&[]), None);
+    }
+
+    #[test]
+    fn typing_scrolls_to_fonts_outside_the_visible_rows() {
+        let ctx = egui::Context::default();
+        let mut names = (0..100).map(|i| format!("A{i:03}")).collect::<Vec<_>>();
+        names.extend(["Noto Sans".to_owned(), "Noto Serif".to_owned()]);
+        let mut family = String::new();
+        let mut offset = 0.0;
+        for (time, events) in [
+            (0.0, vec![]),
+            (0.1, vec![egui::Event::Text("n".into())]),
+            (
+                0.2,
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            ),
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.set_width(214.0);
+                        offset = font_list(ui, &names, &mut family).state.offset.y;
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            if time == 0.0 {
+                assert_eq!(offset, 0.0);
+            } else {
+                assert!(offset > 1800.0);
+            }
+        }
+        assert_eq!(family, "Noto Sans");
     }
 
     #[test]
