@@ -136,8 +136,60 @@ pub struct Page {
     /// Picture shown for the page instead of its number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<PathBuf>,
+    /// One picture spread over all keys of the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<Wallpaper>,
     #[serde(default)]
     pub keys: BTreeMap<u8, KeyConfig>,
+}
+
+/// A picture spread over all keys of a page, in the device's rows and
+/// columns. The keys show it where their own picture leaves room: empty
+/// keys and action icons show it whole, transparent parts of key pictures
+/// let it through.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Wallpaper {
+    pub image: PathBuf,
+    /// In percent. 100 covers all keys with as much of the picture as fits
+    /// their shape; more shows a smaller part of it.
+    #[serde(default = "Wallpaper::default_zoom")]
+    pub zoom: u16,
+    /// The middle of the part shown, in thousandths of the picture's width
+    /// and height. It moves only as far as the picture reaches.
+    #[serde(default = "Wallpaper::middle")]
+    pub x: u16,
+    #[serde(default = "Wallpaper::middle")]
+    pub y: u16,
+}
+
+impl Wallpaper {
+    pub const MIN_ZOOM: u16 = 100;
+    pub const MAX_ZOOM: u16 = 400;
+    /// The largest `x` and `y`: the right and bottom edges.
+    pub const END: u16 = 1000;
+
+    pub fn new(image: PathBuf) -> Self {
+        Self {
+            image,
+            zoom: Self::default_zoom(),
+            x: Self::middle(),
+            y: Self::middle(),
+        }
+    }
+
+    fn default_zoom() -> u16 {
+        Self::MIN_ZOOM
+    }
+
+    fn middle() -> u16 {
+        Self::END / 2
+    }
+
+    pub fn sanitize(&mut self) {
+        self.zoom = self.zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        self.x = self.x.min(Self::END);
+        self.y = self.y.min(Self::END);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -224,7 +276,7 @@ impl ActionDelays {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TitleStyle {
     pub show: bool,
@@ -232,14 +284,46 @@ pub struct TitleStyle {
     /// Font size in points at the 72 px key size; scaled for larger keys.
     pub size: u8,
     pub align: TitleAlign,
+    /// Font family as the system names it. Empty is Deckly's default font;
+    /// a family that is not installed is drawn with it too.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub font: String,
+    /// Titles were always bold before the font options existed, so bold is
+    /// the default and old profiles look the same.
+    #[serde(skip_serializing_if = "is_true")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub underline: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl TitleStyle {
     pub const MIN_SIZE: u8 = 6;
     pub const MAX_SIZE: u8 = 40;
+    pub const MAX_FONT_CHARS: usize = 64;
 
     pub fn sanitize(&mut self) {
         self.size = self.size.clamp(Self::MIN_SIZE, Self::MAX_SIZE);
+        let font = self.font.trim();
+        if font.len() != self.font.len()
+            || font.chars().count() > Self::MAX_FONT_CHARS
+            || font.chars().any(char::is_control)
+        {
+            self.font = font
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(Self::MAX_FONT_CHARS)
+                .collect();
+        }
     }
 }
 
@@ -250,6 +334,10 @@ impl Default for TitleStyle {
             color: [0xFF, 0xFF, 0xFF],
             size: 12,
             align: TitleAlign::Bottom,
+            font: String::new(),
+            bold: true,
+            italic: false,
+            underline: false,
         }
     }
 }
@@ -516,6 +604,14 @@ impl Profile {
     pub fn for_each_picture(&mut self, mut visit: impl FnMut(&mut Option<PathBuf>)) {
         for page in self.pages.iter_mut().chain(&mut self.folders) {
             visit(&mut page.icon);
+            if let Some(wallpaper) = &mut page.wallpaper {
+                let mut image = Some(std::mem::take(&mut wallpaper.image));
+                visit(&mut image);
+                match image {
+                    Some(image) => wallpaper.image = image,
+                    None => page.wallpaper = None,
+                }
+            }
         }
         self.for_each_key(|key| visit(&mut key.image));
     }
@@ -527,7 +623,10 @@ impl Profile {
             && self.folders.is_empty()
             && self.applications.is_empty()
             && matches!(self.pages.as_slice(), [page]
-                if page.keys.is_empty() && page.name.is_empty() && page.icon.is_none())
+                if page.keys.is_empty()
+                    && page.name.is_empty()
+                    && page.icon.is_none()
+                    && page.wallpaper.is_none())
     }
 
     /// Gives every folder key a folder of its own and drops folders no key
@@ -578,6 +677,16 @@ impl Profile {
             }
             page.name = page.name.trim().chars().take(MAX_PAGE_NAME_CHARS).collect();
             page.keys.retain(|&index, _| index < key_count);
+            if let Some(wallpaper) = &mut page.wallpaper {
+                wallpaper.sanitize();
+            }
+            if page
+                .wallpaper
+                .as_ref()
+                .is_some_and(|w| w.image.as_os_str().is_empty())
+            {
+                page.wallpaper = None;
+            }
             for key in page.keys.values_mut() {
                 sanitize_title(key);
                 key.sanitize_groups();
@@ -1044,6 +1153,64 @@ mod tests {
     }
 
     #[test]
+    fn wallpapers_round_trip_and_old_pages_have_none() {
+        let text = r#"{"id":"a","name":"x","device":"mk2","pages":[{"id":"p","keys":{}}]}"#;
+        let mut p = Profile::from_json(text).unwrap();
+        assert_eq!(p.pages[0].wallpaper, None);
+        assert!(!p.to_json().unwrap().contains("wallpaper"));
+        p.pages[0].wallpaper = Some(Wallpaper {
+            zoom: 250,
+            x: 100,
+            y: 900,
+            ..Wallpaper::new("images/a/wall.png".into())
+        });
+        let back = Profile::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn wallpapers_are_brought_within_limits() {
+        let text = r#"{"id":"a","name":"x","device":"mk2","pages":[
+            {"id":"p","wallpaper":{"image":"w.png","zoom":9999,"x":5000,"y":7}},
+            {"id":"q","wallpaper":{"image":"w.png"}},
+            {"id":"r","wallpaper":{"image":"","zoom":200}}]}"#;
+        let p = Profile::from_json(text).unwrap();
+        let w = p.pages[0].wallpaper.as_ref().unwrap();
+        assert_eq!((w.zoom, w.x, w.y), (Wallpaper::MAX_ZOOM, Wallpaper::END, 7));
+        assert_eq!(p.pages[1].wallpaper, Some(Wallpaper::new("w.png".into())));
+        assert_eq!(p.pages[2].wallpaper, None);
+        let zero = r#"{"id":"a","name":"x","device":"mk2","pages":[
+            {"id":"p","wallpaper":{"image":"w.png","zoom":0}}]}"#;
+        let p = Profile::from_json(zero).unwrap();
+        assert_eq!(
+            p.pages[0].wallpaper.as_ref().unwrap().zoom,
+            Wallpaper::MIN_ZOOM
+        );
+    }
+
+    #[test]
+    fn wallpapers_are_pictures_of_the_profile() {
+        let mut p = Profile::new("Walls", DeviceKind::Mk2);
+        p.pages[0].wallpaper = Some(Wallpaper::new("a.png".into()));
+        p.add_page();
+        p.pages[1].wallpaper = Some(Wallpaper::new("b.png".into()));
+        let mut seen = Vec::new();
+        p.for_each_picture(|picture| {
+            if let Some(path) = picture.take() {
+                seen.push(path.clone());
+                // Pictures that go away take their wallpaper with them.
+                *picture = (path != Path::new("b.png")).then(|| path.with_extension("jpg"));
+            }
+        });
+        assert_eq!(seen, [PathBuf::from("a.png"), PathBuf::from("b.png")]);
+        assert_eq!(
+            p.pages[0].wallpaper.as_ref().map(|w| w.image.clone()),
+            Some(PathBuf::from("a.jpg"))
+        );
+        assert_eq!(p.pages[1].wallpaper, None);
+    }
+
+    #[test]
     fn default_title_styles_follow_the_global_style() {
         let text = r#"{"id":"a","name":"x","device":"mk2","pages":[{"id":"p","keys":{
             "0":{"action":"a","title_style":{"show":true,"color":[255,255,255],"size":12,"align":"bottom"}},
@@ -1053,11 +1220,59 @@ mod tests {
         let keys = &p.pages[0].keys;
         assert_eq!(keys[&0].title_style, None);
         assert_eq!(
-            keys[&1].title_style.map(|s| s.size),
+            keys[&1].title_style.as_ref().map(|s| s.size),
             Some(TitleStyle::MAX_SIZE)
         );
         assert_eq!(keys[&2].title_style, None);
         assert!(!p.to_json().unwrap().contains("\"title_style\": null"));
+    }
+
+    #[test]
+    fn title_styles_without_font_options_keep_their_look() {
+        let text = r#"{"show":false,"color":[1,2,3],"size":20,"align":"top"}"#;
+        let style: TitleStyle = serde_json::from_str(text).unwrap();
+        assert_eq!(style.font, "");
+        assert!(style.bold);
+        assert!(!style.italic && !style.underline);
+        // Untouched font options are not written, so the file is unchanged.
+        let back: serde_json::Value = serde_json::to_value(&style).unwrap();
+        assert_eq!(
+            back,
+            serde_json::from_str::<serde_json::Value>(text).unwrap()
+        );
+    }
+
+    #[test]
+    fn font_options_round_trip() {
+        let mut p = Profile::new("Fonts", DeviceKind::Mk2);
+        let mut key = KeyConfig::new("a", serde_json::json!({}));
+        key.title_style = Some(TitleStyle {
+            font: "DejaVu Serif".into(),
+            bold: false,
+            italic: true,
+            underline: true,
+            ..TitleStyle::default()
+        });
+        p.pages[0].keys.insert(0, key);
+        let back = Profile::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn font_names_are_trimmed_and_limited() {
+        let long = "F".repeat(TitleStyle::MAX_FONT_CHARS + 10);
+        let mut style = TitleStyle {
+            font: format!("  {long}\n"),
+            ..TitleStyle::default()
+        };
+        style.sanitize();
+        assert_eq!(style.font, "F".repeat(TitleStyle::MAX_FONT_CHARS));
+        style.font = " Noto\u{7}Sans ".into();
+        style.sanitize();
+        assert_eq!(style.font, "NotoSans");
+        style.font = "Noto Sans".into();
+        style.sanitize();
+        assert_eq!(style.font, "Noto Sans");
     }
 
     fn folder_key(id: &str) -> KeyConfig {

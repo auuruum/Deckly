@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod actions;
+mod animation;
 mod app;
 mod app_picker;
 mod auto_switch;
@@ -11,6 +12,7 @@ mod background;
 mod backup;
 mod clipboard;
 mod cropper;
+mod fonts;
 mod history;
 mod image_editor;
 mod lock_gate;
@@ -25,6 +27,8 @@ mod sequence;
 mod store;
 mod theme;
 mod transfer;
+mod update;
+mod wallpaper;
 
 fn main() -> eframe::Result {
     // Deckly runs each plugin through a copy of itself in guard mode.
@@ -35,7 +39,13 @@ fn main() -> eframe::Result {
     {
         std::process::exit(deckly_plugin_host::run_guard(&args[1..]));
     }
-    let instance = match store::config_dir().map(|dir| os::instance::claim(&dir)) {
+    // Started by an update: the old Deckly is still quitting.
+    let wait = if std::env::var_os(update::AFTER_UPDATE_ENV).is_some() {
+        std::time::Duration::from_secs(30)
+    } else {
+        std::time::Duration::ZERO
+    };
+    let instance = match store::config_dir().map(|dir| os::instance::claim(&dir, wait)) {
         Some(Ok(Some(instance))) => Some(instance),
         Some(Ok(None)) => return Ok(()),
         Some(Err(e)) => {

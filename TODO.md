@@ -33,10 +33,35 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Key look
 
-- [ ] Key title fonts: font family, bold, italic, underline. There is one font
-      now.
-- [ ] Animated keys: GIF and video. Only the first frame of a GIF shows now.
-- [ ] Wallpaper across all keys.
+- [x] Key title fonts: font family, bold, italic, underline.
+      Done: the title popup and Preferences > Style choose any installed
+      family (type a letter to jump) with bold, italic and underline. A
+      missing font draws in the default one; imports list missing fonts.
+- [ ] Fix the font menu (found while testing title fonts):
+      - It has no scroll bar.
+      - Type-to-jump is unreliable: scrolled past "n" with the list showing
+        "a b c i j", typing "n" does not jump to the families starting with
+        "n". It only works once an "n" family is already visible (scroll to
+        "m", see "n", then type "n").
+- [x] Animated keys: GIF.
+      Done: GIF, animated WebP and APNG key images play with their own
+      delays, within frame, size and rate limits; a broken file shows a
+      warning on the key.
+- [ ] Animated keys: video. Needs a decoder; the options are in
+      docs/clean-room/2026-11-04-animated-keys.md.
+- [x] Wallpaper across all keys.
+      Done: the button beside the page strip spreads one picture over the
+      keys of a page or folder, gaps included; drag and zoom to place it.
+- [ ] Review the key shrink effect. The editor preview and device rendering
+      both shrink the wallpaper tile with the pressed key. Consider keeping
+      the wallpaper at full size so it stays aligned across keys while the
+      action icon shrinks. Check how this should work for custom key images,
+      especially when the background and icon are saved as one image.
+- [ ] Profile-wide wallpaper. A wallpaper is set per page or folder now. Add
+      one picture on the profile that pages and folders fall back to until
+      they get their own, with a way to clear it on a single page. Check in
+      the official app whether it has this and how it behaves, and record it
+      in `docs/clean-room/`.
 
 ## Plugin SDK
 

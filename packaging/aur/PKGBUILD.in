@@ -1,0 +1,31 @@
+# Maintainer: auuruum (https://github.com/auuruum)
+# Written by `cargo dev release-files`; edit packaging/aur/PKGBUILD.in instead.
+
+pkgname=deckly-bin
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Unofficial, independent app for Stream Deck hardware"
+arch=('x86_64')
+url="https://github.com/auuruum/Deckly"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'gtk3' 'webkit2gtk-4.1' 'libxkbcommon' 'hicolor-icon-theme')
+optdepends=('vulkan-icd-loader: GPU drawing through Vulkan'
+            'nodejs: run Node.js plugins'
+            'wine: run Windows-only plugins')
+provides=('deckly')
+conflicts=('deckly')
+install=deckly-bin.install
+source=("deckly-bin-@PKGVER@.tar.gz::https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('@SHA256_LINUX_X86_64@')
+
+package() {
+  cd "deckly-x86_64-unknown-linux-gnu"
+  # Deckly looks for deckly-web next to its own program.
+  install -Dm755 deckly deckly-web -t "$pkgdir/usr/lib/deckly/"
+  install -d "$pkgdir/usr/bin"
+  ln -s /usr/lib/deckly/deckly "$pkgdir/usr/bin/deckly"
+  install -Dm644 share/applications/deckly.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 share/icons/hicolor/scalable/apps/deckly.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  install -Dm644 udev/60-deckly.rules -t "$pkgdir/usr/lib/udev/rules.d/"
+  install -Dm644 LICENSE THIRD-PARTY-LICENSES.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

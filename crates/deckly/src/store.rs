@@ -133,7 +133,69 @@ pub fn save_key_image(profile: &str, image: &RgbaImage) -> Result<PathBuf, Strin
     write_key_image(&root, profile, image)
 }
 
+/// Page wallpapers are kept the same way, larger.
+pub fn save_wallpaper(profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    let root = config_dir().ok_or("no configuration folder")?;
+    write_png(&root, profile, image, crate::render::MAX_WALLPAPER_SIDE)
+}
+
 fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
+    write_png(root, profile, image, 512)
+}
+
+fn write_png(
+    root: &Path,
+    profile: &str,
+    image: &RgbaImage,
+    max_side: u32,
+) -> Result<PathBuf, String> {
+    if image.width() == 0 || image.height() == 0 || image.width().max(image.height()) > max_side {
+        return Err("invalid key image size".into());
+    }
+    write_new(root, profile, "png", |output| {
+        image
+            .write_to(output, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Animated key images are kept as the file they came in, so their frames
+/// and timing stay as they are.
+pub fn save_key_animation(profile: &str, source: &Path) -> Result<PathBuf, String> {
+    let root = config_dir().ok_or("no configuration folder")?;
+    copy_key_animation(&root, profile, source)
+}
+
+fn copy_key_animation(root: &Path, profile: &str, source: &Path) -> Result<PathBuf, String> {
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|e| ["gif", "webp", "png", "apng"].contains(&e.as_str()))
+        .ok_or("not an animated picture")?;
+    let len = std::fs::metadata(source).map_err(|e| e.to_string())?.len();
+    if len > MAX_ANIMATION_BYTES {
+        return Err("file is too large".into());
+    }
+    let mut input = std::fs::File::open(source).map_err(|e| e.to_string())?;
+    write_new(root, profile, &ext, |output| {
+        // The file may grow while it is copied; copy no more than was checked.
+        std::io::copy(&mut std::io::Read::take(&mut input, len), output)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Largest animated key image kept.
+const MAX_ANIMATION_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Writes a new, uniquely named file in a profile's images folder.
+fn write_new(
+    root: &Path,
+    profile: &str,
+    ext: &str,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), String>,
+) -> Result<PathBuf, String> {
     if profile.is_empty()
         || !profile
             .chars()
@@ -142,12 +204,9 @@ fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<Path
     {
         return Err("invalid profile id".into());
     }
-    if image.width() == 0 || image.height() == 0 || image.width().max(image.height()) > 512 {
-        return Err("invalid key image size".into());
-    }
     let dir = root.join("images").join(profile);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
+    let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
     let result = (|| {
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -155,9 +214,7 @@ fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<Path
             .open(&path)
             .map_err(|e| e.to_string())?;
         let mut output = std::io::BufWriter::new(file);
-        image
-            .write_to(&mut output, image::ImageFormat::Png)
-            .map_err(|e| e.to_string())?;
+        write(&mut output)?;
         std::io::Write::flush(&mut output).map_err(|e| e.to_string())
     })();
     if let Err(error) = result {
@@ -332,6 +389,35 @@ mod tests {
         assert!(write_key_image(&root, "", &image).is_err());
         assert!(write_key_image(&root, "safe", &RgbaImage::new(513, 1)).is_err());
         assert!(write_key_image(&root, "safe", &RgbaImage::new(0, 0)).is_err());
+        let wide = RgbaImage::new(crate::render::MAX_WALLPAPER_SIDE, 10);
+        assert!(write_png(&root, "safe", &wide, crate::render::MAX_WALLPAPER_SIDE).is_ok());
+        assert!(write_key_image(&root, "safe", &wide).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn animated_key_images_are_copied_as_they_are() {
+        use crate::animation::testing;
+        let root = testing::temp("animations");
+        let source = testing::temp("source.GIF");
+        testing::gif(&source, 16, &[([255, 0, 0], 100), ([0, 0, 255], 100)]);
+        let copy = copy_key_animation(&root, "test-profile", &source).unwrap();
+        assert_eq!(copy.extension().unwrap(), "gif");
+        assert_eq!(
+            copy.parent(),
+            Some(root.join("images/test-profile").as_path())
+        );
+        assert_eq!(
+            std::fs::read(&copy).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        assert!(copy_key_animation(&root, "../escape", &source).is_err());
+        let text = testing::temp("notes.txt");
+        std::fs::write(&text, "hello").unwrap();
+        assert!(copy_key_animation(&root, "test-profile", &text).is_err());
+        for path in [source, text] {
+            let _ = std::fs::remove_file(path);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

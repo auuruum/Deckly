@@ -1,0 +1,8 @@
+post_install() {
+  echo "Deckly: unplug your Stream Deck and plug it back in, so the new device"
+  echo "permissions apply. Close the official Stream Deck app first if you use it."
+}
+
+post_upgrade() {
+  :
+}

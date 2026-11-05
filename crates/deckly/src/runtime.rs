@@ -18,6 +18,7 @@ use crate::store;
 use deckly_core::profile::{DEFAULT_PROFILE_NAME, MAX_FOLDER_DEPTH};
 use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, LockLook, Orientation, Page, Profile, Settings, TitleStyle,
+    Wallpaper,
 };
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
 use deckly_plugin_host::{Host, Instance, Status, protocol};
@@ -199,6 +200,7 @@ impl State {
             page: self.page(profile) + 1,
             pressed: false,
             exit: self.folder_exit.progress(&profile.id, Instant::now()),
+            frame: 0,
         }
     }
 
@@ -507,6 +509,8 @@ struct Link {
     members: HashMap<String, Shown>,
     /// The press owns its release, even if navigation changed the visible keys.
     held: HashMap<u8, KeyHit>,
+    /// When an animated key on it shows its next frame.
+    next_frame: Option<Instant>,
 }
 
 /// A plugin key as its plugin last heard of it.
@@ -533,6 +537,7 @@ impl Link {
             shown: vec![None; usize::from(info.model.key_count())],
             members: HashMap::new(),
             held: HashMap::new(),
+            next_frame: None,
         }
     }
 
@@ -624,13 +629,18 @@ pub fn start(state: Shared, repaint: Repaint, host: Option<Host>) -> Sender<Msg>
                 refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
                 repaint();
             }
-            let msg = match next_wake(&state, &links, &groups) {
+            let event = next_wake(&state, &links, &groups);
+            let frame = links.values().filter_map(|l| l.next_frame).min();
+            let msg = match event.into_iter().chain(frame).min() {
                 Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(msg) => msg,
                     Err(RecvTimeoutError::Timeout) => {
                         fall_asleep(&state, &devices, &mut links);
                         refresh(&state, &devices, &mut renderer, &mut links, host.as_ref());
-                        repaint();
+                        // The editor animates its keys itself.
+                        if event.is_some_and(|e| e <= Instant::now()) {
+                            repaint();
+                        }
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -1344,9 +1354,17 @@ fn update_shown(host: Option<&Host>, slot: &mut Option<Shown>, new: Option<Shown
                         deckly_core::TitleAlign::Middle => "middle",
                         deckly_core::TitleAlign::Bottom => "bottom",
                     };
-                    let msg =
-                        n.instance
-                            .title_parameters(&n.title, n.style.show, n.style.size, align);
+                    let params = deckly_plugin_host::TitleParameters {
+                        family: &n.style.font,
+                        size: n.style.size,
+                        bold: n.style.bold,
+                        italic: n.style.italic,
+                        underline: n.style.underline,
+                        show: n.style.show,
+                        align,
+                        color: n.style.color,
+                    };
+                    let msg = n.instance.title_parameters(&n.title, &params);
                     host.send(&n.plugin, msg);
                 }
             }
@@ -1379,7 +1397,7 @@ fn next_sleep(state: &Shared, links: &Links) -> Option<Instant> {
 /// How long the event loop waits for the next message: until a device should
 /// sleep, until a plugin's Alert/OK mark ends, until a Key Logic press is
 /// decided, until the foreground has settled, or until a folder's countdown
-/// moves on.
+/// moves on. Animated keys add their next frame to this.
 fn next_wake(state: &Shared, links: &Links, groups: &Groups) -> Option<Instant> {
     let sleep = next_sleep(state, links);
     let s = lock(state);
@@ -1616,6 +1634,15 @@ fn member_views(
     views
 }
 
+/// What one device shows: its keys, the plugin actions inside them, and
+/// the wallpaper of its page.
+type DeviceWork = (
+    Handle,
+    Vec<KeyView>,
+    HashMap<String, Shown>,
+    Option<Wallpaper>,
+);
+
 fn refresh(
     state: &Shared,
     devices: &DeviceManager,
@@ -1624,10 +1651,10 @@ fn refresh(
     host: Option<&Host>,
 ) {
     // Collect the work under the lock, render without it.
-    let mut work: Vec<(Handle, Vec<KeyView>, HashMap<String, Shown>)> = Vec::new();
+    let mut work: Vec<DeviceWork> = Vec::new();
     {
         let s = lock(state);
-        renderer.title_defaults = s.settings.title_style;
+        renderer.title_defaults = s.settings.title_style.clone();
         renderer.key_press = s.settings.key_press;
         for d in &s.devices {
             // A screensaver keeps its keys until the device wakes.
@@ -1674,10 +1701,15 @@ fn refresh(
                     }
                 })
                 .collect();
-            work.push((d.handle, keys, members));
+            work.push((d.handle, keys, members, page.wallpaper.clone()));
         }
     }
-    for (handle, keys, members) in work {
+    // Only keys refreshed now may ask for the next frame.
+    for link in links.values_mut() {
+        link.next_frame = None;
+    }
+    let now = Instant::now();
+    for (handle, keys, members, wallpaper) in work {
         let Some(link) = links.get_mut(&handle) else {
             continue;
         };
@@ -1687,8 +1719,23 @@ fn refresh(
             if let Some(slot) = link.shown.get_mut(index) {
                 update_shown(host, slot, view.shown);
             }
-            let (key, live, overlay) = (view.key, view.live, view.overlay);
-            let hash = renderer.key_hash(key.as_ref(), live, overlay.as_ref());
+            let (key, overlay) = (view.key, view.overlay);
+            // A sleeping device shows nothing; its keys stand still.
+            let (live, next) = if link.asleep {
+                (view.live, None)
+            } else {
+                renderer.animate(key.as_ref(), view.live, now)
+            };
+            if let Some(next) = next {
+                link.next_frame = Some(link.next_frame.map_or(next, |n| n.min(next)));
+            }
+            let backdrop = wallpaper.as_ref().map(|wallpaper| render::Backdrop {
+                wallpaper,
+                model: link.model,
+                // index < key_count, which is a u8.
+                index: index as u8,
+            });
+            let hash = renderer.key_hash_on(key.as_ref(), live, overlay.as_ref(), backdrop);
             let Some(slot) = link.sent.get_mut(index) else {
                 continue;
             };
@@ -1698,12 +1745,13 @@ fn refresh(
             *slot = Some(hash);
             // index < key_count, which is a u8.
             let physical = link.orientation.map_key(index as u8, count);
-            let image = renderer.device_image(
+            let image = renderer.device_image_on(
                 key.as_ref(),
                 live,
                 overlay.as_ref(),
                 link.model,
                 link.orientation,
+                backdrop,
             );
             devices.set_image(handle, physical, image);
         }

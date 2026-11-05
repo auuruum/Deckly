@@ -1,0 +1,35 @@
+# Written by `cargo dev release-files`; edit packaging/homebrew/deckly.rb.in
+# in the Deckly repository instead.
+class Deckly < Formula
+  desc "Unofficial, independent app for Stream Deck hardware"
+  homepage "https://github.com/auuruum/Deckly"
+  version "@VERSION@"
+  license "MIT"
+
+  on_arm do
+    url "https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-aarch64-apple-darwin.tar.gz"
+    sha256 "@SHA256_MACOS_ARM64@"
+  end
+  on_intel do
+    url "https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-x86_64-apple-darwin.tar.gz"
+    sha256 "@SHA256_MACOS_X86_64@"
+  end
+
+  depends_on :macos
+
+  def install
+    prefix.install "Deckly.app", "LICENSE", "THIRD-PARTY-LICENSES.txt"
+    bin.write_exec_script prefix/"Deckly.app/Contents/MacOS/deckly"
+  end
+
+  def caveats
+    <<~EOS
+      Start Deckly with `deckly`, or add it to Launchpad and Spotlight:
+        ln -sf #{opt_prefix}/Deckly.app ~/Applications/Deckly.app
+    EOS
+  end
+
+  test do
+    assert_predicate prefix/"Deckly.app/Contents/MacOS/deckly-web", :exist?
+  end
+end

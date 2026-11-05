@@ -13,10 +13,12 @@ use crate::os::tray::Command;
 use crate::os::{Hotkey, MediaKey};
 use crate::plugins::{self, KeyImage, Overlay};
 use crate::prefs::{self, Preferences};
-use crate::render::{Live, Renderer};
+use crate::render::{Backdrop, Live, Renderer};
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
+use crate::update::{self, Method};
+use crate::wallpaper::WallpaperEditor;
 use deckly_core::profile::{self, MAX_FOLDER_DEPTH, MAX_GROUP_ACTIONS};
 use deckly_core::{ActionDelays, AutoExit, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
 use deckly_plugin_host::{Host, Status};
@@ -131,6 +133,14 @@ impl View {
         }
     }
 
+    /// The page or folder on the canvas.
+    fn shown<'a>(&self, profile: &'a Profile) -> Option<&'a Page> {
+        match self.path.last() {
+            Some(id) => profile.folder(id),
+            None => profile.pages.get(self.page),
+        }
+    }
+
     fn keys<'a>(&self, profile: &'a mut Profile) -> Option<&'a mut BTreeMap<u8, KeyConfig>> {
         match self.path.last() {
             Some(id) => profile.folder_mut(id).map(|f| &mut f.keys),
@@ -198,6 +208,9 @@ pub struct App {
     runtime: Sender<Msg>,
     renderer: Renderer,
     textures: HashMap<(u64, u32), TextureHandle>,
+    /// One texture per animated key and size, redrawn as its frames change,
+    /// with the hash of the frame it holds.
+    animated: HashMap<(u64, u32), (u64, TextureHandle)>,
     selected_device: Option<String>,
     offline_profile: Option<String>,
     selected_key: Option<u8>,
@@ -225,6 +238,7 @@ pub struct App {
     recording_hotkey: bool,
     app_picker: Option<crate::app_picker::Picker>,
     image_editor: Option<crate::image_editor::Editor>,
+    wallpaper_editor: Option<WallpaperEditor>,
     clipboard: Option<KeyClipboard>,
     pending_paste: Option<PendingPaste>,
     pending_folder_exit_reset: Option<FolderExitReset>,
@@ -257,6 +271,7 @@ impl App {
             runtime: background.runtime.clone(),
             renderer: Renderer::new(),
             textures: HashMap::new(),
+            animated: HashMap::new(),
             selected_device: None,
             offline_profile: None,
             selected_key: None,
@@ -277,6 +292,7 @@ impl App {
             recording_hotkey: false,
             app_picker: None,
             image_editor: None,
+            wallpaper_editor: None,
             clipboard: None,
             pending_paste: None,
             pending_folder_exit_reset: None,
@@ -411,16 +427,49 @@ impl App {
         px: u32,
         live: Live,
         overlay: Option<&Overlay>,
+        backdrop: Option<Backdrop<'_>>,
     ) -> egui::TextureId {
         let px = px.clamp(32, 288);
-        let hash = self.renderer.key_hash(key, live, overlay);
+        let now = std::time::Instant::now();
+        let (live, next) = self.renderer.animate(key, live, now);
+        let hash = self.renderer.key_hash_on(key, live, overlay, backdrop);
+        if let Some(next) = next {
+            ctx.request_repaint_after(next.saturating_duration_since(now));
+            let slot = self
+                .renderer
+                .key_hash_on(key, Live { frame: 0, ..live }, overlay, backdrop);
+            if let Some((shown, tex)) = self.animated.get_mut(&(slot, px)) {
+                if *shown != hash {
+                    let img = self.renderer.render_on(key, px, live, overlay, backdrop);
+                    let size = [px as usize, px as usize];
+                    let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                    tex.set(color, TextureOptions::LINEAR);
+                    *shown = hash;
+                }
+                return tex.id();
+            }
+            if self.animated.len() > 64 {
+                self.animated.clear();
+            }
+            let img = self.renderer.render_on(key, px, live, overlay, backdrop);
+            let color =
+                ColorImage::from_rgba_unmultiplied([px as usize, px as usize], img.as_raw());
+            let tex = ctx.load_texture(
+                format!("key-{slot:x}-{px}-animated"),
+                color,
+                TextureOptions::LINEAR,
+            );
+            let id = tex.id();
+            self.animated.insert((slot, px), (hash, tex));
+            return id;
+        }
         if let Some(t) = self.textures.get(&(hash, px)) {
             return t.id();
         }
         if self.textures.len() > 512 {
             self.textures.clear();
         }
-        let img = self.renderer.render(key, px, live, overlay);
+        let img = self.renderer.render_on(key, px, live, overlay, backdrop);
         let color = ColorImage::from_rgba_unmultiplied([px as usize, px as usize], img.as_raw());
         let tex = ctx.load_texture(format!("key-{hash:x}-{px}"), color, TextureOptions::LINEAR);
         let id = tex.id();
@@ -1073,10 +1122,17 @@ impl App {
         if overlays.values().any(|o| o.mark.is_some()) {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
+        let wallpaper = view.shown(profile).and_then(|p| p.wallpaper.clone());
+        self.wallpaper_button(ui, &geo, profile, view);
         let Some(keys) = view.keys(profile) else {
             return;
         };
         for index in 0..model.key_count() {
+            let backdrop = wallpaper.as_ref().map(|wallpaper| Backdrop {
+                wallpaper,
+                model,
+                index,
+            });
             let (c, r) = (
                 f32::from(index % model.columns),
                 f32::from(index / model.columns),
@@ -1111,7 +1167,22 @@ impl App {
             let inner = rect.shrink(border);
             match &config {
                 Some(key) => {
-                    let tex = self.texture(ui.ctx(), Some(key), tex_px, live, overlays.get(&index));
+                    let tex = self.texture(
+                        ui.ctx(),
+                        Some(key),
+                        tex_px,
+                        live,
+                        overlays.get(&index),
+                        backdrop,
+                    );
+                    painter.add(
+                        egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
+                            .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
+                    );
+                }
+                // An empty key shows its piece of the wallpaper.
+                None if backdrop.is_some() => {
+                    let tex = self.texture(ui.ctx(), None, tex_px, live, None, backdrop);
                     painter.add(
                         egui::epaint::RectShape::filled(inner, inner_radius, Color32::WHITE)
                             .with_texture(tex, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
@@ -1309,6 +1380,70 @@ impl App {
         }
 
         drag_preview(ui.ctx());
+    }
+
+    /// The wallpaper button at the right end of the page strip's row. It
+    /// opens the wallpaper of the page or folder on the canvas.
+    fn wallpaper_button(
+        &mut self,
+        ui: &mut Ui,
+        geo: &CanvasGeometry,
+        profile: &Profile,
+        view: &View,
+    ) {
+        let Some(page) = view.shown(profile) else {
+            return;
+        };
+        let y = geo.grid.bottom() + CanvasGeometry::PAGER_GAP * geo.scale.min(1.0);
+        let r = Rect::from_center_size(pos2(geo.grid.right() - 12.0, y), vec2(24.0, 20.0));
+        let resp = ui
+            .interact(r, ui.id().with("wallpaper"), Sense::click())
+            .on_hover_text("Wallpaper across all keys");
+        let open = self
+            .wallpaper_editor
+            .as_ref()
+            .is_some_and(|w| w.page == page.id);
+        let color = if open || page.wallpaper.is_some() || resp.hovered() {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        ui.painter().text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            icon::IMAGE_SQUARE,
+            font(15.0),
+            color,
+        );
+        if resp.clicked() {
+            self.wallpaper_editor = (!open).then(|| WallpaperEditor::new(&profile.id, &page.id));
+        }
+    }
+
+    /// The open Wallpaper window. Returns the undo group of its changes.
+    fn wallpaper_window(&mut self, ctx: &egui::Context, profile: &mut Profile) -> Option<u64> {
+        let editor = self.wallpaper_editor.as_mut()?;
+        let model = profile.model();
+        let page_id = editor.page.clone();
+        let page = (editor.profile == profile.id)
+            .then(|| {
+                let at = profile.pages.iter().position(|p| p.id == page_id);
+                match at {
+                    Some(i) => profile.pages.get_mut(i),
+                    None => profile.folder_mut(&page_id),
+                }
+            })
+            .flatten();
+        // The page went away or another profile is on the canvas.
+        let Some(page) = page else {
+            self.wallpaper_editor = None;
+            return None;
+        };
+        let group = editor.show(ctx, page, model, &mut self.renderer);
+        if group.is_none() {
+            self.wallpaper_editor = None;
+        }
+        group
     }
 
     /// Page chips under the grid: one rounded strip with the page numbers
@@ -1881,7 +2016,8 @@ impl App {
                 Some(member) => {
                     let context = plugins::member_context(page_id, index, slot, 0);
                     let overlay = runtime::lock(&self.state).overlay(&context, member);
-                    let tex = self.texture(ui.ctx(), Some(member), px, live, overlay.as_ref());
+                    let tex =
+                        self.texture(ui.ctx(), Some(member), px, live, overlay.as_ref(), None);
                     painter.add(
                         egui::epaint::RectShape::filled(
                             inner,
@@ -2020,6 +2156,11 @@ impl App {
                 (key.action == actions::PARENT_FOLDER).then(|| key.auto_exit.unwrap_or_default())
             })
         });
+        let model = profile.model();
+        let wallpaper = view
+            .shown(profile)
+            .and_then(|p| p.wallpaper.clone())
+            .filter(|_| top_level);
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;
             self.image_editor = None;
@@ -2042,7 +2183,7 @@ impl App {
         if key.action != actions::OPEN {
             self.app_picker = None;
         }
-        let defaults = self.renderer.title_defaults;
+        let defaults = self.renderer.title_defaults.clone();
         let def = actions::find(&key.action);
         let (overlay, plugin) = {
             let s = runtime::lock(&self.state);
@@ -2104,12 +2245,18 @@ impl App {
             // Key preview and image controls.
             ui.vertical(|ui| {
                 ui.set_width(110.0);
+                let backdrop = wallpaper.as_ref().map(|wallpaper| Backdrop {
+                    wallpaper,
+                    model,
+                    index,
+                });
                 let tex = self.texture(
                     ui.ctx(),
                     Some(key),
                     (96.0 * ppp) as u32,
                     view.live,
                     overlay.as_ref(),
+                    backdrop,
                 );
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
                 ui.painter().add(
@@ -2173,7 +2320,7 @@ impl App {
                                             },
                                         ),
                                 );
-                                title_style_button(ui, &mut key.title_style, defaults);
+                                title_style_button(ui, &mut key.title_style, &defaults);
                                 if top_level
                                     && key.action != actions::PARENT_FOLDER
                                     && let Some(folder_exit) = folder_exit
@@ -2856,6 +3003,7 @@ impl App {
             device,
             kind,
             host: self.host.as_ref(),
+            updater: &self.background.updater,
         };
         self.prefs.show(ctx, &mut env);
     }
@@ -2897,6 +3045,138 @@ impl App {
         }
         if keep {
             self.rename = Some((id, name));
+        }
+    }
+
+    /// Offers a newer release at the bottom of the window, and finishes an
+    /// update the user started: Deckly starts the new version and quits.
+    fn update_banner(&mut self, ctx: &egui::Context) {
+        let updater = self.background.updater.clone();
+        if let Some((release, finish)) = updater.take_ready() {
+            match finish.start() {
+                Ok(()) => self.background.send(Command::Quit),
+                Err(e) => updater.fail(release, e),
+            }
+            return;
+        }
+        let status = updater.status();
+        let skipped = runtime::lock(&self.state).settings.skipped_update.clone();
+        let release = match &status {
+            update::Status::Available(r) if r.version != skipped && !updater.dismissed() => r,
+            update::Status::Downloading(r) => r,
+            update::Status::InstallFailed(r, _) => r,
+            _ => return,
+        };
+        let method = updater.method();
+        let width = (ctx.content_rect().width() - 64.0).clamp(240.0, 640.0);
+        let mut skip = false;
+        egui::Area::new(egui::Id::new("update-banner"))
+            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -24.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(POPUP)
+                    .stroke(Stroke::new(1.0, ACCENT))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.horizontal(|ui| match &status {
+                            update::Status::Downloading(_) => {
+                                ui.add(egui::Spinner::new().color(ACCENT));
+                                ui.label(format!("Downloading Deckly {}…", release.version));
+                            }
+                            update::Status::InstallFailed(_, error) => {
+                                ui.label(RichText::new(icon::WARNING).color(WARNING));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "Could not update to {}: {error}",
+                                            release.version
+                                        ))
+                                        .color(WARNING),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button(icon::X).on_hover_text("Close").clicked() {
+                                            updater.dismiss();
+                                        }
+                                        if ui.button("Try Again").clicked() {
+                                            updater.install(release.clone());
+                                        }
+                                    },
+                                );
+                            }
+                            _ => {
+                                ui.label(RichText::new(icon::ARROW_CIRCLE_UP).color(ACCENT));
+                                let text = format!(
+                                    "Deckly {} is available. You have {}.",
+                                    release.version,
+                                    env!("CARGO_PKG_VERSION")
+                                );
+                                ui.add(egui::Label::new(text).wrap());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .button(icon::X)
+                                            .on_hover_text("Remind me later")
+                                            .clicked()
+                                        {
+                                            updater.dismiss();
+                                        }
+                                        if ui.button("Skip This Version").clicked() {
+                                            skip = true;
+                                        }
+                                        if ui.button("What's New").clicked()
+                                            && let Err(e) = crate::os::open(&release.page())
+                                        {
+                                            runtime::lock(&self.state).notify(e);
+                                        }
+                                        match &method {
+                                            // Says how to update on its own line below.
+                                            Method::Manual(_) => {}
+                                            _ => {
+                                                let update = egui::Button::new(
+                                                    RichText::new("Update Now")
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(ACCENT);
+                                                if ui
+                                                    .add(update)
+                                                    .on_hover_text(
+                                                        "Download, install and restart Deckly. \
+                                                     Your profiles stay as they are.",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    updater.install(release.clone());
+                                                }
+                                            }
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                        if let (Method::Manual(hint), update::Status::Available(_)) =
+                            (&method, &status)
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon::INFO).color(TEXT_DIM));
+                                ui.add(
+                                    egui::Label::new(RichText::new(*hint).color(TEXT_DIM)).wrap(),
+                                );
+                            });
+                        }
+                    });
+            });
+        if skip {
+            let mut s = runtime::lock(&self.state);
+            s.settings.skipped_update = release.version.clone();
+            s.save_settings();
         }
     }
 
@@ -2958,7 +3238,7 @@ impl eframe::App for App {
         }
         let (title_style, key_press) = {
             let s = runtime::lock(&self.state);
-            (s.settings.title_style, s.settings.key_press)
+            (s.settings.title_style.clone(), s.settings.key_press)
         };
         self.renderer.title_defaults = title_style;
         self.renderer.key_press = key_press;
@@ -3081,13 +3361,15 @@ impl eframe::App for App {
 
         self.paste_confirmation(&ctx, &mut profile, &view);
         self.folder_exit_confirmation(&ctx, &mut profile, &view);
+        let wallpaper_edit = self.wallpaper_window(&ctx, &mut profile);
 
         // Write the edited copy back. Profile switches made this frame
         // already changed which profile is current; only write if it still
         // exists.
         let group = inspector_edit
             .filter(|(_, edited)| edited == &profile)
-            .map(|(id, _)| id);
+            .map(|(id, _)| id)
+            .or(wallpaper_edit);
         self.finish_edit(
             &ctx,
             &mut profile,
@@ -3113,6 +3395,7 @@ impl eframe::App for App {
             profile.device,
         );
         self.rename_window(&ctx);
+        self.update_banner(&ctx);
         self.notice(&ctx);
         // Plugins dropped on the window are installed.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -3307,17 +3590,17 @@ fn open_path(state: &Shared, path: &str) {
 /// position, size and colour, like the official app's. Editing makes the key
 /// keep its own style; the reset button makes it follow the global style
 /// again.
-fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: TitleStyle) {
+fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: &TitleStyle) {
     let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 24.0), Sense::click());
     let resp = resp.on_hover_text("Title style");
-    let popup = egui::Popup::from_toggle_button_response(&resp)
-        // Clicks in the colour picker's own popup must not close this one.
-        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
-        .align(egui::RectAlign::BOTTOM_END)
-        .gap(4.0)
-        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)));
-    let popup_id = popup.get_id();
-    let lit = popup.is_open() || resp.hovered();
+    // egui remembers one open popup at a time, and the font menu and the
+    // colour picker inside are popups too, so this one keeps its own state.
+    let open_id = resp.id.with("open");
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    if resp.clicked() {
+        open = !open;
+    }
+    let lit = open || resp.hovered();
     let p = ui.painter();
     if lit {
         p.rect_filled(rect, CornerRadius::same(3), FIELD);
@@ -3339,10 +3622,18 @@ fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: Tit
         color,
     );
 
-    let mut s = style.unwrap_or(defaults);
+    let mut s = style.clone().unwrap_or_else(|| defaults.clone());
     let mut reset = false;
+    let popup = egui::Popup::from_response(&resp)
+        .open_bool(&mut open)
+        // Clicks in the font menu and the colour picker must not close it.
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .align(egui::RectAlign::BOTTOM_END)
+        .gap(4.0)
+        .frame(egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(12)));
     let shown = popup.show(|ui| {
-        let (area, _) = ui.allocate_exact_size(vec2(252.0, 61.0), Sense::hover());
+        let size = prefs::TITLE_STYLE_SIZE + vec2(38.0, 0.0);
+        let (area, _) = ui.allocate_exact_size(size, Sense::hover());
         prefs::title_style_controls(ui, area.min, &mut s);
         let r = Rect::from_min_size(area.min + vec2(228.0, 0.0), Vec2::splat(24.0));
         ui.painter().rect_stroke(
@@ -3369,12 +3660,13 @@ fn title_style_button(ui: &mut Ui, style: &mut Option<TitleStyle>, defaults: Tit
             .layer_id_at(pos)
             .is_none_or(|l| matches!(l.order, egui::Order::Background | egui::Order::Middle))
     {
-        egui::Popup::close_id(ui.ctx(), popup_id);
+        open = false;
     }
+    ui.data_mut(|d| d.insert_temp(open_id, open));
 
     if reset {
         *style = None;
-    } else if s != style.unwrap_or(defaults) {
+    } else if s != *style.as_ref().unwrap_or(defaults) {
         *style = Some(s);
     }
 }
@@ -4373,6 +4665,7 @@ mod clipboard_tests {
             runtime: background.runtime.clone(),
             renderer: Renderer::new(),
             textures: HashMap::new(),
+            animated: HashMap::new(),
             selected_device: None,
             offline_profile: None,
             selected_key: Some(0),
@@ -4390,6 +4683,7 @@ mod clipboard_tests {
             recording_hotkey: false,
             app_picker: None,
             image_editor: None,
+            wallpaper_editor: None,
             clipboard: None,
             pending_paste: None,
             pending_folder_exit_reset: None,

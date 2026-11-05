@@ -55,6 +55,11 @@ pub struct Report {
     pub hotkeys_changed: usize,
     /// Pictures a key names but the source does not hold.
     pub missing_images: usize,
+    /// Font family -> keys whose title uses it.
+    pub fonts: BTreeMap<String, usize>,
+    /// Keys whose title sets an outline thickness. Deckly draws its own
+    /// outline and keeps none.
+    pub outlines: usize,
 }
 
 /// The page or profile UUID a folder is named after: the plain UUID, or the
@@ -336,6 +341,7 @@ impl Run<'_> {
             icon: (!picture.is_empty())
                 .then(|| (self.image)(id, picture))
                 .flatten(),
+            wallpaper: None,
             keys: BTreeMap::new(),
         };
         for controller in list(source, "Controllers") {
@@ -443,10 +449,22 @@ impl Run<'_> {
                 self.report.missing_images += 1;
             }
         }
-        key.title_style = current
+        let styled = current
             .filter(|s| s.get("FontSize").is_some())
-            .or_else(|| states.iter().find(|s| s.get("FontSize").is_some()))
-            .map(title_style);
+            .or_else(|| states.iter().find(|s| s.get("FontSize").is_some()));
+        key.title_style = styled.map(title_style);
+        if let Some(style) = &key.title_style
+            && !style.font.trim().is_empty()
+        {
+            *self
+                .report
+                .fonts
+                .entry(style.font.trim().to_owned())
+                .or_default() += 1;
+        }
+        if styled.is_some_and(|s| s.get("OutlineThickness").is_some()) {
+            self.report.outlines += 1;
+        }
         let variants = |field: &str| {
             let values: HashSet<&str> = states
                 .iter()
@@ -594,6 +612,17 @@ fn title_style(state: &Value) -> TitleStyle {
         "middle" => TitleAlign::Middle,
         _ => TitleAlign::Bottom,
     };
+    style.font = text(state, "FontFamily").to_owned();
+    // `Regular`, `Bold`, `Italic` or `Bold Italic`; empty keeps the default.
+    let font_style = text(state, "FontStyle").to_lowercase();
+    if !font_style.trim().is_empty() {
+        style.bold = font_style.contains("bold");
+        style.italic = font_style.contains("italic");
+    }
+    if let Some(underline) = state.get("FontUnderline").and_then(Value::as_bool) {
+        style.underline = underline;
+    }
+    style.sanitize();
     style
 }
 
@@ -1195,11 +1224,39 @@ mod tests {
         assert_eq!(style.size, 18);
         assert_eq!(style.color, [0xFF, 0x80, 0x00]);
         assert_eq!(style.align, TitleAlign::Middle);
+        // No font fields: the default font, bold, as before.
+        assert_eq!(style.font, "");
+        assert!(style.bold && !style.italic && !style.underline);
 
         let c = run(json!({"0,0": {"UUID": "com.example.a",
             "States": [{"Image": "Images/missing.png"}, {"Image": "Images/b.png"}]}}));
         assert_eq!(c.report.missing_images, 1);
         assert_eq!(c.report.state_variants, 1);
+    }
+
+    #[test]
+    fn title_fonts_come_from_the_states() {
+        let c = run(json!({
+            "0,0": {"UUID": "com.example.a", "States": [{"Title": "A", "FontSize": 12,
+                "FontFamily": "Verdana", "FontStyle": "Italic", "FontUnderline": true,
+                "OutlineThickness": 2}]},
+            "1,0": {"UUID": "com.example.b", "States": [{"Title": "B", "FontSize": 12,
+                "FontFamily": "Verdana", "FontStyle": "Bold Italic"}]},
+            "2,0": {"UUID": "com.example.c", "States": [{"Title": "C", "FontSize": 12,
+                "FontStyle": "Regular", "FontUnderline": "yes"}]},
+        }));
+        let keys = &c.profile.pages[0].keys;
+        let a = keys[&0].title_style.as_ref().unwrap();
+        assert_eq!(a.font, "Verdana");
+        assert!(!a.bold && a.italic && a.underline);
+        let b = keys[&1].title_style.as_ref().unwrap();
+        assert!(b.bold && b.italic && !b.underline);
+        let plain = keys[&2].title_style.as_ref().unwrap();
+        assert_eq!(plain.font, "");
+        assert!(!plain.bold && !plain.italic && !plain.underline);
+        assert_eq!(c.report.fonts["Verdana"], 2);
+        assert_eq!(c.report.fonts.len(), 1);
+        assert_eq!(c.report.outlines, 1);
     }
 
     #[test]

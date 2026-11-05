@@ -9,6 +9,7 @@ use crate::actions;
 use crate::app_picker::{self, Picker};
 use crate::backup;
 use crate::cropper::{Cropper, Purpose};
+use crate::fonts;
 use crate::image_editor::{self, Editor, ImageChoice, Mode, Selection};
 use crate::logo;
 use crate::os::autostart;
@@ -18,6 +19,7 @@ use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use crate::transfer::{self, Job, Outcome, PluginKind, Section, SharedJob, Summary, Tone};
+use crate::update::{self, Method, Updater};
 use deckly_core::profile::{
     MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_APPLICATIONS, MAX_PROFILE_NAME_CHARS,
 };
@@ -77,6 +79,7 @@ pub struct Env<'a> {
     /// Model of the profile shown in the main window.
     pub kind: DeviceKind,
     pub host: Option<&'a Host>,
+    pub updater: &'a Updater,
 }
 
 pub struct Preferences {
@@ -559,6 +562,7 @@ impl Preferences {
     fn general(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
         label(ui, o, 61.0, 30.0, "Version:");
         value(ui, o, VALUE_X, 61.0, 30.0, env!("CARGO_PKG_VERSION"));
+        self.updates(ui, o, env);
 
         label(ui, o, 91.0, 22.0, "Startup:");
         let enabled = self.autostart.get_or_insert_with(autostart::is_enabled);
@@ -654,6 +658,74 @@ impl Preferences {
         value_dim(ui, o, VALUE_X, 395.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
+    }
+
+    /// Next to the version: check now, update, and the daily check.
+    fn updates(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        let updater = env.updater;
+        let status = updater.status();
+        let (text, hover) = match &status {
+            update::Status::Checking => ("Checking…".to_owned(), None),
+            update::Status::Downloading(r) => (format!("Downloading {}…", r.version), None),
+            update::Status::Ready(..) => ("Restarting…".to_owned(), None),
+            update::Status::Available(r) => match updater.method() {
+                Method::Manual(hint) => (format!("{} Available", r.version), Some(hint.to_owned())),
+                _ => (
+                    format!("Update to {}", r.version),
+                    Some("Download, install and restart Deckly".to_owned()),
+                ),
+            },
+            update::Status::UpToDate => (
+                "Up to Date".to_owned(),
+                Some("This is the latest Deckly. Click to check again.".to_owned()),
+            ),
+            update::Status::Failed(e) => (
+                "Check Again".to_owned(),
+                Some(format!("The check failed: {e}")),
+            ),
+            update::Status::Idle | update::Status::InstallFailed(..) => (
+                "Check for Updates".to_owned(),
+                Some("Ask GitHub for a newer Deckly".to_owned()),
+            ),
+        };
+        let busy = matches!(
+            status,
+            update::Status::Checking | update::Status::Downloading(_) | update::Status::Ready(..)
+        );
+        let rect = at(o, VALUE_X + 64.0, 65.0, 150.0, 22.0);
+        let resp = ui.add_enabled_ui(!busy, |ui| button(ui, rect, &text)).inner;
+        let resp = match hover {
+            Some(hover) => resp.on_hover_text(hover),
+            None => resp,
+        };
+        if resp.clicked() {
+            match (&status, updater.method()) {
+                (update::Status::Available(r), Method::Manual(_)) => {
+                    if let Err(e) = crate::os::open(&r.page()) {
+                        runtime::lock(env.state).notify(e);
+                    }
+                }
+                (update::Status::Available(r), _) => updater.install(r.clone()),
+                _ => updater.check(),
+            }
+        }
+        if busy {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+
+        let mut s = runtime::lock(env.state);
+        let mut on = s.settings.check_updates;
+        let r = at(o, VALUE_X + 226.0, 66.0, 220.0, 20.0);
+        if checkbox(ui, r, &mut on, "Check for updates daily")
+            .on_hover_text(
+                "Asks GitHub once a day; nothing is downloaded until you choose to update",
+            )
+            .changed()
+        {
+            s.settings.check_updates = on;
+            s.save_settings();
+        }
     }
 
     /// Whether keys stop on the lock screen, and what devices show then.
@@ -1857,8 +1929,8 @@ impl Preferences {
     // ----- Style ---------------------------------------------------------
 
     fn style(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
-        let saved = runtime::lock(env.state).settings.title_style;
-        let mut style = self.style.unwrap_or(saved);
+        let saved = runtime::lock(env.state).settings.title_style.clone();
+        let mut style = self.style.clone().unwrap_or_else(|| saved.clone());
         label(ui, o, 61.0, 20.0, "Global Title Style:");
         label(ui, o, 95.0, 86.0, "Keys:");
         title_style_controls(ui, o + vec2(219.0, 95.0), &mut style);
@@ -1871,16 +1943,16 @@ impl Preferences {
             ui,
             o,
             219.0,
-            176.0,
+            213.0,
             480.0,
             "Keys that set their own title style keep it.",
         );
 
-        self.style = (style != saved).then_some(style);
+        self.style = (style != saved).then(|| style.clone());
         let changed = self.style.is_some();
         if ui
             .add_enabled_ui(changed, |ui| {
-                button(ui, at(o, 218.0, 223.0, 49.0, 22.0), "Apply")
+                button(ui, at(o, 218.0, 260.0, 49.0, 22.0), "Apply")
             })
             .inner
             .clicked()
@@ -1894,7 +1966,7 @@ impl Preferences {
         }
         if ui
             .add_enabled_ui(changed, |ui| {
-                button(ui, at(o, 277.0, 223.0, 51.0, 22.0), "Revert")
+                button(ui, at(o, 277.0, 260.0, 51.0, 22.0), "Revert")
             })
             .inner
             .clicked()
@@ -1910,14 +1982,14 @@ impl Preferences {
         let mut s = runtime::lock(env.state);
         let before = s.settings.key_press;
         let mut press = before;
-        label(ui, o, 275.0, 22.0, "Key Press:");
+        label(ui, o, 312.0, 22.0, "Key Press:");
         toggle(
             ui,
-            at(o, 219.0, 278.0, 220.0, 18.0),
+            at(o, 219.0, 315.0, 220.0, 18.0),
             &mut press.shrink,
             "Shrink keys while held",
         );
-        let slider = at(o, 219.0, 310.0, 300.0, 20.0);
+        let slider = at(o, 219.0, 347.0, 300.0, 20.0);
         let resp = ui
             .add_enabled_ui(press.shrink, |ui| {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(slider), |ui| {
@@ -1930,12 +2002,12 @@ impl Preferences {
                 .inner
             })
             .inner;
-        value(ui, o, 531.0, 309.0, 22.0, &format!("{}%", press.size));
+        value(ui, o, 531.0, 346.0, 22.0, &format!("{}%", press.size));
         value_dim(
             ui,
             o,
             219.0,
-            340.0,
+            377.0,
             480.0,
             "Size of a held key's picture on the device.",
         );
@@ -1955,7 +2027,7 @@ impl Preferences {
     fn preview(&mut self, ui: &mut Ui, rect: Rect, style: &TitleStyle, renderer: &mut Renderer) {
         let mut key = KeyConfig::new(actions::WEBSITE, json!({}));
         key.title = "Preview".into();
-        key.title_style = Some(*style);
+        key.title_style = Some(style.clone());
         let hash = renderer.key_hash(Some(&key), Live::default(), None);
         let ppp = ui.ctx().pixels_per_point();
         let border = KEY_BORDER_WIDTH;
@@ -2493,9 +2565,14 @@ pub(crate) fn shrink_to(mut image: image::RgbaImage, target: u32) -> ColorImage 
     ColorImage::from_rgba_unmultiplied(size, image.as_raw())
 }
 
-/// Show, position, size and colour controls for a title style, laid out
-/// like the official app's: the check box and position buttons on top, the
-/// size and colour under them. `o` is the top left of a 214 x 61 area.
+/// Size of the area [`title_style_controls`] draws in.
+pub(crate) const TITLE_STYLE_SIZE: Vec2 = vec2(214.0, 98.0);
+
+/// Show, position, font, size, bold/italic/underline and colour controls
+/// for a title style, laid out like the official app's: the check box and
+/// position buttons on top, the font under them, then the size, the font
+/// style toggles and the colour. `o` is the top left of a
+/// [`TITLE_STYLE_SIZE`] area.
 pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle) {
     let painter = ui.painter().clone();
     checkbox(
@@ -2531,8 +2608,10 @@ pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle)
         }
     }
 
+    font_menu(ui, at(o, 0.0, 37.0, 214.0, 24.0), &mut style.font);
+
     // Size in px with up/down buttons.
-    let size = at(o, 0.0, 37.0, 48.0, 24.0);
+    let size = at(o, 0.0, 74.0, 48.0, 24.0);
     painter.rect(
         size,
         CornerRadius::same(3),
@@ -2547,8 +2626,8 @@ pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle)
         font(13.0),
         TEXT,
     );
-    let up = at(o, 56.0, 37.0, 14.0, 12.0);
-    let down = at(o, 56.0, 49.0, 14.0, 12.0);
+    let up = at(o, 56.0, 74.0, 14.0, 12.0);
+    let down = at(o, 56.0, 86.0, 14.0, 12.0);
     if small_icon_button(ui, up, icon::CARET_UP, style.size < TitleStyle::MAX_SIZE).clicked() {
         style.size += 1;
     }
@@ -2563,14 +2642,186 @@ pub(crate) fn title_style_controls(ui: &mut Ui, o: Pos2, style: &mut TitleStyle)
         style.size -= 1;
     }
 
+    // Bold, italic, underline.
+    painter.rect_filled(
+        at(o, 82.0, 74.0, 90.0, 24.0),
+        CornerRadius::same(3),
+        PREF_SEGMENT,
+    );
+    let toggles = [
+        (&mut style.bold, icon::TEXT_B, "Bold"),
+        (&mut style.italic, icon::TEXT_ITALIC, "Italic"),
+        (&mut style.underline, icon::TEXT_UNDERLINE, "Underline"),
+    ];
+    for (i, (value, glyph, name)) in toggles.into_iter().enumerate() {
+        let r = at(o, 82.0 + 30.0 * i as f32, 74.0, 30.0, 24.0);
+        let resp = ui
+            .interact(r, ui.id().with(("title-font-style", i)), Sense::click())
+            .on_hover_text(name);
+        if *value {
+            painter.rect_filled(r.shrink(1.0), CornerRadius::same(3), PREF_CHECK);
+        }
+        let color = if *value || resp.hovered() {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        centered_glyph(ui, r.center(), glyph, 15.0, color);
+        if resp.clicked() {
+            *value = !*value;
+        }
+    }
+
     // Colour.
     ui.scope_builder(
-        egui::UiBuilder::new().max_rect(at(o, 82.0, 39.0, 30.0, 20.0)),
+        egui::UiBuilder::new().max_rect(at(o, 184.0, 76.0, 30.0, 20.0)),
         |ui| {
             ui.spacing_mut().interact_size = vec2(30.0, 20.0);
             egui::color_picker::color_edit_button_srgb(ui, &mut style.color);
         },
     );
+}
+
+/// Letters typed in a list within this many seconds of each other spell one
+/// name to jump to; after a pause typing starts a new one.
+const TYPE_AHEAD_SECONDS: f64 = 1.0;
+/// Longer typed names are cut; no family name needs more.
+const TYPE_AHEAD_CHARS: usize = 64;
+
+/// Jumping through a long list by typing the start of a name: `a` goes to
+/// the first name starting with "a", `ar` quickly after to "Arial", and `a`
+/// again and again to the next names starting with "a".
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TypeAhead {
+    typed: String,
+    /// When the last letter was typed, in egui's seconds.
+    at: f64,
+}
+
+impl TypeAhead {
+    /// Adds what was typed at `now`.
+    fn push(&mut self, text: &str, now: f64) {
+        if now - self.at > TYPE_AHEAD_SECONDS {
+            self.typed.clear();
+        }
+        let room = TYPE_AHEAD_CHARS.saturating_sub(self.typed.chars().count());
+        self.typed.extend(
+            text.chars()
+                .filter(|c| !c.is_control())
+                .flat_map(char::to_lowercase)
+                .take(room),
+        );
+        self.at = now;
+    }
+
+    /// The name to jump to: the first one starting with what was typed,
+    /// else, for one letter typed again and again, the next name with it.
+    fn find(&self, names: &[String]) -> Option<usize> {
+        let typed = self.typed.as_str();
+        let first = typed.chars().next()?;
+        let starts = |name: &String, start: &str| name.to_lowercase().starts_with(start);
+        if let Some(i) = names.iter().position(|n| starts(n, typed)) {
+            return Some(i);
+        }
+        let count = typed.chars().count();
+        if !typed.chars().all(|c| c == first) {
+            return None;
+        }
+        let letter = first.to_string();
+        let matches: Vec<usize> = (0..names.len())
+            .filter(|&i| starts(&names[i], &letter))
+            .collect();
+        matches.get((count - 1) % matches.len().max(1)).copied()
+    }
+}
+
+/// The font family menu: "Default" and the families installed here. Typing
+/// jumps to a family, and Enter takes it. A family the system does not have
+/// stays chosen and says so.
+fn font_menu(ui: &mut Ui, rect: Rect, family: &mut String) {
+    let ctx = ui.ctx().clone();
+    let families = fonts::families(move || ctx.request_repaint());
+    let missing = !family.is_empty()
+        && families
+            .as_ref()
+            .is_some_and(|f| !f.iter().any(|n| n.eq_ignore_ascii_case(family)));
+    let shown = if family.is_empty() {
+        "Default".to_owned()
+    } else {
+        family.clone()
+    };
+    let resp = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+            ui.spacing_mut().interact_size.y = rect.height();
+            let text = RichText::new(shown).font(font(13.0));
+            egui::ComboBox::from_id_salt("title-font")
+                .selected_text(if missing { text.color(TEXT_DIM) } else { text })
+                .width(rect.width())
+                .height(320.0)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(family.is_empty(), "Default").clicked() {
+                        family.clear();
+                    }
+                    match &families {
+                        Some(list) => {
+                            let (jump, typed) = type_ahead(ui, list);
+                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            for (i, name) in list.iter().enumerate() {
+                                let on = name.eq_ignore_ascii_case(family);
+                                let mut resp = ui.selectable_label(on, name);
+                                if jump == Some(i) {
+                                    resp = resp.highlight();
+                                    if typed {
+                                        resp.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    if enter {
+                                        name.clone_into(family);
+                                        ui.close();
+                                    }
+                                }
+                                if resp.clicked() {
+                                    name.clone_into(family);
+                                }
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new("Loading fonts").color(TEXT_DIM));
+                        }
+                    }
+                })
+                .response
+        })
+        .inner;
+    if missing {
+        resp.on_hover_text("Not installed here; titles use the default font");
+    }
+}
+
+/// Reads what was typed into an open list. Returns the item to jump to and
+/// whether typing moved it this frame.
+fn type_ahead(ui: &Ui, names: &[String]) -> (Option<usize>, bool) {
+    let id = ui.id().with("type-ahead");
+    let (text, now) = ui.input(|i| {
+        let text: String = i
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        (text, i.time)
+    });
+    let mut state: TypeAhead = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let typed = !text.is_empty();
+    if typed {
+        state.push(&text, now);
+        ui.data_mut(|d| d.insert_temp(id, state.clone()));
+    }
+    // The jump stays lit until typing pauses.
+    let fresh = now - state.at <= TYPE_AHEAD_SECONDS;
+    (fresh.then(|| state.find(names)).flatten(), typed)
 }
 
 /// A key outline with a line where the title sits.
@@ -2776,6 +3027,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn typing_jumps_to_font_names() {
+        let names: Vec<String> = ["Adwaita Sans", "Arial", "Cantarell", "Inter", "Iosevka"]
+            .map(String::from)
+            .to_vec();
+        let mut t = TypeAhead::default();
+        t.push("a", 10.0);
+        assert_eq!(t.find(&names), Some(0));
+        // Quickly after: one name, "ar".
+        t.push("R", 10.5);
+        assert_eq!(t.find(&names), Some(1));
+        // After a pause the letter starts over.
+        t.push("i", 12.0);
+        assert_eq!(t.find(&names), Some(3));
+        // The same letter again goes through the names with it.
+        t.push("i", 12.2);
+        assert_eq!(t.find(&names), Some(4));
+        t.push("i", 12.4);
+        assert_eq!(t.find(&names), Some(3));
+        t.push("z", 20.0);
+        assert_eq!(t.find(&names), None);
+        assert_eq!(TypeAhead::default().find(&names), None);
+        assert_eq!(t.find(&[]), None);
+    }
+
+    #[test]
+    fn typed_names_are_bounded() {
+        let mut t = TypeAhead::default();
+        for i in 0..100 {
+            t.push("abc\u{8}", 1.0 + f64::from(i) * 0.1);
+        }
+        assert_eq!(t.typed.chars().count(), TYPE_AHEAD_CHARS);
+        assert!(!t.typed.contains('\u{8}'));
+    }
+
+    #[test]
     fn page_icon_results_only_update_the_unchanged_destination_after_a_successful_save() {
         let mut profile = Profile::new("Test", DeviceKind::Mk2);
         profile.add_page();
@@ -2855,6 +3141,7 @@ mod tests {
                                     device: None,
                                     kind: DeviceKind::Mk2,
                                     host: None,
+                                    updater: &Updater::new(None, std::sync::Arc::new(|| {})),
                                 },
                             );
                         });
@@ -2933,6 +3220,7 @@ mod tests {
                         device: None,
                         kind: DeviceKind::Mk2,
                         host: None,
+                        updater: &Updater::new(None, std::sync::Arc::new(|| {})),
                     };
                     match tab {
                         Tab::General => prefs.switch_by_window(ui, Pos2::ZERO, &mut env),
