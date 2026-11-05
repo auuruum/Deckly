@@ -32,6 +32,8 @@ uuid = { version = "1.29.0", features = ["v4"] }
 sha2 = "0.10.9"
 # Compares release versions; small, pure Rust, already in Cargo.lock.
 semver = "1.0.28"
+# Private, seekable files for the optional video converter.
+tempfile = "3.27.0"
 # The tray icon. `ksni` talks D-Bus from Rust on Linux; no GTK.
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 

@@ -1141,7 +1141,7 @@ impl App {
                 f32::from(index / model.columns),
             );
             let min = geo.grid.min + vec2(c, r) * geo.pitch;
-            let mut rect = Rect::from_min_size(min, Vec2::splat(key_size));
+            let rect = Rect::from_min_size(min, Vec2::splat(key_size));
             let response = ui.interact(rect, ui.id().with(("key", index)), Sense::click_and_drag());
             let config = keys.get(&index).cloned();
             // The parent folder key stays in its folder; it can only move.
@@ -1150,11 +1150,6 @@ impl App {
                 .is_some_and(|k| k.action == actions::PARENT_FOLDER);
             if config.is_some() {
                 response.dnd_set_drag_payload(DragPayload::Key(index));
-            }
-            // The live view shrinks a held key like the device does.
-            let press = self.renderer.key_press;
-            if press.shrink && pressed.contains(&index) {
-                rect = rect.shrink(key_size * f32::from(100 - press.size) / 200.0);
             }
             let hovered_drop = response.dnd_hover_payload::<DragPayload>().is_some();
             let border_color = if hovered_drop {
@@ -1174,7 +1169,10 @@ impl App {
                         ui.ctx(),
                         Some(key),
                         tex_px,
-                        live,
+                        Live {
+                            pressed: pressed.contains(&index),
+                            ..live
+                        },
                         overlays.get(&index),
                         backdrop,
                     );

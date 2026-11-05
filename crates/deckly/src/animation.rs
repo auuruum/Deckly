@@ -40,7 +40,7 @@ const DEFAULT_DELAY_MS: u32 = 100;
 const MAX_CACHED: usize = 32;
 const MAX_CACHED_BYTES: usize = 128 * 1024 * 1024;
 
-/// A decoded animation: square frames, flattened onto black, and when each
+/// A decoded animation: square RGBA frames and when each
 /// one ends.
 pub struct Animation {
     frames: Vec<RgbaImage>,
@@ -233,7 +233,7 @@ fn delay_ms(numer: u32, denom: u32) -> u32 {
     ms.clamp(1000_u32.div_ceil(MAX_FPS), MAX_DELAY_MS)
 }
 
-/// A frame as kept: the middle square, flattened onto black and no larger
+/// A frame as kept: the middle square, with alpha and no larger
 /// than [`FRAME_SIDE`].
 fn small(image: &RgbaImage) -> RgbaImage {
     let (w, h) = image.dimensions();
@@ -245,20 +245,23 @@ fn small(image: &RgbaImage) -> RgbaImage {
         side,
         side,
     );
-    let mut flat = square.to_image();
-    for px in flat.pixels_mut() {
-        let a = u32::from(px.0[3]);
-        for c in &mut px.0[..3] {
-            *c = ((u32::from(*c) * a + 127) / 255) as u8;
-        }
-        px.0[3] = 255;
-    }
+    let mut square = square.to_image();
     let out = side.min(FRAME_SIDE);
     if out == side {
-        flat
-    } else {
-        imageops::resize(&flat, out, out, imageops::FilterType::Triangle)
+        return square;
     }
+    crate::render::premultiply(&mut square);
+    let mut resized = imageops::resize(&square, out, out, imageops::FilterType::Triangle);
+    for px in resized.pixels_mut() {
+        let a = u32::from(px.0[3]);
+        for c in &mut px.0[..3] {
+            *c = (u32::from(*c) * 255 + a / 2)
+                .checked_div(a)
+                .unwrap_or(0)
+                .min(255) as u8;
+        }
+    }
+    resized
 }
 
 #[cfg(test)]
@@ -387,7 +390,9 @@ mod tests {
         let wide = RgbaImage::from_pixel(40, 10, Rgba([9, 9, 9, 128]));
         let kept = small(&wide);
         assert_eq!(kept.dimensions(), (10, 10));
-        assert_eq!(kept.get_pixel(0, 0).0, [5, 5, 5, 255]);
+        assert_eq!(kept.get_pixel(0, 0).0, [9, 9, 9, 128]);
+        let translucent = RgbaImage::from_pixel(400, 200, Rgba([200, 40, 0, 128]));
+        assert_eq!(small(&translucent).get_pixel(0, 0).0, [199, 40, 0, 128]);
         assert_eq!(small(&RgbaImage::new(0, 0)).dimensions(), (0, 0));
     }
 

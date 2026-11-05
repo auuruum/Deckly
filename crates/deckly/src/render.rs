@@ -185,30 +185,19 @@ impl Renderer {
             return tile.unwrap_or_else(|| RgbaImage::from_pixel(size, size, EMPTY));
         };
         let style = self.title_style(key);
-        let broken = key
-            .image
-            .as_deref()
-            .is_some_and(|p| matches!(self.picture(p), Picture::Broken));
-        let under = tile.as_ref();
+        let custom = key.image.as_deref().map(|p| self.picture(p));
+        let broken = matches!(custom, Some(Picture::Broken));
         // The user's own image wins over the plugin's.
-        let picture = key
-            .image
-            .as_deref()
-            .and_then(|p| self.picture(p).at(live.frame))
-            .map(|src| fit_over(src, size, under))
-            .or_else(|| {
-                overlay?
-                    .image
-                    .as_ref()
-                    .map(|i| fit_over(&i.img, size, under))
-            })
+        let picture = custom
+            .as_ref()
+            .and_then(|p| p.at(live.frame))
+            .map(|src| fit_layer(src, size))
+            .or_else(|| overlay?.image.as_ref().map(|i| fit_layer(&i.img, size)))
             .or_else(|| Some(self.page_picture(overlay?.page.as_ref()?, size)));
         let mut img = match picture {
             Some(img) => img,
             None => {
-                let mut img = tile
-                    .clone()
-                    .unwrap_or_else(|| RgbaImage::from_pixel(size, size, ICON_BACKGROUND));
+                let mut img = RgbaImage::new(size, size);
                 if key.action == actions::PAGE_INDICATOR {
                     if let Some(font) = &self.title_font {
                         draw_number(&mut img, font, live.page);
@@ -239,10 +228,16 @@ impl Renderer {
         {
             draw_mark(&mut img, font, mark);
         }
-        if let Some(percent) = self.pressed_size(live) {
-            img = shrink(&img, percent);
-        }
-        img
+        let mut out = tile.unwrap_or_else(|| RgbaImage::from_pixel(size, size, EMPTY));
+        let offset = if let Some(percent) = self.pressed_size(live) {
+            let small = (size * u32::from(percent) / 100).clamp(1, size);
+            img = imageops::resize(&img, small, small, imageops::FilterType::Triangle);
+            (size - small) / 2
+        } else {
+            0
+        };
+        composite_layer(&mut out, &img, offset);
+        out
     }
 
     /// The title style a key is drawn with.
@@ -380,47 +375,34 @@ impl Renderer {
     }
 }
 
-/// Scales a custom image to a key. Transparent pixels are flattened onto the
-/// key's black first: the device has no alpha, and scaling the colour of
-/// transparent pixels (often white or gray) would leave halos on the edges.
-fn fit_image(src: &RgbaImage, size: u32) -> RgbaImage {
-    let mut flat = src.clone();
-    for px in flat.pixels_mut() {
+pub(crate) fn premultiply(img: &mut RgbaImage) {
+    for px in img.pixels_mut() {
         let a = u32::from(px.0[3]);
         for c in &mut px.0[..3] {
             *c = ((u32::from(*c) * a + 127) / 255) as u8;
         }
-        px.0[3] = 255;
     }
-    // Lanczos keeps fine edges sharp when a large picture shrinks to a key.
-    imageops::resize(&flat, size, size, imageops::FilterType::Lanczos3)
 }
 
-/// [`fit_image`] over a background: transparent parts of the picture show
-/// `under` instead of black.
-fn fit_over(src: &RgbaImage, size: u32, under: Option<&RgbaImage>) -> RgbaImage {
-    let Some(under) = under.filter(|u| u.dimensions() == (size, size)) else {
-        return fit_image(src, size);
-    };
-    // Premultiplied, so hidden colours of transparent pixels do not bleed.
-    let mut premultiplied = src.clone();
-    for px in premultiplied.pixels_mut() {
-        let a = u32::from(px.0[3]);
-        for c in &mut px.0[..3] {
-            *c = ((u32::from(*c) * a + 127) / 255) as u8;
-        }
-    }
-    let scaled = imageops::resize(&premultiplied, size, size, imageops::FilterType::Lanczos3);
-    let mut out = under.clone();
-    for (o, s) in out.pixels_mut().zip(scaled.pixels()) {
+/// Resize a key's foreground without letting hidden colours bleed.
+fn fit_layer(src: &RgbaImage, size: u32) -> RgbaImage {
+    let mut layer = src.clone();
+    premultiply(&mut layer);
+    imageops::resize(&layer, size, size, imageops::FilterType::Lanczos3)
+}
+
+/// Places the premultiplied key contents on an opaque, stationary background.
+fn composite_layer(out: &mut RgbaImage, layer: &RgbaImage, offset: u32) {
+    for (x, y, s) in layer.enumerate_pixels() {
+        let Some(o) = out.get_pixel_mut_checked(x + offset, y + offset) else {
+            continue;
+        };
         let keep = 255 - u32::from(s.0[3]);
         for (dst, &src) in o.0[..3].iter_mut().zip(&s.0[..3]) {
             let under = (u32::from(*dst) * keep + 127) / 255;
-            *dst = (u32::from(src) + under).min(255) as u8;
+            *dst = (u32::from(src.min(s.0[3])) + under).min(255) as u8;
         }
-        o.0[3] = 255;
     }
-    out
 }
 
 /// The part of a picture of `src` pixels a wallpaper shows across a panel
@@ -467,7 +449,11 @@ pub fn wallpaper_tile(
     }
     let cw = (x1.ceil() as u32).min(sw).saturating_sub(cx).max(1);
     let ch = (y1.ceil() as u32).min(sh).saturating_sub(cy).max(1);
-    let piece = imageops::crop_imm(src, cx, cy, cw, ch).to_image();
+    let mut piece = imageops::crop_imm(src, cx, cy, cw, ch).to_image();
+    premultiply(&mut piece);
+    for px in piece.pixels_mut() {
+        px.0[3] = 255;
+    }
     let size = size.clamp(1, 1024);
     Some(imageops::resize(
         &piece,
@@ -574,18 +560,6 @@ fn page_tile(
         draw_centred(&mut img, font, &text, px, [0; 3]);
     }
     img
-}
-
-/// A held key: the whole picture, title included, at `percent` of its size
-/// and centred on black.
-fn shrink(img: &RgbaImage, percent: u8) -> RgbaImage {
-    let size = img.width();
-    let small = (size * u32::from(percent) / 100).clamp(1, size);
-    let scaled = imageops::resize(img, small, small, imageops::FilterType::Triangle);
-    let mut out = RgbaImage::from_pixel(size, size, EMPTY);
-    let offset = i64::from((size - small) / 2);
-    imageops::overlay(&mut out, &scaled, offset, offset);
-    out
 }
 
 /// The user's title, else the one the key's plugin set.
@@ -815,7 +789,7 @@ fn blend(img: &mut RgbaImage, x: i32, y: i32, color: [u8; 3], coverage: f32) {
     for (dst, &src) in px.0.iter_mut().zip(color.iter()) {
         *dst = (f32::from(src) * a + f32::from(*dst) * (1.0 - a)).round() as u8;
     }
-    px.0[3] = 255;
+    px.0[3] = (255.0 * a + f32::from(px.0[3]) * (1.0 - a)).round() as u8;
 }
 
 fn draw_icon(img: &mut RgbaImage, font: &FontArc, glyph: &str, px: f32) {
@@ -1086,7 +1060,8 @@ mod tests {
                 src.put_pixel(x, y, Rgba([0, 200, 0, 255]));
             }
         }
-        let out = fit_image(&src, 32);
+        let mut out = RgbaImage::from_pixel(32, 32, EMPTY);
+        composite_layer(&mut out, &fit_layer(&src, 32), 0);
         assert_eq!(out.get_pixel(1, 1).0, [0, 0, 0, 255]);
         assert_eq!(out.get_pixel(16, 16).0, [0, 200, 0, 255]);
     }
@@ -1415,6 +1390,85 @@ mod tests {
         assert_eq!(decoded.width(), model.key_image_size);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(half);
+    }
+
+    #[test]
+    fn held_actions_leave_the_wallpaper_in_place() {
+        let files = tempfile::tempdir().unwrap();
+        let wall_path = files.path().join("wall.png");
+        RgbaImage::from_fn(256, 256, |x, y| Rgba([x as u8, y as u8, 160, 255]))
+            .save(&wall_path)
+            .unwrap();
+        let wallpaper = Wallpaper::new(wall_path);
+        let model = DeviceModel::of(deckly_core::DeviceKind::Mini);
+        let size = model.key_image_size;
+        let backdrop = Some(Backdrop {
+            wallpaper: &wallpaper,
+            model,
+            index: 0,
+        });
+        let mut r = Renderer::new();
+        r.key_press.size = 60;
+        let down = Live {
+            pressed: true,
+            ..Live::default()
+        };
+        let background = r.render_on(None, size, down, None, backdrop);
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        let held = r.render_on(Some(&key), size, down, None, backdrop);
+        assert_eq!(
+            held.get_pixel(4, size / 2),
+            background.get_pixel(4, size / 2)
+        );
+        assert_ne!(held, background);
+
+        // An opaque image with a baked-in red background and yellow icon
+        // shrinks as one piece, revealing the wallpaper around it.
+        let opaque = files.path().join("opaque.png");
+        RgbaImage::from_fn(size, size, |x, y| {
+            if (size / 3..size * 2 / 3).contains(&x) && (size / 3..size * 2 / 3).contains(&y) {
+                Rgba([250, 240, 0, 255])
+            } else {
+                Rgba([220, 0, 0, 255])
+            }
+        })
+        .save(&opaque)
+        .unwrap();
+        key.image = Some(opaque);
+        let held = r.render_on(Some(&key), size, down, None, backdrop);
+        assert_eq!(
+            held.get_pixel(4, size / 2),
+            background.get_pixel(4, size / 2)
+        );
+        assert_eq!(held.get_pixel(size / 4, size / 2).0, [220, 0, 0, 255]);
+        assert_eq!(held.get_pixel(size / 2, size / 2).0, [250, 240, 0, 255]);
+        let device = r.device_image_on(
+            Some(&key),
+            down,
+            None,
+            model,
+            Orientation::Standard,
+            backdrop,
+        );
+        assert_eq!(
+            image::load_from_memory(&device).unwrap().into_rgba8(),
+            turn(held, model.rotation),
+        );
+        let transparent = files.path().join("transparent.png");
+        let mut picture = image::open(key.image.as_ref().unwrap())
+            .unwrap()
+            .into_rgba8();
+        for pixel in picture.pixels_mut().filter(|p| p.0[1] == 0) {
+            pixel.0[3] = 0;
+        }
+        picture.save(&transparent).unwrap();
+        key.image = Some(transparent);
+        let held = r.render_on(Some(&key), size, down, None, backdrop);
+        assert_eq!(
+            held.get_pixel(size / 4, size / 2),
+            background.get_pixel(size / 4, size / 2)
+        );
+        assert_eq!(held.get_pixel(size / 2, size / 2).0, [250, 240, 0, 255]);
     }
 
     #[test]
