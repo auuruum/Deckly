@@ -28,7 +28,7 @@ jobs:
         include:
           # The oldest supported Ubuntu, so the binaries run on older glibc.
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, setup: --setup }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: macos-latest, target: x86_64-apple-darwin }
     steps:
@@ -45,17 +45,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxkbcommon-dev
 
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
       - name: Build the archive
-        run: cargo dev dist --target ${{ matrix.target }}
+        run: cargo dev dist --target ${{ matrix.target }} ${{ matrix.setup }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: deckly-${{ matrix.target }}
-          path: dist/deckly-${{ matrix.target }}.*
+          path: |
+            dist/deckly-${{ matrix.target }}.*
+            dist/deckly-setup-*.exe
           if-no-files-found: error
 
   release:
@@ -88,5 +94,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --title "Deckly $GITHUB_REF_NAME" --generate-notes \
-            dist/deckly-*.tar.gz dist/deckly-*.zip dist/SHA256SUMS \
+            dist/deckly-*.tar.gz dist/deckly-*.zip dist/deckly-setup-windows-x64.exe dist/SHA256SUMS \
             dist/packages/deckly.rb dist/aur-deckly-bin.tar.gz

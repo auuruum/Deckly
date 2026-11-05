@@ -55,11 +55,13 @@ pub fn run(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     let root = root()?;
     let mut target = None;
     let mut out = None;
+    let mut setup = false;
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--target") => target = Some(value("--target", &mut args)?),
             Some("--out") => out = Some(path_value("--out", &mut args)?),
+            Some("--setup") => setup = true,
             _ => {
                 return Err(format!(
                     "unknown dist option {}; use cargo dev --help",
@@ -73,6 +75,9 @@ pub fn run(args: impl Iterator<Item = OsString>) -> Result<(), String> {
         None => host_target()?,
     };
     let os = Os::of(&target)?;
+    if setup && os != Os::Windows {
+        return Err("--setup is for Windows targets only".to_owned());
+    }
     let out = out.unwrap_or_else(|| root.join("dist"));
 
     build(root, &target)?;
@@ -113,6 +118,13 @@ pub fn run(args: impl Iterator<Item = OsString>) -> Result<(), String> {
             &stage.join("udev/60-deckly.rules"),
         )?;
     }
+    if os == Os::Windows {
+        // The Start menu entry and the setup take their icon from here.
+        copy(
+            &root.join("assets/windows/deckly.ico"),
+            &stage.join("deckly.ico"),
+        )?;
+    }
     copy(&root.join("LICENSE"), &stage.join("LICENSE"))?;
     copy(&root.join("README.md"), &stage.join("README.md"))?;
     let notices = licenses::third_party(root, &target)?;
@@ -135,7 +147,54 @@ pub fn run(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     }
     pack(os, &out, &stem, &archive)?;
     println!("{}", archive.display());
+    if setup {
+        println!("{}", windows_setup(root, &out, &stage, version)?.display());
+    }
     Ok(())
+}
+
+/// The setup program's file name; versionless like the archives.
+pub const WINDOWS_SETUP: &str = "deckly-setup-windows-x64.exe";
+
+/// Builds the Windows setup from the staged folder with Inno Setup's
+/// compiler: `DECKLY_ISCC`, else the default install folder, else `ISCC` on
+/// `PATH`.
+fn windows_setup(root: &Path, out: &Path, stage: &Path, version: &str) -> Result<PathBuf, String> {
+    let iscc = std::env::var_os("DECKLY_ISCC")
+        .map(PathBuf::from)
+        .or_else(|| {
+            [
+                r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+                r"C:\Program Files\Inno Setup 6\ISCC.exe",
+            ]
+            .map(PathBuf::from)
+            .into_iter()
+            .find(|p| p.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("ISCC"));
+    let setup = out.join(WINDOWS_SETUP);
+    if setup.exists() {
+        fs::remove_file(&setup).map_err(|e| format!("cannot replace {}: {e}", setup.display()))?;
+    }
+    let define = |name: &str, value: &Path| {
+        let mut arg = OsString::from(format!("/D{name}="));
+        arg.push(value);
+        arg
+    };
+    status(
+        Command::new(&iscc)
+            .arg("/Q")
+            .arg(format!("/DAppVersion={version}"))
+            .arg(define("SourceDir", stage))
+            .arg(define("OutputDir", out))
+            .arg(root.join("packaging/windows/deckly.iss")),
+        "Inno Setup (install it, or set DECKLY_ISCC to ISCC.exe)",
+    )?;
+    if setup.is_file() {
+        Ok(setup)
+    } else {
+        Err(format!("Inno Setup did not write {}", setup.display()))
+    }
 }
 
 /// The target triple of this computer, from `rustc -vV`.
@@ -242,6 +301,14 @@ mod tests {
             "deckly-x86_64-pc-windows-msvc.zip"
         );
         assert!(archive_name("wasm32-unknown-unknown").is_err());
+    }
+
+    #[test]
+    fn inno_setup_writes_the_name_releases_use() {
+        let script = include_str!("../../packaging/windows/deckly.iss");
+        let base = WINDOWS_SETUP.trim_end_matches(".exe");
+        let line = format!("OutputBaseFilename={base}");
+        assert!(script.lines().any(|l| l.trim_end() == line));
     }
 
     #[test]
