@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Deckly
+GenericName=Stream Deck editor
+Comment=Unofficial, independent app for Stream Deck hardware
+Exec=deckly
+Icon=deckly
+Terminal=false
+Categories=Utility;
+Keywords=stream;deck;macro;keys;
+StartupWMClass=deckly

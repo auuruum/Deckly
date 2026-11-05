@@ -41,6 +41,48 @@ Untested models are built from Elgato's published HID documentation.
 [docs/devices.md](docs/devices.md) records what was checked and how to test a
 new model.
 
+## Install
+
+Ready-made builds are on the
+[releases page](https://github.com/auuruum/Deckly/releases). The commands
+below download the latest one, check its checksum and install it for your
+user. Close the official Stream Deck app first.
+
+Linux (x86_64) and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/auuruum/Deckly/main/install.sh | sh
+```
+
+On Linux this installs to `~/.local`, adds Deckly to the app menu and, with
+your password, the device rules from [Linux and macOS](#linux-and-macos).
+Plugins with web pages also need WebKitGTK 4.1. On macOS it puts
+`Deckly.app` in `~/Applications`. To remove Deckly (your profiles stay):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/auuruum/Deckly/main/install.sh | sh -s -- --uninstall
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/auuruum/Deckly/main/install.ps1 | iex
+```
+
+This installs to `%LOCALAPPDATA%\Programs\Deckly` with a Start menu entry,
+without administrator rights. The builds are not code-signed, so Windows
+SmartScreen and macOS Gatekeeper may warn before the first start.
+
+Homebrew (macOS):
+
+```sh
+brew install auuruum/tap/deckly
+```
+
+Arch Linux: the `deckly-bin` AUR package is coming; until then use the
+script above, or build the package from the `aur-deckly-bin.tar.gz` release
+asset with `makepkg -si`.
+
 ## Build
 
 Run from the repository root:
