@@ -1,5 +1,9 @@
 # Wallpaper across all keys
 
+This records the initial implementation. The
+[follow-up](2026-11-05-key-appearance.md) covers profile defaults, animated
+image transparency and press rendering.
+
 - Date: 2026-11-04.
 - Sources/method: Deckly's own device table, screensaver cutting, renderer,
   runtime and editor code; our earlier notes on the official Customize Image

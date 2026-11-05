@@ -306,6 +306,7 @@ pub fn convert(
             name.chars().take(profile::MAX_TITLE_CHARS).collect()
         },
         device: kind,
+        wallpaper: None,
         pages,
         folders,
         applications: Vec::new(),
@@ -342,6 +343,7 @@ impl Run<'_> {
                 .then(|| (self.image)(id, picture))
                 .flatten(),
             wallpaper: None,
+            wallpaper_disabled: false,
             keys: BTreeMap::new(),
         };
         for controller in list(source, "Controllers") {

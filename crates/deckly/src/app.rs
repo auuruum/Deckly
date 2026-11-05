@@ -1122,7 +1122,10 @@ impl App {
         if overlays.values().any(|o| o.mark.is_some()) {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
-        let wallpaper = view.shown(profile).and_then(|p| p.wallpaper.clone());
+        let wallpaper = view
+            .shown(profile)
+            .and_then(|p| p.effective_wallpaper(profile.wallpaper.as_ref()))
+            .cloned();
         self.wallpaper_button(ui, &geo, profile, view);
         let Some(keys) = view.keys(profile) else {
             return;
@@ -1138,7 +1141,7 @@ impl App {
                 f32::from(index / model.columns),
             );
             let min = geo.grid.min + vec2(c, r) * geo.pitch;
-            let mut rect = Rect::from_min_size(min, Vec2::splat(key_size));
+            let rect = Rect::from_min_size(min, Vec2::splat(key_size));
             let response = ui.interact(rect, ui.id().with(("key", index)), Sense::click_and_drag());
             let config = keys.get(&index).cloned();
             // The parent folder key stays in its folder; it can only move.
@@ -1147,11 +1150,6 @@ impl App {
                 .is_some_and(|k| k.action == actions::PARENT_FOLDER);
             if config.is_some() {
                 response.dnd_set_drag_payload(DragPayload::Key(index));
-            }
-            // The live view shrinks a held key like the device does.
-            let press = self.renderer.key_press;
-            if press.shrink && pressed.contains(&index) {
-                rect = rect.shrink(key_size * f32::from(100 - press.size) / 200.0);
             }
             let hovered_drop = response.dnd_hover_payload::<DragPayload>().is_some();
             let border_color = if hovered_drop {
@@ -1171,7 +1169,10 @@ impl App {
                         ui.ctx(),
                         Some(key),
                         tex_px,
-                        live,
+                        Live {
+                            pressed: pressed.contains(&index),
+                            ..live
+                        },
                         overlays.get(&index),
                         backdrop,
                     );
@@ -1403,7 +1404,12 @@ impl App {
             .wallpaper_editor
             .as_ref()
             .is_some_and(|w| w.page == page.id);
-        let color = if open || page.wallpaper.is_some() || resp.hovered() {
+        let color = if open
+            || page
+                .effective_wallpaper(profile.wallpaper.as_ref())
+                .is_some()
+            || resp.hovered()
+        {
             TEXT
         } else {
             TEXT_DIM
@@ -1425,21 +1431,30 @@ impl App {
         let editor = self.wallpaper_editor.as_mut()?;
         let model = profile.model();
         let page_id = editor.page.clone();
-        let page = (editor.profile == profile.id)
-            .then(|| {
-                let at = profile.pages.iter().position(|p| p.id == page_id);
-                match at {
-                    Some(i) => profile.pages.get_mut(i),
-                    None => profile.folder_mut(&page_id),
-                }
-            })
-            .flatten();
+        let (page, scope) = if editor.profile == profile.id {
+            match profile.pages.iter_mut().find(|p| p.id == page_id) {
+                Some(page) => (Some(page), "Page"),
+                None => (
+                    profile.folders.iter_mut().find(|p| p.id == page_id),
+                    "Folder",
+                ),
+            }
+        } else {
+            (None, "Page")
+        };
         // The page went away or another profile is on the canvas.
         let Some(page) = page else {
             self.wallpaper_editor = None;
             return None;
         };
-        let group = editor.show(ctx, page, model, &mut self.renderer);
+        let group = editor.show(
+            ctx,
+            &mut profile.wallpaper,
+            page,
+            scope,
+            model,
+            &mut self.renderer,
+        );
         if group.is_none() {
             self.wallpaper_editor = None;
         }
@@ -2159,7 +2174,8 @@ impl App {
         let model = profile.model();
         let wallpaper = view
             .shown(profile)
-            .and_then(|p| p.wallpaper.clone())
+            .and_then(|p| p.effective_wallpaper(profile.wallpaper.as_ref()))
+            .cloned()
             .filter(|_| top_level);
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;
@@ -2266,7 +2282,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.menu_button(format!("{}  Image…", icon::IMAGE), |ui| {
                     use crate::image_editor::{self, Editor, ImageChoice, Mode};
-                    if let Some(choice) = image_editor::image_menu(ui, key.image.is_some()) {
+                    if let Some(choice) = image_editor::image_menu(ui, key.image.is_some(), true) {
                         if choice == ImageChoice::Reset {
                             key.image = None;
                         } else {
@@ -2276,7 +2292,12 @@ impl App {
                                 Mode::Create
                             };
                             let mut editor = Editor::new(image_context.clone(), key, mode);
-                            if choice != ImageChoice::Upload || editor.upload(ui.ctx()) {
+                            let open = match choice {
+                                ImageChoice::Upload => editor.upload(ui.ctx()),
+                                ImageChoice::Video => editor.upload_video(ui.ctx(), &profile_id),
+                                _ => true,
+                            };
+                            if open {
                                 self.image_editor = Some(editor);
                             }
                         }

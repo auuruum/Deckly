@@ -26,24 +26,30 @@ use std::sync::{
 pub enum Mode {
     Library,
     Create,
+    Video,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageChoice {
     Upload,
+    Video,
     Library,
     Create,
     Reset,
 }
 
 /// One image menu for keys and pages, backed by the same editor.
-pub fn image_menu(ui: &mut Ui, has_image: bool) -> Option<ImageChoice> {
+pub fn image_menu(ui: &mut Ui, has_image: bool, allow_video: bool) -> Option<ImageChoice> {
     let mut choice = None;
     for (glyph, label, pick) in [
         (icon::UPLOAD_SIMPLE, "Upload image…", ImageChoice::Upload),
+        (icon::VIDEO_CAMERA, "Import video…", ImageChoice::Video),
         (icon::SQUARES_FOUR, "Icon library…", ImageChoice::Library),
         (icon::PAINT_BRUSH, "Create image…", ImageChoice::Create),
     ] {
+        if pick == ImageChoice::Video && !allow_video {
+            continue;
+        }
         if ui.button(format!("{glyph}  {label}")).clicked() {
             choice = Some(pick);
             ui.close();
@@ -207,6 +213,23 @@ impl Editor {
         false
     }
 
+    pub fn upload_video(&mut self, ctx: &egui::Context, profile: &str) -> bool {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import a video for this key")
+            .add_filter("Videos", crate::video::EXTENSIONS)
+            .pick_file()
+        else {
+            return false;
+        };
+        let profile = profile.to_owned();
+        self.mode = Mode::Video;
+        self.saving = true;
+        self.start(ctx, move || {
+            crate::video::import(&path, &profile).map(Work::Saved)
+        });
+        true
+    }
+
     fn load(&mut self, ctx: &egui::Context, path: PathBuf) {
         // Keys play animations; page icons and layers use the first frame.
         let animate = !self.original.is_page();
@@ -233,6 +256,7 @@ impl Editor {
         };
         self.receiver = None;
         self.saving = false;
+        ctx.request_repaint();
         match result {
             Ok(Work::Saved(path)) => return Some(path),
             Ok(Work::Animated(source)) => {
@@ -312,10 +336,10 @@ impl Editor {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, profile: &str) -> Selection {
-        let before = self.snapshot();
-        if let Some(path) = self.receive(ctx, profile) {
-            return Selection::Image(path);
+        if self.mode == Mode::Video {
+            return self.show_video(ctx, profile);
         }
+        let before = self.snapshot();
         let mut cancel = false;
         let mut apply = false;
         let busy = self.receiver.is_some();
@@ -447,6 +471,9 @@ impl Editor {
                 });
             });
         });
+        if let Some(path) = self.receive(ctx, profile) {
+            return Selection::Image(path);
+        }
         let group = if ctx.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
             Some(Group::Pointer(self.gesture))
         } else if ctx.text_edit_focused() {
@@ -477,6 +504,32 @@ impl Editor {
             ctx.request_repaint();
         }
         if cancel || (!self.saving && modal.should_close()) {
+            Selection::Cancelled
+        } else {
+            Selection::Pending
+        }
+    }
+
+    fn show_video(&mut self, ctx: &egui::Context, profile: &str) -> Selection {
+        if let Some(path) = self.receive(ctx, profile) {
+            return Selection::Image(path);
+        }
+        let modal =
+            egui::Modal::new(egui::Id::new(("video-import", &self.context))).show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.heading("Import video");
+                if let Some(error) = &self.error {
+                    ui.label(RichText::new(error).color(WARNING));
+                    ui.button("Close").clicked()
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Converting video…");
+                    });
+                    false
+                }
+            });
+        if !self.saving && (modal.inner || modal.should_close()) {
             Selection::Cancelled
         } else {
             Selection::Pending

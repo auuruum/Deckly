@@ -1,5 +1,5 @@
-//! The Wallpaper window: choose a picture for the page or folder on the
-//! canvas and place it across the keys by dragging and zooming
+//! The Wallpaper window: choose a picture for the profile, page or folder
+//! and place it across the keys by dragging and zooming
 //! (docs/clean-room/2026-11-04-key-wallpaper.md).
 
 use crate::render::{self, Renderer};
@@ -24,6 +24,7 @@ const GAP_SHADE: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
 pub struct WallpaperEditor {
     pub profile: String,
     pub page: String,
+    editing_profile: bool,
     job: Option<Receiver<Result<PathBuf, String>>>,
     error: Option<String>,
     preview: Option<(u64, TextureHandle)>,
@@ -36,6 +37,7 @@ impl WallpaperEditor {
         Self {
             profile: profile.to_owned(),
             page: page.to_owned(),
+            editing_profile: false,
             job: None,
             error: None,
             preview: None,
@@ -48,14 +50,23 @@ impl WallpaperEditor {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        profile_wallpaper: &mut Option<Wallpaper>,
         page: &mut Page,
+        scope: &str,
         model: &DeviceModel,
         renderer: &mut Renderer,
     ) -> Option<u64> {
         if ctx.input(|i| i.pointer.any_pressed()) {
             self.gesture = self.gesture.wrapping_add(1);
         }
-        self.receive(page);
+        if let Some(wallpaper) = self.receive() {
+            if self.editing_profile {
+                *profile_wallpaper = Some(wallpaper);
+            } else {
+                page.wallpaper = Some(wallpaper);
+                page.wallpaper_disabled = false;
+            }
+        }
         let mut open = true;
         let mut close = false;
         egui::Window::new("Wallpaper")
@@ -65,9 +76,25 @@ impl WallpaperEditor {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.set_width(PREVIEW_WIDTH);
-                self.preview(ui, page, model, renderer);
+                let busy = self.job.is_some();
+                ui.add_enabled_ui(!busy, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.editing_profile, false, scope);
+                        ui.selectable_value(&mut self.editing_profile, true, "Profile");
+                    });
+                });
+                let (shown, wallpaper) = if self.editing_profile {
+                    (profile_wallpaper.clone(), &mut *profile_wallpaper)
+                } else {
+                    (
+                        page.effective_wallpaper(profile_wallpaper.as_ref())
+                            .cloned(),
+                        &mut page.wallpaper,
+                    )
+                };
+                self.preview(ui, shown.as_ref(), wallpaper.as_mut(), model, renderer);
                 ui.add_space(8.0);
-                if let Some(wallpaper) = &mut page.wallpaper {
+                if let Some(wallpaper) = wallpaper {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Zoom").color(TEXT_DIM));
                         ui.spacing_mut().slider_width = PREVIEW_WIDTH - 110.0;
@@ -86,18 +113,48 @@ impl WallpaperEditor {
                         )
                         .color(TEXT_FAINT),
                     );
+                }
+                let status = if self.editing_profile {
+                    "Applies to pages and folders that use the profile wallpaper."
+                } else if page.wallpaper_disabled {
+                    "Wallpaper is off here."
+                } else if page.wallpaper.is_some() {
+                    "This layout uses its own wallpaper."
+                } else if shown.is_some() {
+                    "This layout uses the profile wallpaper."
                 } else {
-                    ui.label(
-                        RichText::new("Choose a picture to spread over all keys of this page.")
-                            .color(TEXT_FAINT),
-                    );
+                    "This layout follows the profile, which has no wallpaper yet."
+                };
+                ui.label(RichText::new(status).color(TEXT_DIM));
+                if !self.editing_profile {
+                    ui.horizontal(|ui| {
+                        let inherits = !page.wallpaper_disabled && page.wallpaper.is_none();
+                        if ui
+                            .add_enabled(!busy && !inherits, egui::Button::new("Use Profile"))
+                            .clicked()
+                        {
+                            page.wallpaper = None;
+                            page.wallpaper_disabled = false;
+                            self.error = None;
+                        }
+                        if ui
+                            .add_enabled(
+                                !busy && !page.wallpaper_disabled,
+                                egui::Button::new("No Wallpaper"),
+                            )
+                            .clicked()
+                        {
+                            page.wallpaper = None;
+                            page.wallpaper_disabled = true;
+                            self.error = None;
+                        }
+                    });
                 }
                 if let Some(error) = &self.error {
                     ui.label(RichText::new(format!("{}  {error}", icon::WARNING)).color(WARNING));
                 }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let busy = self.job.is_some();
                     let choose = ui
                         .add_enabled(
                             !busy,
@@ -110,14 +167,15 @@ impl WallpaperEditor {
                     if busy {
                         ui.spinner();
                     }
-                    if ui
-                        .add_enabled(
-                            page.wallpaper.is_some() && !busy,
-                            egui::Button::new(format!("{}  Remove", icon::TRASH)),
-                        )
-                        .clicked()
+                    if self.editing_profile
+                        && ui
+                            .add_enabled(
+                                profile_wallpaper.is_some() && !busy,
+                                egui::Button::new(format!("{}  Remove", icon::TRASH)),
+                            )
+                            .clicked()
                     {
-                        page.wallpaper = None;
+                        *profile_wallpaper = None;
                         self.error = None;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -135,7 +193,8 @@ impl WallpaperEditor {
     fn preview(
         &mut self,
         ui: &mut egui::Ui,
-        page: &mut Page,
+        shown: Option<&Wallpaper>,
+        editable: Option<&mut Wallpaper>,
         model: &DeviceModel,
         renderer: &mut Renderer,
     ) {
@@ -145,14 +204,11 @@ impl WallpaperEditor {
             ui.allocate_exact_size(vec2(PREVIEW_WIDTH, height), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::same(4), KEY_EMPTY);
-        let picture = page
-            .wallpaper
-            .as_ref()
-            .and_then(|w| Some((w.clone(), renderer.wallpaper(&w.image)?)));
+        let picture = shown.and_then(|w| Some((w, renderer.wallpaper(&w.image)?)));
         if let Some((wallpaper, src)) = &picture {
             let px = (PREVIEW_WIDTH * ui.ctx().pixels_per_point()).round() as u32;
             let mut h = DefaultHasher::new();
-            (wallpaper, px).hash(&mut h);
+            (wallpaper, px, pw, ph).hash(&mut h);
             let hash = h.finish();
             let texture = match &self.preview {
                 Some((shown, texture)) if *shown == hash => texture.id(),
@@ -174,7 +230,7 @@ impl WallpaperEditor {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-        } else if page.wallpaper.is_some() {
+        } else if shown.is_some() {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
@@ -209,7 +265,7 @@ impl WallpaperEditor {
         let Some((_, src)) = picture else {
             return;
         };
-        let Some(wallpaper) = &mut page.wallpaper else {
+        let Some(wallpaper) = editable else {
             return;
         };
         if resp.dragged() {
@@ -272,22 +328,23 @@ impl WallpaperEditor {
         }
     }
 
-    fn receive(&mut self, page: &mut Page) {
-        let Some(job) = &self.job else {
-            return;
-        };
+    fn receive(&mut self) -> Option<Wallpaper> {
+        let job = self.job.as_ref()?;
         let result = match job.try_recv() {
             Ok(result) => result,
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => Err("reading the picture stopped".into()),
         };
         self.job = None;
         match result {
             Ok(path) => {
-                page.wallpaper = Some(Wallpaper::new(path));
                 self.error = None;
+                Some(Wallpaper::new(path))
             }
-            Err(e) => self.error = Some(format!("Cannot use this picture: {e}")),
+            Err(e) => {
+                self.error = Some(format!("Cannot use this picture: {e}"));
+                None
+            }
         }
     }
 }
