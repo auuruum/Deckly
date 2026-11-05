@@ -19,6 +19,7 @@ use crate::runtime::{self, Msg, Shared};
 use crate::store;
 use crate::theme::*;
 use crate::transfer::{self, Job, Outcome, PluginKind, Section, SharedJob, Summary, Tone};
+use crate::update::{self, Method, Updater};
 use deckly_core::profile::{
     MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_APPLICATIONS, MAX_PROFILE_NAME_CHARS,
 };
@@ -78,6 +79,7 @@ pub struct Env<'a> {
     /// Model of the profile shown in the main window.
     pub kind: DeviceKind,
     pub host: Option<&'a Host>,
+    pub updater: &'a Updater,
 }
 
 pub struct Preferences {
@@ -560,6 +562,7 @@ impl Preferences {
     fn general(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
         label(ui, o, 61.0, 30.0, "Version:");
         value(ui, o, VALUE_X, 61.0, 30.0, env!("CARGO_PKG_VERSION"));
+        self.updates(ui, o, env);
 
         label(ui, o, 91.0, 22.0, "Startup:");
         let enabled = self.autostart.get_or_insert_with(autostart::is_enabled);
@@ -655,6 +658,74 @@ impl Preferences {
         value_dim(ui, o, VALUE_X, 395.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
+    }
+
+    /// Next to the version: check now, update, and the daily check.
+    fn updates(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        let updater = env.updater;
+        let status = updater.status();
+        let (text, hover) = match &status {
+            update::Status::Checking => ("Checking…".to_owned(), None),
+            update::Status::Downloading(r) => (format!("Downloading {}…", r.version), None),
+            update::Status::Ready(..) => ("Restarting…".to_owned(), None),
+            update::Status::Available(r) => match updater.method() {
+                Method::Manual(hint) => (format!("{} Available", r.version), Some(hint.to_owned())),
+                _ => (
+                    format!("Update to {}", r.version),
+                    Some("Download, install and restart Deckly".to_owned()),
+                ),
+            },
+            update::Status::UpToDate => (
+                "Up to Date".to_owned(),
+                Some("This is the latest Deckly. Click to check again.".to_owned()),
+            ),
+            update::Status::Failed(e) => (
+                "Check Again".to_owned(),
+                Some(format!("The check failed: {e}")),
+            ),
+            update::Status::Idle | update::Status::InstallFailed(..) => (
+                "Check for Updates".to_owned(),
+                Some("Ask GitHub for a newer Deckly".to_owned()),
+            ),
+        };
+        let busy = matches!(
+            status,
+            update::Status::Checking | update::Status::Downloading(_) | update::Status::Ready(..)
+        );
+        let rect = at(o, VALUE_X + 64.0, 65.0, 150.0, 22.0);
+        let resp = ui.add_enabled_ui(!busy, |ui| button(ui, rect, &text)).inner;
+        let resp = match hover {
+            Some(hover) => resp.on_hover_text(hover),
+            None => resp,
+        };
+        if resp.clicked() {
+            match (&status, updater.method()) {
+                (update::Status::Available(r), Method::Manual(_)) => {
+                    if let Err(e) = crate::os::open(&r.page()) {
+                        runtime::lock(env.state).notify(e);
+                    }
+                }
+                (update::Status::Available(r), _) => updater.install(r.clone()),
+                _ => updater.check(),
+            }
+        }
+        if busy {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+
+        let mut s = runtime::lock(env.state);
+        let mut on = s.settings.check_updates;
+        let r = at(o, VALUE_X + 226.0, 66.0, 220.0, 20.0);
+        if checkbox(ui, r, &mut on, "Check for updates daily")
+            .on_hover_text(
+                "Asks GitHub once a day; nothing is downloaded until you choose to update",
+            )
+            .changed()
+        {
+            s.settings.check_updates = on;
+            s.save_settings();
+        }
     }
 
     /// Whether keys stop on the lock screen, and what devices show then.
@@ -3070,6 +3141,7 @@ mod tests {
                                     device: None,
                                     kind: DeviceKind::Mk2,
                                     host: None,
+                                    updater: &Updater::new(None, std::sync::Arc::new(|| {})),
                                 },
                             );
                         });
@@ -3148,6 +3220,7 @@ mod tests {
                         device: None,
                         kind: DeviceKind::Mk2,
                         host: None,
+                        updater: &Updater::new(None, std::sync::Arc::new(|| {})),
                     };
                     match tab {
                         Tab::General => prefs.switch_by_window(ui, Pos2::ZERO, &mut env),

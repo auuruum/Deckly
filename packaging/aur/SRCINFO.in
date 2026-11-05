@@ -1,0 +1,23 @@
+pkgbase = deckly-bin
+	pkgdesc = Unofficial, independent app for Stream Deck hardware
+	pkgver = @PKGVER@
+	pkgrel = 1
+	url = https://github.com/auuruum/Deckly
+	install = deckly-bin.install
+	arch = x86_64
+	license = MIT
+	depends = glibc
+	depends = gcc-libs
+	depends = gtk3
+	depends = webkit2gtk-4.1
+	depends = libxkbcommon
+	depends = hicolor-icon-theme
+	optdepends = vulkan-icd-loader: GPU drawing through Vulkan
+	optdepends = nodejs: run Node.js plugins
+	optdepends = wine: run Windows-only plugins
+	provides = deckly
+	conflicts = deckly
+	source = deckly-bin-@PKGVER@.tar.gz::https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-x86_64-unknown-linux-gnu.tar.gz
+	sha256sums = @SHA256_LINUX_X86_64@
+
+pkgname = deckly-bin

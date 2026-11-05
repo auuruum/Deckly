@@ -17,6 +17,7 @@ use crate::render::{Backdrop, Live, Renderer};
 use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
+use crate::update::{self, Method};
 use crate::wallpaper::WallpaperEditor;
 use deckly_core::profile::{self, MAX_FOLDER_DEPTH, MAX_GROUP_ACTIONS};
 use deckly_core::{ActionDelays, AutoExit, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
@@ -3002,6 +3003,7 @@ impl App {
             device,
             kind,
             host: self.host.as_ref(),
+            updater: &self.background.updater,
         };
         self.prefs.show(ctx, &mut env);
     }
@@ -3043,6 +3045,138 @@ impl App {
         }
         if keep {
             self.rename = Some((id, name));
+        }
+    }
+
+    /// Offers a newer release at the bottom of the window, and finishes an
+    /// update the user started: Deckly starts the new version and quits.
+    fn update_banner(&mut self, ctx: &egui::Context) {
+        let updater = self.background.updater.clone();
+        if let Some((release, finish)) = updater.take_ready() {
+            match finish.start() {
+                Ok(()) => self.background.send(Command::Quit),
+                Err(e) => updater.fail(release, e),
+            }
+            return;
+        }
+        let status = updater.status();
+        let skipped = runtime::lock(&self.state).settings.skipped_update.clone();
+        let release = match &status {
+            update::Status::Available(r) if r.version != skipped && !updater.dismissed() => r,
+            update::Status::Downloading(r) => r,
+            update::Status::InstallFailed(r, _) => r,
+            _ => return,
+        };
+        let method = updater.method();
+        let width = (ctx.content_rect().width() - 64.0).clamp(240.0, 640.0);
+        let mut skip = false;
+        egui::Area::new(egui::Id::new("update-banner"))
+            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -24.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(POPUP)
+                    .stroke(Stroke::new(1.0, ACCENT))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.horizontal(|ui| match &status {
+                            update::Status::Downloading(_) => {
+                                ui.add(egui::Spinner::new().color(ACCENT));
+                                ui.label(format!("Downloading Deckly {}…", release.version));
+                            }
+                            update::Status::InstallFailed(_, error) => {
+                                ui.label(RichText::new(icon::WARNING).color(WARNING));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "Could not update to {}: {error}",
+                                            release.version
+                                        ))
+                                        .color(WARNING),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button(icon::X).on_hover_text("Close").clicked() {
+                                            updater.dismiss();
+                                        }
+                                        if ui.button("Try Again").clicked() {
+                                            updater.install(release.clone());
+                                        }
+                                    },
+                                );
+                            }
+                            _ => {
+                                ui.label(RichText::new(icon::ARROW_CIRCLE_UP).color(ACCENT));
+                                let text = format!(
+                                    "Deckly {} is available. You have {}.",
+                                    release.version,
+                                    env!("CARGO_PKG_VERSION")
+                                );
+                                ui.add(egui::Label::new(text).wrap());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .button(icon::X)
+                                            .on_hover_text("Remind me later")
+                                            .clicked()
+                                        {
+                                            updater.dismiss();
+                                        }
+                                        if ui.button("Skip This Version").clicked() {
+                                            skip = true;
+                                        }
+                                        if ui.button("What's New").clicked()
+                                            && let Err(e) = crate::os::open(&release.page())
+                                        {
+                                            runtime::lock(&self.state).notify(e);
+                                        }
+                                        match &method {
+                                            // Says how to update on its own line below.
+                                            Method::Manual(_) => {}
+                                            _ => {
+                                                let update = egui::Button::new(
+                                                    RichText::new("Update Now")
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(ACCENT);
+                                                if ui
+                                                    .add(update)
+                                                    .on_hover_text(
+                                                        "Download, install and restart Deckly. \
+                                                     Your profiles stay as they are.",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    updater.install(release.clone());
+                                                }
+                                            }
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                        if let (Method::Manual(hint), update::Status::Available(_)) =
+                            (&method, &status)
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon::INFO).color(TEXT_DIM));
+                                ui.add(
+                                    egui::Label::new(RichText::new(*hint).color(TEXT_DIM)).wrap(),
+                                );
+                            });
+                        }
+                    });
+            });
+        if skip {
+            let mut s = runtime::lock(&self.state);
+            s.settings.skipped_update = release.version.clone();
+            s.save_settings();
         }
     }
 
@@ -3261,6 +3395,7 @@ impl eframe::App for App {
             profile.device,
         );
         self.rename_window(&ctx);
+        self.update_banner(&ctx);
         self.notice(&ctx);
         // Plugins dropped on the window are installed.
         let dropped: Vec<PathBuf> = ctx.input(|i| {

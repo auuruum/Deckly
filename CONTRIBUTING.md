@@ -52,6 +52,8 @@ Development switches:
 - `DECKLY_INPUT=wayland|portal|x11|uinput`: force one way of pressing keys on
   Linux.
 - `DECKLY_WINE=/path/to/wine`: force the Wine that runs Windows plugins.
+- `DECKLY_FAKE_UPDATE=0.2.0`: pretend that version is the latest release, to
+  see the update offer. Debug builds check for updates only with this set.
 
 To check simulated input on a Linux session by hand, focus a text field and
 run `cargo test -p deckly -- --ignored typing`.
