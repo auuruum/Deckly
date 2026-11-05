@@ -30,7 +30,7 @@ certificate), so Gatekeeper and SmartScreen may warn on first start.
 ```sh
 cargo dev dist                       # archive for this computer, in dist/
 cargo dev dist --target <triple>     # archive for another installed target
-cargo dev release-files --tag v0.1.0 --checksums dist/SHA256SUMS
+cargo dev release-files --tag v0.0.1 --checksums dist/SHA256SUMS
 ```
 
 `release-files` refuses a tag that does not match the workspace version in
@@ -48,8 +48,8 @@ DECKLY_ARCHIVE=dist/deckly-x86_64-unknown-linux-gnu.tar.gz DECKLY_PREFIX=/tmp/de
 1. Set the new version in `[workspace.package]` in `Cargo.toml` and run
    `cargo check` so `Cargo.lock` follows. Merge to `dev`, then `dev` to
    `main` (both need the owner's approval).
-2. Tag `main` and push the tag: `git tag v0.1.0 origin/main` and
-   `git push origin v0.1.0`.
+2. Tag `main` and push the tag: `git tag v0.0.1 origin/main` and
+   `git push origin v0.0.1`.
 3. Wait for the Release workflow. It leaves a draft release with all assets.
 4. Download the archives for the systems at hand and check that Deckly
    starts and drives a device. Record what was tested in `docs/devices.md`.

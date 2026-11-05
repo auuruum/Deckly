@@ -6,7 +6,7 @@
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/auuruum/Deckly/main/install.ps1))) -Uninstall
 #
 # Settings (environment variables):
-#   DECKLY_VERSION   a release tag such as v0.1.0 (default: the latest release)
+#   DECKLY_VERSION   a release tag such as v0.0.1 (default: the latest release)
 #   DECKLY_SETUP     run a local setup program instead of downloading
 #
 # Runs the release's setup program silently: Deckly goes to

@@ -3136,11 +3136,9 @@ impl App {
                                         {
                                             runtime::lock(&self.state).notify(e);
                                         }
-                                        match method {
-                                            Method::Manual(hint) => {
-                                                ui.label(RichText::new(icon::INFO).color(TEXT_DIM))
-                                                    .on_hover_text(hint);
-                                            }
+                                        match &method {
+                                            // Says how to update on its own line below.
+                                            Method::Manual(_) => {}
                                             _ => {
                                                 let update = egui::Button::new(
                                                     RichText::new("Update Now")
@@ -3163,6 +3161,16 @@ impl App {
                                 );
                             }
                         });
+                        if let (Method::Manual(hint), update::Status::Available(_)) =
+                            (&method, &status)
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon::INFO).color(TEXT_DIM));
+                                ui.add(
+                                    egui::Label::new(RichText::new(*hint).color(TEXT_DIM)).wrap(),
+                                );
+                            });
+                        }
                     });
             });
         if skip {
