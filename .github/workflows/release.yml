@@ -1,6 +1,8 @@
-# Builds the release archives. On a `v*` tag it also creates a draft GitHub
-# release with the archives, their checksums, the Homebrew formula and the
-# AUR package; publish the draft by hand after checking it.
+# Runs the CI checks (formatting, clippy, tests on every system), then builds
+# the release archives; nothing is built when a check fails. On a `v*` tag it
+# also creates a draft GitHub release with the archives, their checksums, the
+# Homebrew formula and the AUR package, only when every build succeeded.
+# Publish the draft by hand after checking it.
 name: Release
 
 on:
@@ -19,8 +21,13 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: checks
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
