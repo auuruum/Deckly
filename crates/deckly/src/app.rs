@@ -1122,7 +1122,10 @@ impl App {
         if overlays.values().any(|o| o.mark.is_some()) {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
-        let wallpaper = view.shown(profile).and_then(|p| p.wallpaper.clone());
+        let wallpaper = view
+            .shown(profile)
+            .and_then(|p| p.effective_wallpaper(profile.wallpaper.as_ref()))
+            .cloned();
         self.wallpaper_button(ui, &geo, profile, view);
         let Some(keys) = view.keys(profile) else {
             return;
@@ -1403,7 +1406,12 @@ impl App {
             .wallpaper_editor
             .as_ref()
             .is_some_and(|w| w.page == page.id);
-        let color = if open || page.wallpaper.is_some() || resp.hovered() {
+        let color = if open
+            || page
+                .effective_wallpaper(profile.wallpaper.as_ref())
+                .is_some()
+            || resp.hovered()
+        {
             TEXT
         } else {
             TEXT_DIM
@@ -1425,21 +1433,30 @@ impl App {
         let editor = self.wallpaper_editor.as_mut()?;
         let model = profile.model();
         let page_id = editor.page.clone();
-        let page = (editor.profile == profile.id)
-            .then(|| {
-                let at = profile.pages.iter().position(|p| p.id == page_id);
-                match at {
-                    Some(i) => profile.pages.get_mut(i),
-                    None => profile.folder_mut(&page_id),
-                }
-            })
-            .flatten();
+        let (page, scope) = if editor.profile == profile.id {
+            match profile.pages.iter_mut().find(|p| p.id == page_id) {
+                Some(page) => (Some(page), "Page"),
+                None => (
+                    profile.folders.iter_mut().find(|p| p.id == page_id),
+                    "Folder",
+                ),
+            }
+        } else {
+            (None, "Page")
+        };
         // The page went away or another profile is on the canvas.
         let Some(page) = page else {
             self.wallpaper_editor = None;
             return None;
         };
-        let group = editor.show(ctx, page, model, &mut self.renderer);
+        let group = editor.show(
+            ctx,
+            &mut profile.wallpaper,
+            page,
+            scope,
+            model,
+            &mut self.renderer,
+        );
         if group.is_none() {
             self.wallpaper_editor = None;
         }
@@ -2159,7 +2176,8 @@ impl App {
         let model = profile.model();
         let wallpaper = view
             .shown(profile)
-            .and_then(|p| p.wallpaper.clone())
+            .and_then(|p| p.effective_wallpaper(profile.wallpaper.as_ref()))
+            .cloned()
             .filter(|_| top_level);
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;

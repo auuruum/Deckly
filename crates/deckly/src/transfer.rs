@@ -990,14 +990,17 @@ mod tests {
 
     #[test]
     fn a_native_export_round_trips_pages_folders_settings_and_pictures() {
-        use deckly_core::{DeviceKind, KeyConfig, Settings};
+        use deckly_core::{DeviceKind, KeyConfig, Settings, Wallpaper};
         let root =
             std::env::temp_dir().join(format!("deckly-profile-export-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let image = root.join("page.svg");
         std::fs::write(&image, b"<svg/>").unwrap();
         let mut profile = Profile::new("Scenes", DeviceKind::Mk2);
+        profile.wallpaper = Some(Wallpaper::new(image.clone()));
         profile.pages[0].icon = Some(image.clone());
+        profile.add_page();
+        profile.pages[1].wallpaper_disabled = true;
         profile
             .applications
             .push(deckly_core::AppRule::new("Game", "game.exe"));
@@ -1006,6 +1009,7 @@ mod tests {
             KeyConfig::new(deckly_core::profile::FOLDER_ACTION, serde_json::json!({})),
         );
         profile.normalize_folders();
+        profile.folders[0].wallpaper = Some(Wallpaper::new(image.clone()));
         let mut nested = KeyConfig::new("com.example.action", serde_json::json!({"foo": "bar"}));
         nested.image = Some(image.clone());
         profile.folders[0].keys.insert(1, nested);
@@ -1030,7 +1034,7 @@ mod tests {
         for (from, _) in &read.images {
             assert_eq!(tree.read(from, MAX_IMAGE_BYTES).unwrap(), b"<svg/>");
         }
-        assert_eq!(read.images.len(), 2);
+        assert_eq!(read.images.len(), 4);
         imported.for_each_picture(|p| {
             if p.is_some() {
                 *p = Some(image.clone());

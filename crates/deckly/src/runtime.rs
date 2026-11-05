@@ -1701,7 +1701,10 @@ fn refresh(
                     }
                 })
                 .collect();
-            work.push((d.handle, keys, members, page.wallpaper.clone()));
+            let wallpaper = page
+                .effective_wallpaper(profile.and_then(|p| p.wallpaper.as_ref()))
+                .cloned();
+            work.push((d.handle, keys, members, wallpaper));
         }
     }
     // Only keys refreshed now may ask for the next frame.
