@@ -36,7 +36,7 @@ const MAX_DELAY_MS: u32 = 60_000;
 /// show them for 100 ms, and so does Deckly.
 const TINY_DELAY_MS: u32 = 10;
 const DEFAULT_DELAY_MS: u32 = 100;
-/// Decoded files kept, and their bytes; more start the cache over.
+/// Decoded files kept, and their bytes, before evicting the oldest entry.
 const MAX_CACHED: usize = 32;
 const MAX_CACHED_BYTES: usize = 128 * 1024 * 1024;
 
@@ -91,30 +91,46 @@ pub fn clock() -> Instant {
 }
 
 type Loaded = Result<Option<Arc<Animation>>, String>;
+type Cache = HashMap<PathBuf, (Instant, usize, Loaded)>;
 
 /// Decoded files, shared by the editor and the devices.
-fn cache() -> &'static Mutex<HashMap<PathBuf, Loaded>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Loaded>>> = OnceLock::new();
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     CACHE.get_or_init(Mutex::default)
 }
 
 /// The animation in `path`, decoded once and shared. `Ok(None)` is a file
 /// with a single picture, or not an animated format.
 pub fn load(path: &Path) -> Loaded {
-    if let Some(found) = cache().lock().unwrap_or_else(|p| p.into_inner()).get(path) {
+    if let Some((used, _, found)) = cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_mut(path)
+    {
+        *used = Instant::now();
         return found.clone();
     }
     // Decode without the lock; the editor and the devices may both ask.
     let loaded = decode(path).map(|a| a.map(Arc::new));
     let mut cache = cache().lock().unwrap_or_else(|p| p.into_inner());
-    let bytes: usize = cache
-        .values()
-        .filter_map(|l| l.as_ref().ok()?.as_ref().map(|a| a.bytes()))
-        .sum();
-    if cache.len() >= MAX_CACHED || bytes > MAX_CACHED_BYTES {
-        cache.clear();
+    let bytes = loaded
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map_or(0, |a| a.bytes());
+    cache.insert(path.to_owned(), (Instant::now(), bytes, loaded.clone()));
+    while cache.len() > MAX_CACHED
+        || cache.values().map(|(_, bytes, _)| bytes).sum::<usize>() > MAX_CACHED_BYTES
+    {
+        let Some(path) = cache
+            .iter()
+            .min_by_key(|(_, (used, _, _))| used)
+            .map(|(path, _)| path.clone())
+        else {
+            break;
+        };
+        cache.remove(&path);
     }
-    cache.insert(path.to_owned(), loaded.clone());
     loaded
 }
 
@@ -139,7 +155,7 @@ fn limits() -> Limits {
     limits
 }
 
-fn decode(path: &Path) -> Result<Option<Animation>, String> {
+pub(crate) fn decode(path: &Path) -> Result<Option<Animation>, String> {
     if !may_animate(path) {
         return Ok(None);
     }

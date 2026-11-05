@@ -67,8 +67,9 @@ impl Default for Live {
 }
 
 /// A custom picture as read from its file.
+#[derive(Clone)]
 enum Picture {
-    Still(RgbaImage),
+    Still(Arc<RgbaImage>),
     Animated(Arc<Animation>),
     /// The file is there but cannot be shown; the key shows a warning.
     Broken,
@@ -92,11 +93,12 @@ impl Picture {
                 Ok(None) => {}
                 // The first picture may still be readable.
                 Err(e) => {
-                    return decode_image(path).map_or_else(|_| broken(e), Picture::Still);
+                    return decode_image(path)
+                        .map_or_else(|_| broken(e), |img| Self::Still(Arc::new(img)));
                 }
             }
         }
-        decode_image(path).map_or_else(broken, Picture::Still)
+        decode_image(path).map_or_else(broken, |img| Self::Still(Arc::new(img)))
     }
 
     /// The picture to show at `frame`.
@@ -354,24 +356,25 @@ impl Renderer {
     }
 
     fn page_picture(&mut self, page: &PageTile, size: u32) -> RgbaImage {
-        let icon = page
-            .icon
-            .as_deref()
-            .and_then(|path| self.custom_image(path))
-            .cloned();
-        page_tile(icon.as_ref(), page.number, self.title_font.as_ref(), size)
+        let icon = page.icon.as_deref().map(|path| self.picture(path));
+        page_tile(
+            icon.as_ref().and_then(|picture| picture.at(0)),
+            page.number,
+            self.title_font.as_ref(),
+            size,
+        )
     }
 
-    fn picture(&mut self, path: &Path) -> &Picture {
-        self.images
-            .entry(path.to_owned())
-            .or_insert_with(|| Picture::load(path))
-    }
-
-    /// A picture that does not move, such as a page icon: the first frame
-    /// of an animation.
-    fn custom_image(&mut self, path: &Path) -> Option<&RgbaImage> {
-        self.picture(path).at(0)
+    fn picture(&mut self, path: &Path) -> Picture {
+        if let Some(picture) = self.images.get(path) {
+            return picture.clone();
+        }
+        let picture = Picture::load(path);
+        // Keep animation frames only in the shared, bounded cache.
+        if !matches!(picture, Picture::Animated(_)) {
+            self.images.insert(path.to_owned(), picture.clone());
+        }
+        picture
     }
 }
 

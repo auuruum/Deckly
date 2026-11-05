@@ -28,6 +28,7 @@ mod store;
 mod theme;
 mod transfer;
 mod update;
+mod video;
 mod wallpaper;
 
 fn main() -> eframe::Result {

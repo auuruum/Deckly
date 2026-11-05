@@ -2282,7 +2282,7 @@ impl App {
                 ui.add_space(6.0);
                 ui.menu_button(format!("{}  Image…", icon::IMAGE), |ui| {
                     use crate::image_editor::{self, Editor, ImageChoice, Mode};
-                    if let Some(choice) = image_editor::image_menu(ui, key.image.is_some()) {
+                    if let Some(choice) = image_editor::image_menu(ui, key.image.is_some(), true) {
                         if choice == ImageChoice::Reset {
                             key.image = None;
                         } else {
@@ -2292,7 +2292,12 @@ impl App {
                                 Mode::Create
                             };
                             let mut editor = Editor::new(image_context.clone(), key, mode);
-                            if choice != ImageChoice::Upload || editor.upload(ui.ctx()) {
+                            let open = match choice {
+                                ImageChoice::Upload => editor.upload(ui.ctx()),
+                                ImageChoice::Video => editor.upload_video(ui.ctx(), &profile_id),
+                                _ => true,
+                            };
+                            if open {
                                 self.image_editor = Some(editor);
                             }
                         }

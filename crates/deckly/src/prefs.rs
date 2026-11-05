@@ -230,7 +230,7 @@ fn profile_commands(ui: &mut Ui, profile: &ProfileRow, can_delete: bool) -> Opti
 fn page_menu(ui: &mut Ui, can_delete: bool, has_icon: bool) -> Option<PageCommand> {
     let mut choice = None;
     ui.menu_button(format!("{}  Change Icon", icon::IMAGE), |ui| {
-        if let Some(pick) = image_editor::image_menu(ui, has_icon) {
+        if let Some(pick) = image_editor::image_menu(ui, has_icon, false) {
             choice = Some(PageCommand::Icon(pick));
         }
     });
@@ -2389,7 +2389,7 @@ fn page_details(
     page_glyph(ui, area.center(), 24.0, page, number);
     let mut choice = None;
     egui::Popup::menu(&change).show(|ui| {
-        choice = image_editor::image_menu(ui, page.icon.is_some());
+        choice = image_editor::image_menu(ui, page.icon.is_some(), false);
     });
     let reset = at(o, field_x + 48.0, 114.0, 24.0, 24.0);
     if icon_button(
