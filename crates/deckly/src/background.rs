@@ -9,6 +9,7 @@
 use crate::os::instance::Instance;
 use crate::os::tray::{self, Command};
 use crate::runtime::{self, Msg, Shared};
+use crate::update::Updater;
 use crate::{plugins, store};
 use deckly_plugin_host::Host;
 use eframe::egui;
@@ -78,6 +79,8 @@ pub struct Background {
     /// What the tray menu lists now (`None`: it needs building).
     tray_menu: RefCell<Option<Vec<tray::Device>>>,
     reopens_window: bool,
+    /// Update checks and downloads; outlives each window.
+    pub updater: Updater,
     /// The window is closing to come back later, not to quit.
     closing_to_tray: Cell<bool>,
 }
@@ -132,6 +135,14 @@ impl Background {
             runtime::lock(&state).notify("Plugins could not be started");
         }
         let runtime = runtime::start(state.clone(), repaint, host.clone());
+        let updater = Updater::new(store::config_dir(), {
+            let wake = wake.clone();
+            Arc::new(move || wake.changed())
+        });
+        {
+            let state = state.clone();
+            updater.start_daily(move || runtime::lock(&state).settings.check_updates);
+        }
         if let (Some(host), Some(events)) = (&host, host_events) {
             plugins::start(
                 state.clone(),
@@ -152,6 +163,7 @@ impl Background {
             tray_menu: RefCell::new(None),
             reopens_window: REOPENS_WINDOW,
             closing_to_tray: Cell::new(false),
+            updater,
         })
     }
 
@@ -281,6 +293,7 @@ impl Background {
             tray_menu: RefCell::new(None),
             reopens_window,
             closing_to_tray: Cell::new(false),
+            updater: Updater::new(None, Arc::new(|| {})),
         })
     }
 }

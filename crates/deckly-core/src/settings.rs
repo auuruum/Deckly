@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const MAX_DEVICE_NAME_CHARS: usize = 64;
+/// Longer skipped update versions are dropped on load.
+const MAX_VERSION_CHARS: usize = 64;
 /// Devices remembered in the settings file; more are dropped on load.
 pub const MAX_DEVICES: usize = 256;
 /// Entries of the profile order; more are dropped on load.
@@ -51,6 +53,11 @@ pub struct Settings {
     pub import_offered: bool,
     /// Ask before replacing a folder's individual Auto Exit settings.
     pub confirm_folder_auto_exit_reset: bool,
+    /// Look for a new Deckly release once a day. Only asks GitHub; nothing
+    /// is downloaded until the user chooses to update.
+    pub check_updates: bool,
+    /// A release version the user chose to skip; no offer for it again.
+    pub skipped_update: String,
 }
 
 impl Default for Settings {
@@ -67,6 +74,8 @@ impl Default for Settings {
             switch_by_window: true,
             import_offered: false,
             confirm_folder_auto_exit_reset: true,
+            check_updates: true,
+            skipped_update: String::new(),
         }
     }
 }
@@ -349,6 +358,9 @@ impl Settings {
                 d.screensaver = None;
             }
         }
+        if self.skipped_update.chars().count() > MAX_VERSION_CHARS {
+            self.skipped_update.clear();
+        }
         self.title_style.sanitize();
         self.key_press.sanitize();
     }
@@ -484,6 +496,17 @@ mod tests {
         assert_eq!(d.sleep_minutes, 0);
         assert_eq!(s.title_style.size, 40);
         assert_eq!(s.key_press.size, KeyPress::MIN_SIZE);
+    }
+
+    #[test]
+    fn update_checks_are_on_and_skipped_versions_bounded() {
+        let s = Settings::from_json("{}").unwrap();
+        assert!(s.check_updates);
+        let long = "9".repeat(500);
+        let s = Settings::from_json(&format!(r#"{{"skipped_update":"{long}"}}"#)).unwrap();
+        assert!(s.skipped_update.is_empty());
+        let s = Settings::from_json(r#"{"skipped_update":"0.2.0"}"#).unwrap();
+        assert_eq!(s.skipped_update, "0.2.0");
     }
 
     #[test]

@@ -73,6 +73,12 @@ This installs to `%LOCALAPPDATA%\Programs\Deckly` with a Start menu entry,
 without administrator rights. The builds are not code-signed, so Windows
 SmartScreen and macOS Gatekeeper may warn before the first start.
 
+Deckly asks GitHub once a day whether a new version is out (Preferences >
+General, next to the version; it can be turned off there). A new version is
+only offered: choose Update Now to download, install and restart in one
+click, or Skip This Version. Copies installed through a package manager (AUR,
+Homebrew, winget) say which command updates them instead.
+
 Homebrew (macOS):
 
 ```sh

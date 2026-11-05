@@ -23,20 +23,29 @@ pub struct Instance {
 }
 
 /// Returns `None` when another Deckly runs; it was asked to show its window.
-pub fn claim(dir: &Path) -> io::Result<Option<Instance>> {
+///
+/// A Deckly started by an update waits up to `wait` for the old one to
+/// quit and release the lock, instead of showing the old window.
+pub fn claim(dir: &Path, wait: Duration) -> io::Result<Option<Instance>> {
     fs::create_dir_all(dir)?;
     let lock = File::options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(dir.join(LOCK))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            show_first(dir);
-            return Ok(None);
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(TryLockError::WouldBlock) => {
+                show_first(dir);
+                return Ok(None);
+            }
+            Err(TryLockError::Error(e)) => return Err(e),
         }
-        Err(TryLockError::Error(e)) => return Err(e),
     }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     fs::write(dir.join(PORT), listener.local_addr()?.port().to_string())?;
@@ -87,27 +96,39 @@ mod tests {
     #[test]
     fn a_second_start_shows_the_first() {
         let dir = folder("second-start");
-        let first = claim(&dir).unwrap().unwrap();
+        let first = claim(&dir, Duration::ZERO).unwrap().unwrap();
         let (tx, rx) = channel();
         first.listen(move || {
             let _ = tx.send(());
         });
-        assert!(claim(&dir).unwrap().is_none());
+        assert!(claim(&dir, Duration::ZERO).unwrap().is_none());
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
     #[test]
     fn a_released_lock_can_be_claimed_again() {
         let dir = folder("released");
-        drop(claim(&dir).unwrap().unwrap());
-        assert!(claim(&dir).unwrap().is_some());
+        drop(claim(&dir, Duration::ZERO).unwrap().unwrap());
+        assert!(claim(&dir, Duration::ZERO).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_updated_start_waits_for_the_old_one_to_quit() {
+        let dir = folder("after-update");
+        let first = claim(&dir, Duration::ZERO).unwrap().unwrap();
+        let quit = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(first);
+        });
+        assert!(claim(&dir, Duration::from_secs(10)).unwrap().is_some());
+        quit.join().unwrap();
     }
 
     #[test]
     fn a_damaged_port_file_does_not_stop_the_second_start() {
         let dir = folder("damaged-port");
-        let _first = claim(&dir).unwrap().unwrap();
+        let _first = claim(&dir, Duration::ZERO).unwrap().unwrap();
         fs::write(dir.join(PORT), "not a port").unwrap();
-        assert!(claim(&dir).unwrap().is_none());
+        assert!(claim(&dir, Duration::ZERO).unwrap().is_none());
     }
 }

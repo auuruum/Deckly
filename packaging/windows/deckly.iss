@@ -3,9 +3,8 @@
 ; defines below; do not run ISCC on it by hand.
 ;
 ; Installs for the current user (no administrator rights) into
-; %LOCALAPPDATA%\Programs\Deckly, or for all users when chosen in the
-; dialog. Silent installs (/VERYSILENT) start Deckly afterwards only with
-; /LAUNCH=1, which Deckly's own updater passes.
+; %LOCALAPPDATA%\Programs\Deckly. Silent installs (/VERYSILENT) start Deckly
+; afterwards only with /LAUNCH=1, which Deckly's own updater passes.
 
 #ifndef AppVersion
   #error AppVersion is not defined
@@ -32,7 +31,6 @@ DefaultGroupName=Deckly
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}

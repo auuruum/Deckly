@@ -10,6 +10,7 @@ release; a person checks the draft and publishes it.
 | --- | --- |
 | `deckly-x86_64-unknown-linux-gnu.tar.gz` | `deckly`, `deckly-web`, menu entry, icon, udev rules |
 | `deckly-x86_64-pc-windows-msvc.zip` | `deckly.exe`, `deckly-web.exe` |
+| `deckly-setup-windows-x64.exe` | Inno Setup installer (per user, no admin); used by `install.ps1` and the updater |
 | `deckly-aarch64-apple-darwin.tar.gz`, `deckly-x86_64-apple-darwin.tar.gz` | `Deckly.app` (ad-hoc signed) |
 | `SHA256SUMS` | Checksums of the archives, read by the install scripts |
 | `deckly.rb` | Homebrew formula for the `auuruum/homebrew-tap` repository |
@@ -52,7 +53,10 @@ DECKLY_ARCHIVE=dist/deckly-x86_64-unknown-linux-gnu.tar.gz DECKLY_PREFIX=/tmp/de
 3. Wait for the Release workflow. It leaves a draft release with all assets.
 4. Download the archives for the systems at hand and check that Deckly
    starts and drives a device. Record what was tested in `docs/devices.md`.
-5. Publish the draft on GitHub. The install scripts now get this version.
+5. Publish the draft on GitHub as a normal release, not a pre-release: the
+   install scripts and Deckly's update check follow GitHub's latest
+   release, which skips pre-releases. Running copies offer the update within
+   a day.
 6. Homebrew: copy the `deckly.rb` asset to `Formula/deckly.rb` in
    `auuruum/homebrew-tap`, commit and push.
 7. AUR: unpack `aur-deckly-bin.tar.gz` into a clone of
