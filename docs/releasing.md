@@ -50,7 +50,12 @@ DECKLY_ARCHIVE=dist/deckly-x86_64-unknown-linux-gnu.tar.gz DECKLY_PREFIX=/tmp/de
    `main` (both need the owner's approval).
 2. Tag `main` and push the tag: `git tag v0.0.1 origin/main` and
    `git push origin v0.0.1`.
-3. Wait for the Release workflow. It leaves a draft release with all assets.
+3. Wait for the Release workflow. It first runs the CI checks (formatting,
+   clippy and tests on Linux, Windows and macOS), builds only when they
+   pass, and drafts the release only when every build succeeded. A failed
+   run leaves no release: fix the problem, delete the tag
+   (`git push origin :refs/tags/v0.0.1` and `git tag -d v0.0.1`) and tag
+   again.
 4. Download the archives for the systems at hand and check that Deckly
    starts and drives a device. Record what was tested in `docs/devices.md`.
 5. Publish the draft on GitHub as a normal release, not a pre-release: the
