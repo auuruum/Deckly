@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Package files and scripts run on Unix tools (bash, makepkg, sh) and break
+# with Windows line endings, so they stay LF in every checkout.
+packaging/** text eol=lf
+*.sh text eol=lf

@@ -78,7 +78,10 @@ fn a_windows_program_starts_through_wine_and_is_told_it_runs_on_windows() {
     let plugin = plugin.canonicalize().unwrap();
     assert_eq!(Path::new(&lines[0]).canonicalize().unwrap(), plugin);
     assert_eq!(lines[1], root.join("runtimes/wine").to_str().unwrap());
-    assert_eq!(Path::new(&lines[2]).file_name().unwrap(), "tool.exe");
+    // A case-insensitive file system (macOS) finds the manifest's spelling
+    // as it is; elsewhere Deckly finds the file in its own case.
+    let program = Path::new(&lines[2]).file_name().unwrap().to_string_lossy();
+    assert!(program.eq_ignore_ascii_case("tool.exe"), "{program}");
     assert_eq!(lines[3], "-port");
     assert_eq!(lines[9], "-info");
     let info: Value = serde_json::from_str(&lines[10]).unwrap();
