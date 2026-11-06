@@ -565,32 +565,7 @@ impl Preferences {
         self.updates(ui, o, env);
 
         label(ui, o, 91.0, 22.0, "Startup:");
-        let enabled = self.autostart.get_or_insert_with(autostart::is_enabled);
-        match enabled {
-            Ok(on) => {
-                let mut on = *on;
-                if checkbox(
-                    ui,
-                    at(o, VALUE_X, 92.0, 200.0, 20.0),
-                    &mut on,
-                    "Open automatically at login",
-                )
-                .changed()
-                {
-                    self.autostart = Some(match autostart::set_enabled(on) {
-                        Ok(()) => Ok(on),
-                        Err(e) => {
-                            runtime::lock(env.state).notify(format!("Open at login: {e}"));
-                            autostart::is_enabled()
-                        }
-                    });
-                }
-            }
-            Err(e) => {
-                let text = format!("Open at login is not available: {e}");
-                value(ui, o, VALUE_X, 91.0, 22.0, &text);
-            }
-        }
+        self.startup(ui, o, env);
 
         label(ui, o, 113.0, 30.0, "Settings Folder:");
         if let Some(dir) = store::config_dir() {
@@ -658,6 +633,74 @@ impl Preferences {
         value_dim(ui, o, VALUE_X, 395.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
+    }
+
+    /// "Open automatically at login", and next to it "Start in tray at
+    /// login", which only means something while the first is on.
+    fn startup(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        let login = match self.autostart.get_or_insert_with(autostart::is_enabled) {
+            Ok(on) => *on,
+            Err(e) => {
+                let text = format!("Open at login is not available: {e}");
+                value(ui, o, VALUE_X, 91.0, 22.0, &text);
+                return;
+            }
+        };
+        let mut s = runtime::lock(env.state);
+        // The login entry was removed, here or elsewhere: nothing starts in
+        // the tray, and turning the entry on again starts with the window.
+        if !login && s.settings.start_in_tray {
+            s.settings.start_in_tray = false;
+            s.save_settings();
+        }
+        let tray = s.settings.start_in_tray;
+        drop(s);
+
+        let mut on = login;
+        if checkbox(
+            ui,
+            at(o, VALUE_X, 92.0, 200.0, 20.0),
+            &mut on,
+            "Open automatically at login",
+        )
+        .changed()
+        {
+            self.autostart = Some(match autostart::set_enabled(on, on && tray) {
+                Ok(()) => Ok(on),
+                Err(e) => {
+                    runtime::lock(env.state).notify(format!("Open at login: {e}"));
+                    autostart::is_enabled()
+                }
+            });
+        }
+
+        let mut on = login && tray;
+        let changed = ui
+            .add_enabled_ui(login, |ui| {
+                checkbox(
+                    ui,
+                    at(o, VALUE_X + 220.0, 92.0, 200.0, 20.0),
+                    &mut on,
+                    "Start in tray at login",
+                )
+                .on_hover_text(
+                    "At login, Deckly starts without its window; open it from the tray \
+                     icon. Without a tray on this desktop the window opens anyway.",
+                )
+                .on_disabled_hover_text("Turn on Open automatically at login first")
+            })
+            .inner
+            .changed();
+        if changed {
+            let mut s = runtime::lock(env.state);
+            match autostart::set_enabled(true, on) {
+                Ok(()) => {
+                    s.settings.start_in_tray = on;
+                    s.save_settings();
+                }
+                Err(e) => s.notify(format!("Start in tray: {e}")),
+            }
+        }
     }
 
     /// Next to the version: check now, update, and the daily check.

@@ -123,15 +123,16 @@ pub fn start(
         .map_err(|e| e.to_string())
 }
 
+/// Whether this desktop shows tray icons right now.
 #[cfg(not(target_os = "linux"))]
-fn available() -> Result<(), String> {
+pub fn available() -> Result<(), String> {
     Ok(())
 }
 
 /// The tray library reports success on a desktop without a tray, such as
 /// GNOME without its AppIndicator extension, so ask D-Bus first.
 #[cfg(target_os = "linux")]
-fn available() -> Result<(), String> {
+pub fn available() -> Result<(), String> {
     use zbus::blocking::{Connection, fdo::DBusProxy};
     use zbus::names::BusName;
 

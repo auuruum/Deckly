@@ -8,6 +8,20 @@ Planned features, chosen by the project owner on 2026-11-02.
       Done: while Deckly holds nothing of the user's, a welcome window offers
       everything it found. "Import Everything…" in Preferences stays for later.
 
+## Startup
+
+- [x] Add a "Start in tray at login" option alongside "Open automatically at
+      login". When enabled, Deckly starts in the system tray without opening
+      the main window. Launching Deckly manually still opens the window.
+      Done: Preferences > General > Startup. The login entry passes
+      `--start-in-tray`; without a tray after 10 seconds the window opens.
+
+## Updates
+
+- [ ] Fix overlapping text and buttons in the update banner. **Update Now**
+      covers the installed version in the update message. Keep both version
+      numbers readable and all controls visible when space is limited.
+
 ## Profiles
 
 - [x] Switch profiles automatically by the active window.

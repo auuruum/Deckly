@@ -24,7 +24,7 @@
      plugin and account values were not read or decoded).
 - **Implemented in:** `crates/deckly-core/src/settings.rs`,
   `crates/deckly/src/prefs.rs`, `crates/deckly/src/runtime.rs`,
-  `crates/deckly/src/os/autostart.rs`
+  `crates/deckly/src/os/autostart.rs`, `crates/deckly/src/launch.rs`
 
 ## Observed: window
 
@@ -118,6 +118,19 @@ sits at the bottom. Registry value names `auto_launch_enabled` and
   state was exercised. The Devices tab with a device connected, sleep,
   orientation and the open-at-login switch were not tried at runtime.
 - Linux and macOS: compile checks only.
+- 2026-11-06, "Start in tray at login": unit tests for the setting with and
+  without the field, the `--start-in-tray` flag, the Linux, macOS and Windows
+  entry text, the start decision and the wait for a tray. Run on CachyOS,
+  Hyprland 0.57.1 (a Wayland session), with `DECKLY_NO_DEVICES=1` and a
+  throwaway config folder, both with winit's Wayland backend and its X11
+  backend through Xwayland (no native X11 session): a start with the flag
+  opened no window, added the tray icon and used no CPU while idle; the tray
+  icon, its Preferences item and a second start brought the window up; the
+  flag with the setting off, a start without the flag, and a D-Bus session
+  without a tray (window after 10 s) opened it. Preferences was looked at with
+  the login entry absent (tray box disabled) and present. The check boxes
+  were not clicked by a tool, and no device or plugin was used. macOS and
+  Windows: compile and clippy checks only.
 
 ## Unknowns and next steps
 
@@ -150,3 +163,16 @@ sits at the bottom. Registry value names `auto_launch_enabled` and
   The inspector gets a button that makes a key follow the global style again.
 - The General tab shows Deckly's version, the open-at-login switch, the
   configuration folder and the unofficial notice.
+- "Start in tray at login" sits next to the open-at-login switch and is
+  disabled while that is off; turning open-at-login off turns it off too. It
+  adds `--start-in-tray` to the login entry: the `Run` value on Windows, a
+  second `ProgramArguments` string in the launch agent on macOS, and the
+  `Exec` line of the XDG autostart entry on Linux, which X11 and Wayland
+  sessions read alike. Only that flag, with the setting still on, keeps the
+  window closed; any other start opens it. On Linux and Windows no window is
+  created until the user asks for it (winit cannot hide a Wayland window, and
+  on Windows the main thread handles the tray's messages while it waits). On
+  macOS the tray needs the event loop, so the window starts hidden and fully
+  transparent and Deckly does not take the focus. With no tray after 10
+  seconds (GNOME without its AppIndicator extension), the window opens.
+  Inside a Flatpak sandbox the login switch reports that it is unsupported.
