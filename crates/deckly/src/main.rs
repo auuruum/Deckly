@@ -15,6 +15,7 @@ mod cropper;
 mod fonts;
 mod history;
 mod image_editor;
+mod launch;
 mod lock_gate;
 mod logo;
 mod official;
@@ -56,13 +57,25 @@ fn main() -> eframe::Result {
         None => None,
     };
     let background = background::Background::start(instance);
+    let start_in_tray = runtime::lock(&background.state).settings.start_in_tray;
+    let launch = launch::Launch::from_args(&args);
+    let mut hidden = !launch::opens_window(launch, start_in_tray, || background.tray_ready());
+    if hidden && background::TRAY_WITHOUT_WINDOW {
+        // No window until the user asks for it, as after closing one.
+        background.set_closing_to_tray(true);
+        if !background.wait_for_window() {
+            return Ok(());
+        }
+        hidden = false;
+    }
     loop {
         let window = background.clone();
         let result = eframe::run_native(
             "Deckly",
-            options(),
-            Box::new(|cc| Ok(Box::new(app::App::new(cc, window)))),
+            options(hidden),
+            Box::new(move |cc| Ok(Box::new(app::App::new(cc, window, hidden)))),
         );
+        hidden = false;
         if let Err(e) = result {
             background.shutdown();
             return Err(e);
@@ -73,7 +86,9 @@ fn main() -> eframe::Result {
     }
 }
 
-fn options() -> eframe::NativeOptions {
+/// `hidden`: the window starts hidden (only on macOS, see
+/// [`background::TRAY_WITHOUT_WINDOW`]).
+fn options(hidden: bool) -> eframe::NativeOptions {
     let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deckly")
@@ -84,6 +99,17 @@ fn options() -> eframe::NativeOptions {
         ..Default::default()
     };
     lean_wgpu(&mut options.wgpu_options.wgpu_setup);
+    // A start in the tray at login leaves the focus where it is. Showing the
+    // window later activates Deckly through `ViewportCommand::Focus`.
+    #[cfg(target_os = "macos")]
+    if hidden {
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::macos::EventLoopBuilderExtMacOS;
+            builder.with_activate_ignoring_other_apps(false);
+        }));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = hidden;
     options
 }
 
