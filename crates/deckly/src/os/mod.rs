@@ -9,8 +9,10 @@ pub mod active_window;
 pub mod applications;
 pub mod autostart;
 pub mod instance;
+pub mod main_thread;
 pub mod screen_lock;
 pub mod tray;
+pub mod window;
 
 mod command;
 

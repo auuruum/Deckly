@@ -58,6 +58,10 @@ pub struct Settings {
     pub check_updates: bool,
     /// A release version the user chose to skip; no offer for it again.
     pub skipped_update: String,
+    /// Started at login, Deckly stays in the tray instead of opening its
+    /// window. Only counts while it opens at login; turning that off turns
+    /// this off too.
+    pub start_in_tray: bool,
 }
 
 impl Default for Settings {
@@ -76,6 +80,7 @@ impl Default for Settings {
             confirm_folder_auto_exit_reset: true,
             check_updates: true,
             skipped_update: String::new(),
+            start_in_tray: false,
         }
     }
 }
@@ -378,6 +383,21 @@ mod tests {
         let s = Settings::from_json(r#"{"brightness":40,"assignments":{"A1":"p"}}"#).unwrap();
         assert_eq!(s.device("A1").brightness, 40);
         assert!(s.device("A1").enabled);
+    }
+
+    #[test]
+    fn start_in_tray_is_off_in_older_files_and_survives_a_round_trip() {
+        let old = r#"{"brightness":40,"check_updates":false,"skipped_update":"0.0.1"}"#;
+        let s = Settings::from_json(old).unwrap();
+        assert!(!s.start_in_tray);
+        assert!(!s.check_updates);
+        let on = Settings {
+            start_in_tray: true,
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&on).unwrap();
+        assert!(text.contains(r#""start_in_tray":true"#));
+        assert!(Settings::from_json(&text).unwrap().start_in_tray);
     }
 
     fn profiles(names: &[(&str, crate::DeviceKind)]) -> Vec<Profile> {

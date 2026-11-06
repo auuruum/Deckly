@@ -10,9 +10,11 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Startup
 
-- [ ] Add a "Start in tray at login" option alongside "Open automatically at
+- [x] Add a "Start in tray at login" option alongside "Open automatically at
       login". When enabled, Deckly starts in the system tray without opening
       the main window. Launching Deckly manually still opens the window.
+      Done: Preferences > General > Startup. The login entry passes
+      `--start-in-tray`; without a tray after 10 seconds the window opens.
 
 ## Updates
 

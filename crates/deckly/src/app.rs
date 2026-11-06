@@ -259,13 +259,30 @@ pub struct App {
     /// Closing the window keeps Deckly running. Off without a tray, and once
     /// the user chose to quit.
     close_to_tray: bool,
+    /// Started in the tray: the first pass hides the window.
+    hide_at_start: bool,
+    /// Transparent until first shown (macOS; see [`crate::os::window`]).
+    concealed: Option<crate::os::window::Concealed>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, background: Rc<Background>) -> Self {
+    /// `start_hidden`: Deckly started in the tray, and this window stays
+    /// hidden until the user asks for it. Without a tray it shows anyway.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        background: Rc<Background>,
+        start_hidden: bool,
+    ) -> Self {
         apply(&cc.egui_ctx);
         let prefs = Preferences::new();
         prefs.offer_import(&cc.egui_ctx, &background.state);
+        let close_to_tray = background.attach(&cc.egui_ctx);
+        let hide_at_start = start_hidden && close_to_tray;
+        let concealed = if hide_at_start {
+            crate::os::window::conceal(cc)
+        } else {
+            None
+        };
         Self {
             state: background.state.clone(),
             runtime: background.runtime.clone(),
@@ -305,7 +322,9 @@ impl App {
             folder_nav: None,
             split: DEFAULT_SPLIT,
             list_width: LIST_WIDTH,
-            close_to_tray: background.attach(&cc.egui_ctx),
+            close_to_tray,
+            hide_at_start,
+            concealed,
             background,
             prefs_after_show: false,
         }
@@ -313,6 +332,10 @@ impl App {
 
     /// Handles closing the window and what the tray and later starts ask.
     fn tick(&mut self, ctx: &egui::Context) {
+        // Before `ui` runs, so the first frame draws nothing.
+        if std::mem::take(&mut self.hide_at_start) {
+            self.hide(ctx);
+        }
         if std::mem::take(&mut self.prefs_after_show) {
             self.prefs.open(ctx, self.selected_device.as_deref());
         }
@@ -366,6 +389,9 @@ impl App {
     }
 
     fn show(&mut self, ctx: &egui::Context) {
+        if let Some(concealed) = self.concealed.take() {
+            concealed.reveal();
+        }
         self.background.hidden.store(false, Ordering::Relaxed);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -4206,6 +4232,25 @@ mod tray_tests {
     }
 
     #[test]
+    fn a_window_started_in_the_tray_hides_before_its_first_frame() {
+        let ctx = egui::Context::default();
+        let mut app = App {
+            hide_at_start: true,
+            ..tray_editor(false)
+        };
+        let commands = pass(&mut app, &ctx, false);
+        assert!(commands.contains(&ViewportCommand::Visible(false)));
+        assert!(app.background.hidden.load(Ordering::Relaxed));
+        // Only once.
+        assert!(pass(&mut app, &ctx, false).is_empty());
+        app.background.send(Command::Show);
+        let commands = pass(&mut app, &ctx, false);
+        assert!(commands.contains(&ViewportCommand::Visible(true)));
+        assert!(commands.contains(&ViewportCommand::Focus));
+        assert!(!app.background.hidden.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn quit_is_not_held_back_by_the_tray() {
         let ctx = egui::Context::default();
         let mut app = tray_editor(false);
@@ -4720,6 +4765,8 @@ mod clipboard_tests {
             background,
             prefs_after_show: false,
             close_to_tray: false,
+            hide_at_start: false,
+            concealed: None,
         }
     }
 
