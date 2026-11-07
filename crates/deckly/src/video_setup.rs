@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-const SIZE: egui::Vec2 = vec2(640.0, 640.0);
+const SIZE: egui::Vec2 = vec2(640.0, 720.0);
 
 /// A key editor waiting for FFmpeg before it asks for a video.
 pub struct Pending {
@@ -38,7 +38,7 @@ pub enum Event {
     Choose(PathBuf),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Route {
     System,
     Download,
@@ -329,7 +329,12 @@ impl VideoSetup {
         ui.separator();
         self.download_route(ui, busy);
         ui.separator();
-        section(ui, icon::FOLDER_OPEN, "Use an FFmpeg on this computer");
+        section(
+            ui,
+            icon::FOLDER_OPEN,
+            "Use an FFmpeg on this computer",
+            false,
+        );
         if let Some(path) = chosen {
             dim(ui, &format!("Chosen in Preferences: {}", path.display()));
         }
@@ -410,10 +415,15 @@ impl VideoSetup {
         }
     }
 
+    fn recommended(&self) -> Option<Route> {
+        let download = pins::for_this_system().is_some() && ffmpeg::own_dir().is_some();
+        recommend(self.plan.as_ref(), download)
+    }
+
     fn system_route(&mut self, ui: &mut Ui, busy: bool) {
         let plan = match &self.plan {
             None => {
-                section(ui, icon::PACKAGE, "Install through the system");
+                section(ui, icon::PACKAGE, "Install through the system", false);
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Checking your package manager…");
@@ -421,7 +431,7 @@ impl VideoSetup {
                 return;
             }
             Some(None) => {
-                section(ui, icon::PACKAGE, "Install through the system");
+                section(ui, icon::PACKAGE, "Install through the system", false);
                 dim(
                     ui,
                     "Deckly found no package manager it knows (apt, dnf, pacman, zypper, \
@@ -431,11 +441,19 @@ impl VideoSetup {
             }
             Some(Some(plan)) => plan.clone(),
         };
+        let recommended = self.recommended() == Some(Route::System);
         section(
             ui,
             icon::PACKAGE,
             &format!("Install through the system with {}", plan.manager.label()),
+            recommended,
         );
+        if recommended {
+            dim(
+                ui,
+                "Other programs can use this FFmpeg too, and your system keeps it updated.",
+            );
+        }
         match &plan.repository {
             Repository::Has(v) => dim(ui, &format!("Your repositories have FFmpeg {v}.")),
             Repository::NotChecked => dim(
@@ -455,8 +473,7 @@ impl VideoSetup {
                     "Your system asks for administrator rights in its own window when it \
                      needs them. Deckly never sees your password.",
                 );
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Install"))
+                if route_button(ui, !busy, recommended, "Install")
                     .on_hover_text("Run the command above")
                     .clicked()
                 {
@@ -470,7 +487,7 @@ impl VideoSetup {
         }
 
         ui.separator();
-        section(ui, icon::TERMINAL_WINDOW, "Copy the command");
+        section(ui, icon::TERMINAL_WINDOW, "Copy the command", false);
         dim(ui, "Run it yourself in a terminal:");
         command_box(ui, &plan.terminal);
         if ui.button(format!("{}  Copy", icon::COPY)).clicked() {
@@ -480,7 +497,13 @@ impl VideoSetup {
     }
 
     fn download_route(&mut self, ui: &mut Ui, busy: bool) {
-        section(ui, icon::DOWNLOAD_SIMPLE, "Download for Deckly");
+        let recommended = self.recommended() == Some(Route::Download);
+        section(
+            ui,
+            icon::DOWNLOAD_SIMPLE,
+            "Download for Deckly",
+            recommended,
+        );
         let Some(pin) = pins::for_this_system() else {
             dim(ui, pins::unavailable_reason());
             return;
@@ -504,13 +527,8 @@ impl VideoSetup {
             ),
         );
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new(format!("Download {}", megabytes(pin.size))),
-                )
-                .clicked()
-            {
+            let text = format!("Download {}", megabytes(pin.size));
+            if route_button(ui, !busy, recommended, &text).clicked() {
                 self.start_download(ui.ctx(), pin, dir.clone());
             }
             ui.hyperlink_to(
@@ -621,14 +639,51 @@ fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("video-setup")
 }
 
-fn section(ui: &mut Ui, glyph: &str, title: &str) {
+fn section(ui: &mut Ui, glyph: &str, title: &str, recommended: bool) {
     ui.add_space(2.0);
-    ui.label(
-        RichText::new(format!("{glyph}  {title}"))
-            .size(15.0)
-            .strong()
-            .color(TEXT),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{glyph}  {title}"))
+                .size(15.0)
+                .strong()
+                .color(TEXT),
+        );
+        if recommended {
+            egui::Frame::new()
+                .fill(ACCENT)
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(8, 2))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Recommended")
+                            .size(11.0)
+                            .color(Color32::WHITE),
+                    );
+                });
+        }
+    });
+}
+
+/// The route's main button; the recommended one stands out.
+fn route_button(ui: &mut Ui, enabled: bool, recommended: bool, text: &str) -> egui::Response {
+    let button = if recommended {
+        egui::Button::new(RichText::new(text).color(Color32::WHITE)).fill(ACCENT)
+    } else {
+        egui::Button::new(text)
+    };
+    ui.add_enabled(enabled, button)
+}
+
+/// Which route the window recommends: the package manager when it can
+/// install FFmpeg 7+, since other programs can use that FFmpeg too and the
+/// system keeps it updated; otherwise Deckly's own download. Nothing while
+/// the package manager is still being checked.
+fn recommend(plan: Option<&Option<Plan>>, download: bool) -> Option<Route> {
+    match plan? {
+        Some(plan) if plan.install.is_ok() => Some(Route::System),
+        _ if download => Some(Route::Download),
+        _ => None,
+    }
 }
 
 fn dim(ui: &mut Ui, text: &str) {
@@ -668,6 +723,30 @@ fn pick_ffmpeg() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_route_is_recommended_when_it_can_install() {
+        use crate::ffmpeg::system::{Manager, plan_with};
+        use crate::os::elevate::Os;
+        let brew = Path::new("/opt/homebrew/bin/brew");
+        let installs = Some(plan_with(Os::Mac, Manager::Brew, brew, None, None));
+        assert_eq!(recommend(Some(&installs), true), Some(Route::System));
+        assert_eq!(recommend(Some(&installs), false), Some(Route::System));
+        // Without pkexec only Copy works, so the download is recommended.
+        let apt = Path::new("/usr/bin/apt-get");
+        let blocked = Some(plan_with(
+            Os::Linux,
+            Manager::Apt,
+            apt,
+            Some(Err("x".into())),
+            None,
+        ));
+        assert_eq!(recommend(Some(&blocked), true), Some(Route::Download));
+        assert_eq!(recommend(Some(&blocked), false), None);
+        assert_eq!(recommend(Some(&None), true), Some(Route::Download));
+        // Still checking the package manager: no recommendation yet.
+        assert_eq!(recommend(None, true), None);
+    }
 
     #[test]
     fn sizes_are_shown_in_whole_megabytes() {
