@@ -238,6 +238,8 @@ pub struct App {
     recording_hotkey: bool,
     app_picker: Option<crate::app_picker::Picker>,
     image_editor: Option<crate::image_editor::Editor>,
+    /// Finds FFmpeg for video import, and offers to set it up.
+    video_setup: crate::video_setup::VideoSetup,
     wallpaper_editor: Option<WallpaperEditor>,
     clipboard: Option<KeyClipboard>,
     pending_paste: Option<PendingPaste>,
@@ -309,6 +311,7 @@ impl App {
             recording_hotkey: false,
             app_picker: None,
             image_editor: None,
+            video_setup: Default::default(),
             wallpaper_editor: None,
             clipboard: None,
             pending_paste: None,
@@ -2320,7 +2323,17 @@ impl App {
                             let mut editor = Editor::new(image_context.clone(), key, mode);
                             let open = match choice {
                                 ImageChoice::Upload => editor.upload(ui.ctx()),
-                                ImageChoice::Video => editor.upload_video(ui.ctx(), &profile_id),
+                                ImageChoice::Video => {
+                                    // The editor opens once FFmpeg is found.
+                                    let chosen =
+                                        runtime::lock(&self.state).settings.ffmpeg_path.clone();
+                                    let pending = crate::video_setup::Pending {
+                                        editor,
+                                        profile: profile_id.clone(),
+                                    };
+                                    self.video_setup.begin_import(ui.ctx(), pending, chosen);
+                                    return;
+                                }
                                 _ => true,
                             };
                             if open {
@@ -3051,8 +3064,33 @@ impl App {
             kind,
             host: self.host.as_ref(),
             updater: &self.background.updater,
+            video_setup: &mut self.video_setup,
         };
         self.prefs.show(ctx, &mut env);
+    }
+
+    /// The "Turn on video import" window, and the video import it waits
+    /// for.
+    fn video_setup(&mut self, ctx: &egui::Context) {
+        use crate::video_setup::{Event, Pending};
+        let chosen = runtime::lock(&self.state).settings.ffmpeg_path.clone();
+        match self.video_setup.show(ctx, chosen.as_deref()) {
+            Some(Event::Import { pending, ffmpeg }) => {
+                let Pending {
+                    mut editor,
+                    profile,
+                } = *pending;
+                if editor.upload_video(ctx, &profile, ffmpeg) {
+                    self.image_editor = Some(editor);
+                }
+            }
+            Some(Event::Choose(path)) => {
+                let mut s = runtime::lock(&self.state);
+                s.settings.ffmpeg_path = Some(path);
+                s.save_settings();
+            }
+            None => {}
+        }
     }
 
     fn rename_window(&mut self, ctx: &egui::Context) {
@@ -3601,6 +3639,7 @@ impl eframe::App for App {
             device.as_ref().map(|d| d.serial.as_str()),
             profile.device,
         );
+        self.video_setup(&ctx);
         self.rename_window(&ctx);
         self.update_banner(&ctx);
         self.notice(&ctx);
@@ -4909,6 +4948,7 @@ mod clipboard_tests {
             recording_hotkey: false,
             app_picker: None,
             image_editor: None,
+            video_setup: Default::default(),
             wallpaper_editor: None,
             clipboard: None,
             pending_paste: None,

@@ -80,6 +80,7 @@ pub struct Env<'a> {
     pub kind: DeviceKind,
     pub host: Option<&'a Host>,
     pub updater: &'a Updater,
+    pub video_setup: &'a mut crate::video_setup::VideoSetup,
 }
 
 pub struct Preferences {
@@ -627,10 +628,12 @@ impl Preferences {
         self.lock_keys(ui, o, env);
         self.switch_by_window(ui, o, env);
 
-        label(ui, o, 392.0, 22.0, "About:");
+        self.video_import(ui, o, env);
+
+        label(ui, o, 426.0, 22.0, "About:");
         let text = "Deckly is an independent app. It is not made, approved or \
                     supported by Elgato or Corsair.";
-        value_dim(ui, o, VALUE_X, 395.0, 440.0, text);
+        value_dim(ui, o, VALUE_X, 429.0, 440.0, text);
 
         footer(ui, o, "Deckly is built with Rust and egui.");
     }
@@ -806,6 +809,48 @@ impl Preferences {
              screensaver; Standby Screen shows the picture stored on the device."
         };
         value_dim(ui, o, VALUE_X, 279.0, 440.0, note);
+    }
+
+    /// Which FFmpeg video import uses, and the window that sets it up.
+    fn video_import(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        label(ui, o, 392.0, 30.0, "Video Import:");
+        let chosen = runtime::lock(env.state).settings.ffmpeg_path.clone();
+        if button(ui, at(o, VALUE_X, 396.0, 130.0, 22.0), "Set Up FFmpeg…")
+            .on_hover_text("Install, download or choose the FFmpeg that converts videos")
+            .clicked()
+        {
+            env.video_setup.open(ui.ctx(), chosen.clone());
+        }
+        let text = match &chosen {
+            Some(path) => {
+                if button(
+                    ui,
+                    at(o, VALUE_X + 140.0, 396.0, 110.0, 22.0),
+                    "Use Automatic",
+                )
+                .on_hover_text("Forget the chosen FFmpeg and look for one again")
+                .clicked()
+                {
+                    let mut s = runtime::lock(env.state);
+                    s.settings.ffmpeg_path = None;
+                    s.save_settings();
+                }
+                // The end of a long path names the program; keep that.
+                let name = path.display().to_string();
+                let count = name.chars().count();
+                match count.checked_sub(28).filter(|&skip| skip > 0) {
+                    Some(skip) => format!("…{}", name.chars().skip(skip).collect::<String>()),
+                    None => name,
+                }
+            }
+            None => "Deckly's own FFmpeg, then PATH".to_owned(),
+        };
+        let x = if chosen.is_some() {
+            VALUE_X + 260.0
+        } else {
+            VALUE_X + 140.0
+        };
+        value_dim(ui, o, x, 399.0, 470.0 - (x - VALUE_X), &text);
     }
 
     /// Whether profiles follow the applications they list.
@@ -3254,6 +3299,7 @@ mod tests {
                                     kind: DeviceKind::Mk2,
                                     host: None,
                                     updater: &Updater::new(None, std::sync::Arc::new(|| {})),
+                                    video_setup: &mut Default::default(),
                                 },
                             );
                         });
@@ -3333,6 +3379,7 @@ mod tests {
                         kind: DeviceKind::Mk2,
                         host: None,
                         updater: &Updater::new(None, std::sync::Arc::new(|| {})),
+                        video_setup: &mut Default::default(),
                     };
                     match tab {
                         Tab::General => prefs.switch_by_window(ui, Pos2::ZERO, &mut env),

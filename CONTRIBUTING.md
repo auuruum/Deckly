@@ -54,6 +54,10 @@ Development switches:
 - `DECKLY_WINE=/path/to/wine`: force the Wine that runs Windows plugins.
 - `DECKLY_FAKE_UPDATE=0.2.0`: pretend that version is the latest release, to
   see the update offer. Debug builds check for updates only with this set.
+- `DECKLY_FAKE_NO_FFMPEG=1`: ignore FFmpeg on PATH and in the winget and
+  Homebrew folders, to see the "Turn on video import" window. A chosen FFmpeg
+  and Deckly's own download still count; with `DECKLY_CONFIG_DIR` set, the
+  download goes into that folder.
 
 To check simulated input on a Linux session by hand, focus a text field and
 run `cargo test -p deckly -- --ignored typing`.

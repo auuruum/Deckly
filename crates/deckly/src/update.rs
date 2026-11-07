@@ -541,7 +541,7 @@ fn fetch(url: &str, out: &Path, max_bytes: u64) -> Result<(), String> {
 
 /// A tool that ships with the system; on Windows it is taken from System32
 /// so a program of the same name elsewhere on `PATH` is not used.
-fn system_tool(name: &str) -> Command {
+pub(crate) fn system_tool(name: &str) -> Command {
     if cfg!(windows) {
         let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
         Command::new(

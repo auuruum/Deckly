@@ -62,6 +62,9 @@ pub struct Settings {
     /// window. Only counts while it opens at login; turning that off turns
     /// this off too.
     pub start_in_tray: bool,
+    /// The FFmpeg chosen for video import. `None`: Deckly's own copy, then
+    /// one on PATH.
+    pub ffmpeg_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -81,6 +84,7 @@ impl Default for Settings {
             check_updates: true,
             skipped_update: String::new(),
             start_in_tray: false,
+            ffmpeg_path: None,
         }
     }
 }
@@ -363,6 +367,15 @@ impl Settings {
                 d.screensaver = None;
             }
         }
+        // Only an absolute path is used; a relative one would depend on the
+        // folder Deckly started in.
+        if self
+            .ffmpeg_path
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().len() > MAX_PATH_BYTES || !p.is_absolute())
+        {
+            self.ffmpeg_path = None;
+        }
         if self.skipped_update.chars().count() > MAX_VERSION_CHARS {
             self.skipped_update.clear();
         }
@@ -581,6 +594,24 @@ mod tests {
             json,
             r#"["standard","rotate90","rotate180","rotate270","upside_down"]"#
         );
+    }
+
+    #[test]
+    fn ffmpeg_path_must_be_absolute_and_bounded() {
+        let absolute = if cfg!(windows) {
+            r"C:\tools\ffmpeg.exe"
+        } else {
+            "/opt/ffmpeg"
+        };
+        let json = serde_json::json!({ "ffmpeg_path": absolute }).to_string();
+        let s = Settings::from_json(&json).unwrap();
+        assert_eq!(s.ffmpeg_path, Some(PathBuf::from(absolute)));
+        let s = Settings::from_json(r#"{"ffmpeg_path": "bin/ffmpeg"}"#).unwrap();
+        assert_eq!(s.ffmpeg_path, None);
+        let long = format!("/{}", "a".repeat(MAX_PATH_BYTES + 1));
+        let json = serde_json::json!({ "ffmpeg_path": long }).to_string();
+        assert_eq!(Settings::from_json(&json).unwrap().ffmpeg_path, None);
+        assert_eq!(Settings::default().ffmpeg_path, None);
     }
 
     #[test]

@@ -32,6 +32,29 @@ pub fn config_dir() -> Option<PathBuf> {
     }))
 }
 
+/// Where Deckly keeps large files that are not settings, such as its own
+/// FFmpeg: the local (not roaming) app data folder on Windows and the XDG
+/// data folder on Linux. With `DECKLY_CONFIG_DIR` set, a folder inside it.
+pub fn data_dir() -> Option<PathBuf> {
+    let env = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    if let Some(dir) = env("DECKLY_CONFIG_DIR") {
+        return Some(dir.join("data"));
+    }
+    if cfg!(windows) {
+        Some(env("LOCALAPPDATA")?.join("Deckly"))
+    } else if cfg!(target_os = "macos") {
+        config_dir()
+    } else {
+        let base = env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?;
+        Some(base.join("deckly"))
+    }
+}
+
 fn profiles_dir() -> Option<PathBuf> {
     Some(config_dir()?.join("profiles"))
 }
