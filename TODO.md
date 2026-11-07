@@ -18,9 +18,11 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Updates
 
-- [ ] Fix overlapping text and buttons in the update banner. **Update Now**
+- [x] Fix overlapping text and buttons in the update banner. **Update Now**
       covers the installed version in the update message. Keep both version
       numbers readable and all controls visible when space is limited.
+      Done: the banner fits its content; message and buttons share one row
+      when they fit, otherwise the buttons go on their own row below.
 
 ## Profiles
 
