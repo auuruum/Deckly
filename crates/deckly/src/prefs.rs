@@ -21,6 +21,8 @@ use crate::theme::*;
 use crate::transfer::{self, Job, Outcome, PluginKind, Section, SharedJob, Summary, Tone};
 use crate::update::{self, Method, Updater};
 use crate::wallpaper::WallpaperEditor;
+
+mod feedback;
 use deckly_core::profile::{
     MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_APPLICATIONS, MAX_PROFILE_NAME_CHARS,
 };
@@ -133,6 +135,11 @@ pub struct Preferences {
     global_wallpaper_unsaved: bool,
     /// The small picture of the global wallpaper on the Style tab.
     wallpaper_thumb: Option<(u64, TextureHandle)>,
+    /// Keys showing the failure mark, the success mark and the Auto Exit
+    /// ring on the Style tab.
+    mark_previews: [Option<(u64, TextureHandle)>; 3],
+    /// A dragged feedback mark setting is saved once the mouse is let go.
+    marks_unsaved: bool,
 }
 
 struct PageIconEditor {
@@ -323,6 +330,8 @@ impl Preferences {
             global_wallpaper: None,
             global_wallpaper_unsaved: false,
             wallpaper_thumb: None,
+            mark_previews: [None, None, None],
+            marks_unsaved: false,
         }
     }
 
@@ -569,7 +578,7 @@ impl Preferences {
             Tab::General => self.general(ui, origin, env),
             Tab::Devices => self.devices(ui, origin, env),
             Tab::Profiles => self.profiles(ui, origin, env),
-            Tab::Style => self.style(ui, origin, env),
+            Tab::Style => self.style_scrolled(ui, origin, env),
         }
     }
 
@@ -2031,6 +2040,29 @@ impl Preferences {
 
     // ----- Style ---------------------------------------------------------
 
+    /// The Style tab is taller than the window, so it scrolls below the
+    /// tab strip. Its controls keep the places they have at the top.
+    fn style_scrolled(&mut self, ui: &mut Ui, origin: Pos2, env: &mut Env<'_>) {
+        let body = Rect::from_min_max(origin + vec2(0.0, STRIP_HEIGHT), ui.max_rect().max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+            // A bar in sight says the tab goes on below.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle {
+                foreground_color: true,
+                ..egui::style::ScrollStyle::solid()
+            };
+            egui::ScrollArea::vertical()
+                .id_salt("style-tab")
+                .auto_shrink(false)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                .show(ui, |ui| {
+                    let size = vec2(ui.available_width(), feedback::BOTTOM - STRIP_HEIGHT);
+                    let (_, content) = ui.allocate_space(size);
+                    let o = content.min - vec2(0.0, STRIP_HEIGHT);
+                    self.style(ui, o, env);
+                });
+        });
+    }
+
     fn style(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
         let saved = runtime::lock(env.state).settings.title_style.clone();
         let mut style = self.style.clone().unwrap_or_else(|| saved.clone());
@@ -2079,6 +2111,7 @@ impl Preferences {
 
         self.key_press(ui, o, env);
         self.global_wallpaper(ui, o, env);
+        self.feedback_marks(ui, o, env);
     }
 
     /// The global wallpaper: a small picture of it, and buttons to edit or
@@ -2245,35 +2278,59 @@ impl Preferences {
         let mut key = KeyConfig::new(actions::WEBSITE, json!({}));
         key.title = "Preview".into();
         key.title_style = Some(style.clone());
-        let hash = renderer.key_hash(Some(&key), Live::default(), None);
-        let ppp = ui.ctx().pixels_per_point();
-        let border = KEY_BORDER_WIDTH;
-        let px = ((rect.width() - 2.0 * border) * ppp).round() as u32;
-        let texture = match &self.preview {
-            Some((h, t)) if *h == hash && t.size()[0] == px as usize => t.id(),
-            _ => {
-                let img = renderer.render(Some(&key), px, Live::default(), None);
-                let size = [img.width() as usize, img.height() as usize];
-                let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-                let t = ui
-                    .ctx()
-                    .load_texture("title-preview", color, TextureOptions::LINEAR);
-                let id = t.id();
-                self.preview = Some((hash, t));
-                id
-            }
+        let sample = Sample {
+            name: "title-preview",
+            key: &key,
+            live: Live::default(),
+            overlay: None,
         };
-        let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(12), KEY_BORDER);
-        p.add(
-            egui::epaint::RectShape::filled(
-                rect.shrink(border),
-                CornerRadius::same(9),
-                Color32::WHITE,
-            )
-            .with_texture(texture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
-        );
+        key_preview(ui, rect, &mut self.preview, &sample, renderer);
     }
+}
+
+/// A key drawn for a preview on the Style tab.
+struct Sample<'a> {
+    /// Names the texture.
+    name: &'static str,
+    key: &'a KeyConfig,
+    live: Live,
+    overlay: Option<&'a plugins::Overlay>,
+}
+
+/// Draws `sample` as a key in `rect`. The texture in `slot` is drawn again
+/// only when the key's pixels change.
+fn key_preview(
+    ui: &Ui,
+    rect: Rect,
+    slot: &mut Option<(u64, TextureHandle)>,
+    sample: &Sample<'_>,
+    renderer: &mut Renderer,
+) {
+    let (key, live, overlay) = (Some(sample.key), sample.live, sample.overlay);
+    let hash = renderer.key_hash(key, live, overlay);
+    let ppp = ui.ctx().pixels_per_point();
+    let border = KEY_BORDER_WIDTH;
+    let px = ((rect.width() - 2.0 * border) * ppp).round() as u32;
+    let texture = match &*slot {
+        Some((h, t)) if *h == hash && t.size()[0] == px as usize => t.id(),
+        _ => {
+            let img = renderer.render(key, px, live, overlay);
+            let size = [img.width() as usize, img.height() as usize];
+            let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+            let t = ui
+                .ctx()
+                .load_texture(sample.name, color, TextureOptions::LINEAR);
+            let id = t.id();
+            *slot = Some((hash, t));
+            id
+        }
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(12), KEY_BORDER);
+    p.add(
+        egui::epaint::RectShape::filled(rect.shrink(border), CornerRadius::same(9), Color32::WHITE)
+            .with_texture(texture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
+    );
 }
 
 /// Puts a new global wallpaper in place and on the devices. A saved change
