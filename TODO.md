@@ -88,10 +88,14 @@ Planned features, chosen by the project owner on 2026-11-02.
       picture; the Wallpaper window's Profile tab follows it or turns it off.
       Backups carry it, profile exports do not. See the
       [clean-room notes](docs/clean-room/2026-11-07-global-wallpaper.md).
-- [ ] Style the feedback marks in Preferences > Style: the failure mark, the
+- [x] Style the feedback marks in Preferences > Style: the failure mark, the
       success check after an action ran, and the auto-exit from folders. Let
       people change or hide each one (icon, color, size, duration). Decide
       first whether a profile or a key may override them.
+      Done: global only, no profile or key overrides. The Style tab hides each
+      mark or picks its icon, colour, size and duration (the ring: colour and
+      size), with previews and Reset. Backups carry them, profile exports do
+      not. See the [clean-room notes](docs/clean-room/2026-11-07-feedback-marks.md).
 
 ## Plugin SDK
 
