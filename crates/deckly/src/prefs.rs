@@ -2148,11 +2148,17 @@ impl Preferences {
             return;
         };
         let Some(src) = renderer.wallpaper(&wallpaper.image) else {
-            centered_glyph(ui, rect.center(), icon::WARNING, 20.0, WARNING);
+            centered_glyph(
+                ui,
+                rect.center() - vec2(0.0, 8.0),
+                icon::WARNING,
+                18.0,
+                WARNING,
+            );
             painter.text(
-                rect.center_bottom() + vec2(0.0, 10.0),
+                rect.center() + vec2(0.0, 14.0),
                 Align2::CENTER_CENTER,
-                "The picture cannot be read",
+                "Cannot be read",
                 font(11.0),
                 WARNING,
             );

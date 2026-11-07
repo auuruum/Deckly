@@ -233,9 +233,8 @@ impl WallpaperEditor {
                     zoom_row(ui, wallpaper);
                 }
                 let status = if wallpaper.is_some() {
-                    "Shown behind the keys of every profile, page and folder that does not \
-                     choose its own wallpaper or turn it off. Each model shows the picture \
-                     across its own keys."
+                    "Behind the keys wherever a profile, page or folder does not use its own \
+                     wallpaper or turn it off."
                 } else {
                     "No global wallpaper. Profiles, pages and folders can still have their own."
                 };
