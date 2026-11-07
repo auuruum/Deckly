@@ -234,7 +234,8 @@ fn pack_global_wallpaper(zip: &mut Zip, settings: &mut Settings) -> bool {
     };
     let Some(name) = wallpaper
         .image
-        .to_str()
+        .file_name()
+        .and_then(|file| file.to_str())
         .and_then(clean_file_name)
         .map(|file| format!("{GLOBAL_WALLPAPER_FOLDER}{file}"))
     else {
