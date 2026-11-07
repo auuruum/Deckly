@@ -10,8 +10,8 @@ use crate::fonts::{self, Face};
 use crate::plugins::{self, Mark, Overlay, PageTile};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
-    DeviceModel, ImageFormat, KeyConfig, KeyPress, Orientation, Rotation, TitleAlign, TitleStyle,
-    Turn, Wallpaper,
+    DeviceModel, FeedbackMarks, ImageFormat, KeyConfig, KeyPress, MarkStyle, Orientation,
+    RingStyle, Rotation, TitleAlign, TitleStyle, Turn, Wallpaper,
 };
 use image::{ImageReader, Limits, Rgba, RgbaImage, imageops};
 use std::collections::HashMap;
@@ -117,6 +117,8 @@ pub struct Renderer {
     /// How held keys are drawn. The device has no press effect of its own;
     /// the host sends a smaller picture.
     pub key_press: KeyPress,
+    /// How the failure, success and Auto Exit marks look.
+    pub marks: FeedbackMarks,
     title_font: Option<FontArc>,
     icon_font: Option<FontArc>,
     images: HashMap<PathBuf, Picture>,
@@ -128,6 +130,7 @@ impl Renderer {
         Self {
             title_defaults: TitleStyle::default(),
             key_press: KeyPress::default(),
+            marks: FeedbackMarks::default(),
             title_font: load_title_font(),
             icon_font: FontArc::try_from_slice(egui_phosphor::Variant::Regular.font_bytes()).ok(),
             images: HashMap::new(),
@@ -217,18 +220,17 @@ impl Renderer {
         {
             draw_title(&mut img, &face, title, &style, size);
         }
-        if key.action == actions::PARENT_FOLDER
-            && let Some(percent) = live.exit
-        {
-            draw_ring(&mut img, percent);
+        if let Some(percent) = self.shown_exit(key, live) {
+            draw_ring(&mut img, percent, &self.marks.folder_exit);
         }
-        let mark = overlay
-            .and_then(|o| o.mark)
-            .or(broken.then_some(Mark::Alert));
-        if let Some(mark) = mark
+        // A picture that cannot be read keeps the fixed warning: it reports
+        // a broken file, not how an action went.
+        let broken_mark = MarkStyle::failure();
+        let mark = self.shown_mark(overlay).or(broken.then_some(&broken_mark));
+        if let Some(style) = mark
             && let Some(font) = &self.icon_font
         {
-            draw_mark(&mut img, font, mark);
+            draw_mark(&mut img, font, style);
         }
         let mut out = tile.unwrap_or_else(|| RgbaImage::from_pixel(size, size, EMPTY));
         let offset = if let Some(percent) = self.pressed_size(live) {
@@ -270,7 +272,14 @@ impl Renderer {
             b.index.hash(&mut h);
         }
         if let Some(key) = key {
-            overlay.hash(&mut h);
+            // No overlay draws like an empty one, so a hidden mark that
+            // comes and goes on a built-in key changes nothing.
+            match overlay {
+                Some(o) => o.hash(&mut h),
+                None => Overlay::default().hash(&mut h),
+            }
+            // A hidden mark changes nothing; a shown one with its look.
+            self.shown_mark(overlay).hash(&mut h);
             key.action.hash(&mut h);
             key.title.hash(&mut h);
             self.title_style(key).hash(&mut h);
@@ -283,8 +292,9 @@ impl Renderer {
             if key.action == actions::PAGE_INDICATOR {
                 live.page.hash(&mut h);
             }
-            if key.action == actions::PARENT_FOLDER {
-                live.exit.hash(&mut h);
+            if let Some(percent) = self.shown_exit(key, live) {
+                percent.hash(&mut h);
+                self.marks.folder_exit.hash(&mut h);
             }
             if key.action == actions::MULTI_ACTION_SWITCH {
                 actions::switch_side(key).hash(&mut h);
@@ -292,6 +302,25 @@ impl Renderer {
             self.pressed_size(live).hash(&mut h);
         }
         h.finish()
+    }
+
+    /// The look of the failure or success mark a key shows, unless the user
+    /// hid that mark.
+    pub fn shown_mark(&self, overlay: Option<&Overlay>) -> Option<&MarkStyle> {
+        let style = match overlay?.mark? {
+            Mark::Alert => &self.marks.failure,
+            Mark::Ok => &self.marks.success,
+        };
+        style.visible.then_some(style)
+    }
+
+    /// How far the Auto Exit ring on a folder's Exit key is, unless the user
+    /// hid the ring.
+    fn shown_exit(&self, key: &KeyConfig, live: Live) -> Option<u8> {
+        if key.action != actions::PARENT_FOLDER || !self.marks.folder_exit.visible {
+            return None;
+        }
+        live.exit
     }
 
     /// The size a key is drawn at in percent, when it is drawn smaller.
@@ -574,26 +603,55 @@ fn shown_title<'a>(key: &'a KeyConfig, overlay: Option<&'a Overlay>) -> &'a str 
     }
 }
 
-/// A plugin's short feedback: a warning sign or a check mark over the key.
-fn draw_mark(img: &mut RgbaImage, font: &FontArc, mark: Mark) {
+/// Short feedback over the dimmed key: a failure or success icon.
+fn draw_mark(img: &mut RgbaImage, font: &FontArc, style: &MarkStyle) {
     for px in img.pixels_mut() {
         for c in &mut px.0[..3] {
             *c /= 3;
         }
     }
-    let (glyph, color) = match mark {
-        Mark::Alert => (egui_phosphor::regular::WARNING, [0xF0, 0xB4, 0x3C]),
-        Mark::Ok => (egui_phosphor::regular::CHECK_CIRCLE, [0x4C, 0xC3, 0x5E]),
-    };
-    let size = img.width() as f32 * 0.6;
-    draw_icon_colored(img, font, glyph, size, color);
+    let percent = style.size.clamp(MarkStyle::MIN_SIZE, MarkStyle::MAX_SIZE);
+    let size = img.width() as f32 * f32::from(percent) / 100.0;
+    draw_icon_colored(img, font, mark_glyph(&style.icon), size, style.color);
+}
+
+/// The glyph of a mark icon named in the settings; unknown names show the
+/// warning sign.
+pub fn mark_glyph(name: &str) -> &'static str {
+    use egui_phosphor::regular as i;
+    match name {
+        "warning-circle" => i::WARNING_CIRCLE,
+        "warning-octagon" => i::WARNING_OCTAGON,
+        "x-circle" => i::X_CIRCLE,
+        "x-square" => i::X_SQUARE,
+        "x" => i::X,
+        "prohibit" => i::PROHIBIT,
+        "thumbs-down" => i::THUMBS_DOWN,
+        "smiley-sad" => i::SMILEY_SAD,
+        "bug" => i::BUG,
+        "check-circle" => i::CHECK_CIRCLE,
+        "check" => i::CHECK,
+        "check-square" => i::CHECK_SQUARE,
+        "check-fat" => i::CHECK_FAT,
+        "seal-check" => i::SEAL_CHECK,
+        "thumbs-up" => i::THUMBS_UP,
+        "smiley" => i::SMILEY,
+        "star" => i::STAR,
+        "heart" => i::HEART,
+        "sparkle" => i::SPARKLE,
+        _ => i::WARNING,
+    }
 }
 
 /// The Auto Exit countdown: a ring around the key's picture that fills
 /// clockwise from the top.
-fn draw_ring(img: &mut RgbaImage, percent: u8) {
+fn draw_ring(img: &mut RgbaImage, percent: u8, style: &RingStyle) {
     let size = img.width() as f32;
-    let (center, radius, half_width) = (size / 2.0, size * 0.4, size * 0.03);
+    let diameter = f32::from(style.size.clamp(RingStyle::MIN_SIZE, RingStyle::MAX_SIZE)) / 100.0;
+    let half_width = size * 0.03;
+    // The whole ring stays on the key at the largest size.
+    let radius = (size * diameter / 2.0).min(size / 2.0 - half_width);
+    let center = size / 2.0;
     let filled = f32::from(percent.min(100)) / 100.0 * TAU;
     for y in 0..img.height() {
         for x in 0..img.width() {
@@ -602,7 +660,7 @@ fn draw_ring(img: &mut RgbaImage, percent: u8) {
             if cover > 0.0 {
                 let angle = dx.atan2(-dy).rem_euclid(TAU);
                 let color = if angle <= filled {
-                    ICON_COLOR
+                    style.color
                 } else {
                     RING_TRACK
                 };
@@ -1820,6 +1878,133 @@ mod tests {
         assert_eq!(
             r.render(Some(&other), 72, Live::default(), None),
             r.render(Some(&other), 72, at(50), None)
+        );
+    }
+
+    fn marked(mark: Mark) -> Overlay {
+        Overlay {
+            mark: Some(mark),
+            ..Overlay::default()
+        }
+    }
+
+    #[test]
+    fn hidden_marks_are_not_drawn_and_send_nothing() {
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::HOTKEY, json!({}));
+        let live = Live::default();
+        let plain = r.render(Some(&key), 72, live, None);
+        let plain_hash = r.key_hash(Some(&key), live, None);
+        for mark in [Mark::Alert, Mark::Ok] {
+            let overlay = marked(mark);
+            r.marks = FeedbackMarks::default();
+            assert_ne!(r.render(Some(&key), 72, live, Some(&overlay)), plain);
+            assert_ne!(r.key_hash(Some(&key), live, Some(&overlay)), plain_hash);
+            r.marks.failure.visible = false;
+            r.marks.success.visible = false;
+            assert_eq!(r.render(Some(&key), 72, live, Some(&overlay)), plain);
+            // The same hash: the device gets no new image.
+            assert_eq!(r.key_hash(Some(&key), live, Some(&overlay)), plain_hash);
+        }
+        // Hiding one leaves the other.
+        r.marks = FeedbackMarks::default();
+        r.marks.failure.visible = false;
+        assert!(r.shown_mark(Some(&marked(Mark::Alert))).is_none());
+        assert!(r.shown_mark(Some(&marked(Mark::Ok))).is_some());
+    }
+
+    #[test]
+    fn marks_are_drawn_in_their_style() {
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::HOTKEY, json!({}));
+        let live = Live::default();
+        let ok = marked(Mark::Ok);
+        let hash = |r: &Renderer| r.key_hash(Some(&key), live, Some(&ok));
+        let default_hash = hash(&r);
+        let red = |img: &RgbaImage| {
+            img.pixels()
+                .filter(|p| p.0[0] > 200 && p.0[1] < 40 && p.0[2] < 40)
+                .count()
+        };
+        let before = r.render(Some(&key), 72, live, Some(&ok));
+        assert_eq!(red(&before), 0);
+        r.marks.success.color = [255, 0, 0];
+        assert_ne!(hash(&r), default_hash);
+        let colored = r.render(Some(&key), 72, live, Some(&ok));
+        assert!(red(&colored) > 0);
+        // A larger icon covers more of the key.
+        r.marks.success.size = MarkStyle::MAX_SIZE;
+        let large = r.render(Some(&key), 72, live, Some(&ok));
+        assert!(red(&large) > red(&colored));
+        r.marks.success.icon = "star".into();
+        let star = r.render(Some(&key), 72, live, Some(&ok));
+        assert_ne!(star, large);
+        // Stored data is not trusted: bad values still draw.
+        r.marks.success.icon = "no-such-icon".into();
+        r.marks.success.size = 255;
+        assert_eq!(r.render(Some(&key), 72, live, Some(&ok)).width(), 72);
+        // A failure style does not change a success mark.
+        r.marks = FeedbackMarks::default();
+        r.marks.failure.color = [1, 2, 3];
+        assert_eq!(hash(&r), default_hash);
+    }
+
+    #[test]
+    fn every_listed_mark_icon_has_its_own_glyph() {
+        let glyphs: std::collections::HashSet<&str> = deckly_core::MARK_ICONS
+            .iter()
+            .map(|n| mark_glyph(n))
+            .collect();
+        assert_eq!(glyphs.len(), deckly_core::MARK_ICONS.len());
+        assert_eq!(mark_glyph("anything"), egui_phosphor::regular::WARNING);
+    }
+
+    #[test]
+    fn a_broken_picture_keeps_its_warning_when_failure_marks_are_hidden() {
+        let path = std::env::temp_dir().join(format!("deckly-broken-{}.png", std::process::id()));
+        std::fs::write(&path, b"not a png").unwrap();
+        let mut key = KeyConfig::new(actions::HOTKEY, json!({}));
+        key.image = Some(path.clone());
+        let mut r = Renderer::new();
+        let shown = r.render(Some(&key), 72, Live::default(), None);
+        r.marks.failure.visible = false;
+        r.marks.failure.color = [255, 0, 0];
+        assert_eq!(r.render(Some(&key), 72, Live::default(), None), shown);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_exit_ring_follows_its_style_and_can_be_hidden() {
+        let mut r = Renderer::new();
+        let key = KeyConfig::new(actions::PARENT_FOLDER, json!({}));
+        let at = |percent| Live {
+            exit: Some(percent),
+            ..Live::default()
+        };
+        let idle = r.render(Some(&key), 72, Live::default(), None);
+        r.marks.folder_exit.color = [255, 0, 0];
+        let red = r.render(Some(&key), 72, at(100), None);
+        let px = red.get_pixel(64, 36).0;
+        assert!(px[0] > 200 && px[1] < 60, "{px:?}");
+        // A smaller ring leaves the old place empty.
+        r.marks.folder_exit.size = RingStyle::MIN_SIZE;
+        let small = r.render(Some(&key), 72, at(100), None);
+        assert!(small.get_pixel(64, 36).0[0] < 60);
+        assert!(small.get_pixel(54, 36).0[0] > 200);
+        // At full size the ring stays on the key.
+        r.marks.folder_exit.size = RingStyle::MAX_SIZE;
+        let full = r.render(Some(&key), 72, at(100), None);
+        assert!(full.get_pixel(69, 36).0[0] > 200);
+        // Hidden: no ring and no new image as the countdown moves.
+        r.marks.folder_exit.visible = false;
+        assert_eq!(r.render(Some(&key), 72, at(60), None), idle);
+        assert_eq!(
+            r.key_hash(Some(&key), at(40), None),
+            r.key_hash(Some(&key), at(41), None)
+        );
+        assert_eq!(
+            r.key_hash(Some(&key), at(40), None),
+            r.key_hash(Some(&key), Live::default(), None)
         );
     }
 

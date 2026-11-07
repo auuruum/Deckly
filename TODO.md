@@ -18,9 +18,11 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Updates
 
-- [ ] Fix overlapping text and buttons in the update banner. **Update Now**
+- [x] Fix overlapping text and buttons in the update banner. **Update Now**
       covers the installed version in the update message. Keep both version
       numbers readable and all controls visible when space is limited.
+      Done: the banner fits its content; message and buttons share one row
+      when they fit, otherwise the buttons go on their own row below.
 
 ## Profiles
 
@@ -59,7 +61,14 @@ Planned features, chosen by the project owner on 2026-11-02.
       warning on the key.
 - [x] Animated keys: import a video through FFmpeg 7+ on PATH. Deckly saves
       up to ten seconds as a looping, silent APNG that plays without FFmpeg.
-- [ ] Offer video import without requiring a separate FFmpeg installation.
+- [x] Offer video import without requiring a separate FFmpeg installation.
+      Done: a "Turn on video import" window opens when FFmpeg 7+ is missing
+      (and from Preferences > General > Video Import). It installs through
+      apt, dnf, pacman, zypper (with `pkexec`), winget or Homebrew when the
+      repository has FFmpeg 7+, copies the command, downloads a pinned LGPL
+      FFmpeg-Builds build into Deckly's data folder (Windows and Linux), or
+      uses a chosen `ffmpeg`. Sources and pin updates: [FFmpeg downloads](docs/ffmpeg-downloads.md).
+      macOS has no pinned download yet.
 - [x] Wallpaper across all keys.
       Done: the button beside the page strip spreads one picture over the
       keys of a page or folder, gaps included; drag and zoom to place it.
@@ -69,6 +78,24 @@ Planned features, chosen by the project owner on 2026-11-02.
 - [x] Profile-wide wallpaper. Pages and folders inherit it, use their own
       image, or opt out. See the [clean-room notes](docs/clean-room/2026-11-05-key-appearance.md)
       for the behavior documented by Elgato and the remaining unknowns.
+
+- [x] Global wallpaper in Preferences > Style: one picture for all profiles,
+      pages and folders, like the global key style. Anything below can
+      override it: a profile, a page or a folder uses its own image or opts
+      out. The order becomes global, profile, page or folder, with the nearest
+      setting winning.
+      Done: Preferences > Style chooses, places and removes the global
+      picture; the Wallpaper window's Profile tab follows it or turns it off.
+      Backups carry it, profile exports do not. See the
+      [clean-room notes](docs/clean-room/2026-11-07-global-wallpaper.md).
+- [x] Style the feedback marks in Preferences > Style: the failure mark, the
+      success check after an action ran, and the auto-exit from folders. Let
+      people change or hide each one (icon, color, size, duration). Decide
+      first whether a profile or a key may override them.
+      Done: global only, no profile or key overrides. The Style tab hides each
+      mark or picks its icon, colour, size and duration (the ring: colour and
+      size), with previews and Reset. Backups carry them, profile exports do
+      not. See the [clean-room notes](docs/clean-room/2026-11-07-feedback-marks.md).
 
 ## Plugin SDK
 

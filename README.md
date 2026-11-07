@@ -166,6 +166,18 @@ folder rule restores all its actions to inheritance after confirmation.
 These settings are saved with profiles and carried over when importing
 original Stream Deck profiles and backups.
 
+## Feedback marks
+
+A key shows a failure mark when its action fails and a success mark after
+an action ran (for example a finished Multi Action, or when a plugin asks
+for one). While Auto Exit counts down, the folder's Exit key shows a ring
+that fills up. Preferences > Style > Feedback Marks lets you hide each one,
+or change the icon, colour, size and, for the failure and success marks,
+how long they stay (0.25 to 10 seconds). Each has a preview and a Reset
+button. The marks look the same on every profile and key; backups carry
+them, profile exports do not. A key whose own picture cannot be read always
+shows the warning sign.
+
 ## Linux and macOS
 
 In an Open action, use **Applications…** to search installed applications by

@@ -1,11 +1,13 @@
-//! App settings: per-device preferences, which profile each device shows and
-//! the global key title style. Stored as one JSON file; loading never trusts
+//! App settings: per-device preferences, which profile each device shows,
+//! the global key title style, the global wallpaper and the look of the
+//! feedback marks. Stored as one JSON file; loading never trusts
 //! it and brings every value within limits.
 //!
 //! The set of settings follows the official app's Preferences window
 //! (docs/clean-room/2026-10-26-preferences.md).
 
-use crate::profile::{Profile, TitleStyle};
+use crate::feedback::FeedbackMarks;
+use crate::profile::{Profile, TitleStyle, Wallpaper};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -37,6 +39,13 @@ pub struct Settings {
     pub title_style: TitleStyle,
     /// How a held key looks on the device.
     pub key_press: KeyPress,
+    /// Wallpaper of every page and folder whose profile, page or folder does
+    /// not choose its own or opt out. The picture lives in Deckly's
+    /// `wallpapers` folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<Wallpaper>,
+    /// How the failure, success and Auto Exit marks look on every key.
+    pub feedback_marks: FeedbackMarks,
     /// Profile ids in the order lists show them. Profiles not on it follow,
     /// by name.
     pub profile_order: Vec<String>,
@@ -62,6 +71,9 @@ pub struct Settings {
     /// window. Only counts while it opens at login; turning that off turns
     /// this off too.
     pub start_in_tray: bool,
+    /// The FFmpeg chosen for video import. `None`: Deckly's own copy, then
+    /// one on PATH.
+    pub ffmpeg_path: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -72,6 +84,8 @@ impl Default for Settings {
             devices: BTreeMap::new(),
             title_style: TitleStyle::default(),
             key_press: KeyPress::default(),
+            wallpaper: None,
+            feedback_marks: FeedbackMarks::default(),
             profile_order: Vec::new(),
             lock_keys: true,
             lock_look: LockLook::default(),
@@ -81,6 +95,7 @@ impl Default for Settings {
             check_updates: true,
             skipped_update: String::new(),
             start_in_tray: false,
+            ffmpeg_path: None,
         }
     }
 }
@@ -363,11 +378,29 @@ impl Settings {
                 d.screensaver = None;
             }
         }
+        // Only an absolute path is used; a relative one would depend on the
+        // folder Deckly started in.
+        if self
+            .ffmpeg_path
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().len() > MAX_PATH_BYTES || !p.is_absolute())
+        {
+            self.ffmpeg_path = None;
+        }
         if self.skipped_update.chars().count() > MAX_VERSION_CHARS {
             self.skipped_update.clear();
         }
         self.title_style.sanitize();
         self.key_press.sanitize();
+        self.feedback_marks.sanitize();
+        if self
+            .wallpaper
+            .as_ref()
+            .is_some_and(|w| w.image.as_os_str().len() > MAX_PATH_BYTES)
+        {
+            self.wallpaper = None;
+        }
+        Wallpaper::sanitize_optional(&mut self.wallpaper);
     }
 }
 
@@ -482,8 +515,60 @@ mod tests {
         s.lock_keys = false;
         s.lock_look = LockLook::Standby;
         s.switch_by_window = false;
+        s.wallpaper = Some(Wallpaper {
+            zoom: 180,
+            x: 250,
+            y: 750,
+            ..Wallpaper::new("wallpapers/w.png".into())
+        });
+        s.feedback_marks.failure.visible = false;
+        s.feedback_marks.success.icon = "thumbs-up".into();
+        s.feedback_marks.success.duration_ms = 3000;
+        s.feedback_marks.folder_exit.color = [10, 20, 30];
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn older_settings_files_show_the_default_feedback_marks() {
+        let s = Settings::from_json(r#"{"brightness":50,"key_press":{"size":70}}"#).unwrap();
+        assert_eq!(s.feedback_marks, FeedbackMarks::default());
+    }
+
+    #[test]
+    fn feedback_marks_are_brought_within_limits() {
+        let text = r#"{"feedback_marks":{"failure":{"icon":"nope","size":250,"duration_ms":1},
+            "folder_exit":{"size":300}}}"#;
+        let marks = Settings::from_json(text).unwrap().feedback_marks;
+        assert_eq!(marks.failure.icon, "warning");
+        assert_eq!(marks.failure.size, crate::MarkStyle::MAX_SIZE);
+        assert_eq!(marks.failure.duration_ms, crate::MarkStyle::MIN_DURATION_MS);
+        assert_eq!(marks.folder_exit.size, crate::RingStyle::MAX_SIZE);
+    }
+
+    #[test]
+    fn older_settings_files_have_no_global_wallpaper() {
+        let s = Settings::from_json(r#"{"brightness":50,"title_style":{"size":12}}"#).unwrap();
+        assert_eq!(s.wallpaper, None);
+        // Nothing is written for it until one is chosen.
+        assert!(!serde_json::to_string(&s).unwrap().contains("wallpaper"));
+    }
+
+    #[test]
+    fn the_global_wallpaper_is_brought_within_limits() {
+        let s =
+            Settings::from_json(r#"{"wallpaper":{"image":"w.png","zoom":9999,"x":5000}}"#).unwrap();
+        let w = s.wallpaper.unwrap();
+        assert_eq!(
+            (w.zoom, w.x, w.y),
+            (Wallpaper::MAX_ZOOM, Wallpaper::END, 500)
+        );
+        let s = Settings::from_json(r#"{"wallpaper":{"image":""}}"#).unwrap();
+        assert_eq!(s.wallpaper, None);
+        let long = "x".repeat(MAX_PATH_BYTES + 1);
+        let s = Settings::from_json(&format!(r#"{{"wallpaper":{{"image":"{long}"}}}}"#)).unwrap();
+        assert_eq!(s.wallpaper, None);
+        assert!(Settings::from_json(r#"{"wallpaper":{"zoom":100}}"#).is_err());
     }
 
     #[test]
@@ -581,6 +666,24 @@ mod tests {
             json,
             r#"["standard","rotate90","rotate180","rotate270","upside_down"]"#
         );
+    }
+
+    #[test]
+    fn ffmpeg_path_must_be_absolute_and_bounded() {
+        let absolute = if cfg!(windows) {
+            r"C:\tools\ffmpeg.exe"
+        } else {
+            "/opt/ffmpeg"
+        };
+        let json = serde_json::json!({ "ffmpeg_path": absolute }).to_string();
+        let s = Settings::from_json(&json).unwrap();
+        assert_eq!(s.ffmpeg_path, Some(PathBuf::from(absolute)));
+        let s = Settings::from_json(r#"{"ffmpeg_path": "bin/ffmpeg"}"#).unwrap();
+        assert_eq!(s.ffmpeg_path, None);
+        let long = format!("/{}", "a".repeat(MAX_PATH_BYTES + 1));
+        let json = serde_json::json!({ "ffmpeg_path": long }).to_string();
+        assert_eq!(Settings::from_json(&json).unwrap().ffmpeg_path, None);
+        assert_eq!(Settings::default().ffmpeg_path, None);
     }
 
     #[test]

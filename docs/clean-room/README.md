@@ -42,6 +42,8 @@ Rules (see `AGENTS.md` for the full version):
 | 2026-11-04 | [Key title fonts](2026-11-04-title-fonts.md) | Font family, bold, italic and underline, system fonts and fallbacks, official profile fields, what is unverified |
 | 2026-11-04 | [Wallpaper across all keys](2026-11-04-key-wallpaper.md) | Page wallpaper model, cutting by the device layout, drawing order, editor window, what is unverified |
 | 2026-11-05 | [Key appearance](2026-11-05-key-appearance.md) | Profile wallpaper, press layers, font scrolling and optional video import |
+| 2026-11-07 | [Global wallpaper](2026-11-07-global-wallpaper.md) | Global wallpaper in Preferences > Style, the global, profile, page order and opt-outs, backups |
+| 2026-11-07 | [Feedback marks](2026-11-07-feedback-marks.md) | Failure and success marks and the Auto Exit ring styled in Preferences > Style, global only, hidden marks, backups |
 
 ## Open questions
 

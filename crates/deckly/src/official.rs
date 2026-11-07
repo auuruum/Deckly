@@ -307,6 +307,7 @@ pub fn convert(
         },
         device: kind,
         wallpaper: None,
+        wallpaper_disabled: false,
         pages,
         folders,
         applications: Vec::new(),

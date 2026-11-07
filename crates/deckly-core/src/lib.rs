@@ -4,14 +4,16 @@
 //! Elgato or Corsair.
 
 pub mod device;
+pub mod feedback;
 pub mod profile;
 pub mod settings;
 
 pub use device::{
     DeviceKind, DeviceModel, ELGATO_VENDOR_ID, ImageFormat, KeyRect, Protocol, Rotation, Screen,
 };
+pub use feedback::{FeedbackMarks, MARK_ICONS, MarkStyle, RingStyle};
 pub use profile::{
     ActionDelays, AppRule, AutoExit, KeyConfig, Page, Profile, ProfileError, TitleAlign,
-    TitleStyle, Wallpaper,
+    TitleStyle, Wallpaper, WallpaperChoice, WallpaperLevel, resolve_wallpaper,
 };
 pub use settings::{DeviceSettings, KeyPress, LockLook, Orientation, Settings, Turn};

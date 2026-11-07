@@ -27,6 +27,8 @@ pub const PROFILE_FILE: &str = "profile.json";
 const FORMAT: u64 = 1;
 const INFO_FILE: &str = "backup.json";
 const SETTINGS_FILE: &str = "settings.json";
+/// Where a backup keeps the global wallpaper's picture.
+const GLOBAL_WALLPAPER_FOLDER: &str = "wallpapers/";
 const MAX_SMALL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RESTORE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
@@ -99,7 +101,7 @@ fn write_backup(
     host: Option<&Host>,
     progress: &Progress,
 ) -> Result<Summary, String> {
-    let (mut profiles, mut settings) = {
+    let (mut profiles, settings) = {
         let s = runtime::lock(state);
         (s.profiles.clone(), s.settings.clone())
     };
@@ -121,18 +123,9 @@ fn write_backup(
         add_bytes(&mut zip, &name, text.as_bytes())?;
     }
 
-    for device in settings.devices.values_mut() {
-        let Some(from) = device.screensaver.take() else {
-            continue;
-        };
-        if let Some(name) = from.to_str().and_then(clean_file_name)
-            && add_file(&mut zip, &from, &format!("screensavers/{name}")).is_ok()
-        {
-            device.screensaver = Some(format!("screensavers/{name}").into());
-        }
+    if !pack_settings(&mut zip, settings)? {
+        missing += 1;
     }
-    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    add_bytes(&mut zip, SETTINGS_FILE, text.as_bytes())?;
 
     if let Some(dir) = store::config_dir().map(|d| d.join("plugin-data")) {
         for file in list_files(&dir, 0).unwrap_or_default() {
@@ -184,6 +177,95 @@ fn write_backup(
         title: "Backup created".to_owned(),
         lines,
     })
+}
+
+/// Puts the settings in the backup with the pictures they point at:
+/// screensavers and the global wallpaper. Everything else, such as the
+/// title style and the feedback marks, is in the settings file itself.
+/// Returns false when the global wallpaper could not be read.
+fn pack_settings(zip: &mut Zip, mut settings: Settings) -> Result<bool, String> {
+    for device in settings.devices.values_mut() {
+        let Some(from) = device.screensaver.take() else {
+            continue;
+        };
+        if let Some(name) = from.to_str().and_then(clean_file_name)
+            && add_file(zip, &from, &format!("screensavers/{name}")).is_ok()
+        {
+            device.screensaver = Some(format!("screensavers/{name}").into());
+        }
+    }
+    let wallpaper = pack_global_wallpaper(zip, &mut settings);
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    add_bytes(zip, SETTINGS_FILE, text.as_bytes())?;
+    Ok(wallpaper)
+}
+
+/// The settings of a backup, with their pictures unpacked under `root`;
+/// `None` when the backup has none. Loading brings every value within
+/// limits.
+fn unpack_settings(backup: &mut Reader, root: &Path) -> Result<Option<Settings>, String> {
+    if !backup.has(SETTINGS_FILE) {
+        return Ok(None);
+    }
+    let bytes = backup.read(SETTINGS_FILE, MAX_SMALL_FILE_BYTES)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut settings = Settings::from_json(&text).map_err(|e| e.to_string())?;
+    for device in settings.devices.values_mut() {
+        device.screensaver = device.screensaver.take().and_then(|saved| {
+            let name = saved.to_str()?.to_owned();
+            let file = clean_file_name(&name)?;
+            if !name.starts_with("screensavers/") || !backup.has(&name) {
+                return None;
+            }
+            let to = root.join("screensavers").join(file);
+            backup.unpack(&name, &to).ok().map(|()| to)
+        });
+    }
+    unpack_global_wallpaper(&mut settings, backup, root);
+    Ok(Some(settings))
+}
+
+/// Puts the global wallpaper's picture in the backup and points the
+/// settings at it there. A picture that cannot be read leaves the backup
+/// without a global wallpaper; returns false then.
+fn pack_global_wallpaper(zip: &mut Zip, settings: &mut Settings) -> bool {
+    let Some(mut wallpaper) = settings.wallpaper.take() else {
+        return true;
+    };
+    let Some(name) = wallpaper
+        .image
+        .to_str()
+        .and_then(clean_file_name)
+        .map(|file| format!("{GLOBAL_WALLPAPER_FOLDER}{file}"))
+    else {
+        return false;
+    };
+    if add_file(zip, &wallpaper.image, &name).is_err() {
+        return false;
+    }
+    wallpaper.image = name.into();
+    settings.wallpaper = Some(wallpaper);
+    true
+}
+
+/// Unpacks the global wallpaper of restored settings into Deckly's
+/// wallpapers folder. Settings may only point at a picture in the backup's
+/// own wallpapers folder; anything else drops the global wallpaper.
+fn unpack_global_wallpaper(settings: &mut Settings, backup: &mut Reader, root: &Path) {
+    settings.wallpaper = settings.wallpaper.take().and_then(|mut wallpaper| {
+        let name = wallpaper.image.to_str()?.to_owned();
+        let file = name.strip_prefix(GLOBAL_WALLPAPER_FOLDER)?;
+        if file.contains('/')
+            || clean_file_name(file).as_deref() != Some(file)
+            || !backup.has(&name)
+        {
+            return None;
+        }
+        let to = store::global_wallpaper_dir(root).join(file);
+        backup.unpack(&name, &to).ok()?;
+        wallpaper.image = to;
+        Some(wallpaper)
+    });
 }
 
 /// Points a profile's pictures into the backup; returns what to copy where.
@@ -364,21 +446,7 @@ pub fn restore(
     lines.insert(0, format!("{} profiles restored.", profiles.len()));
     runtime::lock(state).adopt_profiles(profiles);
 
-    if backup.has(SETTINGS_FILE) {
-        let bytes = backup.read(SETTINGS_FILE, MAX_SMALL_FILE_BYTES)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let mut settings = Settings::from_json(&text).map_err(|e| e.to_string())?;
-        for device in settings.devices.values_mut() {
-            device.screensaver = device.screensaver.take().and_then(|saved| {
-                let name = saved.to_str()?.to_owned();
-                let file = clean_file_name(&name)?;
-                if !name.starts_with("screensavers/") || !backup.has(&name) {
-                    return None;
-                }
-                let to = root.join("screensavers").join(file);
-                backup.unpack(&name, &to).ok().map(|()| to)
-            });
-        }
+    if let Some(settings) = unpack_settings(&mut backup, &root)? {
         runtime::lock(state).adopt_settings(settings);
         lines.push("Settings restored.".to_owned());
     }
@@ -469,7 +537,7 @@ fn restore_plugins(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deckly_core::{DeviceKind, KeyConfig, Wallpaper};
+    use deckly_core::{DeviceKind, FeedbackMarks, KeyConfig, MarkStyle, Wallpaper};
     use serde_json::json;
 
     fn temp(name: &str) -> PathBuf {
@@ -545,6 +613,126 @@ mod tests {
             assert_eq!(keys[&key].image, None);
         }
         assert!(!dir.join("evil.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_global_wallpaper_goes_into_the_backup_and_comes_back() {
+        let dir = temp("global-wallpaper");
+        let picture = dir.join("my wall.png");
+        std::fs::write(&picture, b"png").unwrap();
+        let file = dir.join("b.decklyBackup");
+        let mut settings = Settings {
+            wallpaper: Some(Wallpaper {
+                zoom: 150,
+                ..Wallpaper::new(picture.clone())
+            }),
+            ..Settings::default()
+        };
+        let mut zip = writer(&file);
+        assert!(pack_global_wallpaper(&mut zip, &mut settings));
+        zip.finish().unwrap().flush().unwrap();
+        let wall = settings.wallpaper.clone().unwrap();
+        assert_eq!(wall.image, PathBuf::from("wallpapers/mywall.png"));
+
+        let root = dir.join("root");
+        let mut backup = Reader::open(&file).unwrap();
+        unpack_global_wallpaper(&mut settings, &mut backup, &root);
+        let restored = settings.wallpaper.unwrap();
+        assert_eq!(restored.zoom, 150);
+        assert_eq!(restored.image, root.join("wallpapers/mywall.png"));
+        assert_eq!(std::fs::read(&restored.image).unwrap(), b"png");
+
+        // Only pictures in the backup's own wallpapers folder are used.
+        for name in [
+            "images/x/0-a.png",
+            "wallpapers/../evil.png",
+            "wallpapers/missing.png",
+        ] {
+            let mut settings = Settings {
+                wallpaper: Some(Wallpaper::new(name.into())),
+                ..Settings::default()
+            };
+            let mut backup = Reader::open(&file).unwrap();
+            unpack_global_wallpaper(&mut settings, &mut backup, &root);
+            assert_eq!(settings.wallpaper, None, "{name}");
+        }
+        // A picture that is gone leaves the backup without a wallpaper.
+        let mut settings = Settings {
+            wallpaper: Some(Wallpaper::new(dir.join("gone.png"))),
+            ..Settings::default()
+        };
+        let mut zip = writer(&dir.join("c.decklyBackup"));
+        assert!(!pack_global_wallpaper(&mut zip, &mut settings));
+        assert_eq!(settings.wallpaper, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feedback_marks_go_into_the_backup_and_come_back() {
+        let dir = temp("feedback-marks");
+        let file = dir.join("b.decklyBackup");
+        let mut settings = Settings::default();
+        settings.feedback_marks.failure.icon = "x-circle".into();
+        settings.feedback_marks.failure.duration_ms = 5000;
+        settings.feedback_marks.success.visible = false;
+        settings.feedback_marks.folder_exit.color = [200, 10, 10];
+        settings.feedback_marks.folder_exit.size = 95;
+        let mut zip = writer(&file);
+        assert!(pack_settings(&mut zip, settings.clone()).unwrap());
+        zip.finish().unwrap().flush().unwrap();
+        let mut backup = Reader::open(&file).unwrap();
+        let restored = unpack_settings(&mut backup, &dir.join("root")).unwrap();
+        assert_eq!(restored.unwrap().feedback_marks, settings.feedback_marks);
+
+        // An older backup has none and restores the defaults; a hostile one
+        // is brought within limits.
+        for (text, expect) in [
+            (r#"{"brightness":40}"#.to_owned(), FeedbackMarks::default()),
+            (
+                r#"{"feedback_marks":{"success":{"icon":"/etc/passwd","duration_ms":0}}}"#
+                    .to_owned(),
+                FeedbackMarks {
+                    success: MarkStyle {
+                        duration_ms: MarkStyle::MIN_DURATION_MS,
+                        ..MarkStyle::success()
+                    },
+                    ..FeedbackMarks::default()
+                },
+            ),
+        ] {
+            let file = dir.join("old.decklyBackup");
+            let mut zip = writer(&file);
+            add_bytes(&mut zip, SETTINGS_FILE, text.as_bytes()).unwrap();
+            zip.finish().unwrap().flush().unwrap();
+            let mut backup = Reader::open(&file).unwrap();
+            let restored = unpack_settings(&mut backup, &dir.join("root")).unwrap();
+            assert_eq!(restored.unwrap().feedback_marks, expect, "{text}");
+        }
+        // No settings in the backup: nothing to restore.
+        let file = dir.join("none.decklyBackup");
+        writer(&file).finish().unwrap().flush().unwrap();
+        let mut backup = Reader::open(&file).unwrap();
+        assert!(unpack_settings(&mut backup, &dir).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_exported_profile_carries_no_global_wallpaper() {
+        let dir = temp("export-no-global");
+        let mut p = Profile::new("Test", DeviceKind::Mk2);
+        p.wallpaper_disabled = true;
+        let file = dir.join("p.decklyProfile");
+        export_profile(&file, p).unwrap();
+        let mut backup = Reader::open(&file).unwrap();
+        assert!(backup.names.iter().all(|n| n == PROFILE_FILE));
+        let text = backup.read(PROFILE_FILE, MAX_FILE_BYTES).unwrap();
+        let back = Profile::from_json(&String::from_utf8_lossy(&text)).unwrap();
+        // The profile's own choice travels; the global picture and the
+        // feedback marks, which are settings, do not.
+        assert!(!String::from_utf8_lossy(&text).contains("feedback_marks"));
+        assert!(back.wallpaper_disabled);
+        assert_eq!(back.wallpaper, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
