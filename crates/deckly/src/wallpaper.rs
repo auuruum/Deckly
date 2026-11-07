@@ -212,15 +212,27 @@ impl WallpaperEditor {
                 let busy = self.job.is_some();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Preview on").color(TEXT_DIM));
+                    let layouts = DeviceModel::layouts();
+                    let current = layouts
+                        .iter()
+                        .find(|g| g.iter().any(|m| m.same_layout(model)));
                     egui::ComboBox::from_id_salt("global-wallpaper-model")
-                        .selected_text(model.name)
+                        .selected_text(
+                            current.map_or_else(|| model.name.to_owned(), |g| layout_label(g)),
+                        )
                         .show_ui(ui, |ui| {
-                            for m in DeviceModel::ALL {
+                            for group in &layouts {
+                                let Some(first) = group.first() else {
+                                    continue;
+                                };
+                                let names: Vec<&str> = group.iter().map(|m| m.name).collect();
+                                let chosen = first.same_layout(model);
                                 if ui
-                                    .selectable_label(std::ptr::eq(*model, m), m.name)
+                                    .selectable_label(chosen, layout_label(group))
+                                    .on_hover_text(names.join("\n"))
                                     .clicked()
                                 {
-                                    *model = m;
+                                    *model = first;
                                 }
                             }
                         });
@@ -444,6 +456,21 @@ impl WallpaperEditor {
                 None
             }
         }
+    }
+}
+
+/// One entry of the preview's model list: a model's name, or the key grid
+/// that several models share.
+fn layout_label(group: &[&DeviceModel]) -> String {
+    match group {
+        [only] => only.name.to_owned(),
+        [first, ..] => format!(
+            "{} keys ({} × {})",
+            first.key_count(),
+            first.columns,
+            first.rows
+        ),
+        [] => String::new(),
     }
 }
 

@@ -304,6 +304,45 @@ impl DeviceModel {
         self.key_image_size * 5 / 12
     }
 
+    /// Whether a wallpaper is cut the same way on both models: the same
+    /// rows and columns, and the same panel shape and key places once
+    /// scaled to the same width. Wallpaper places are relative to the panel,
+    /// so such models show the same picture on their keys.
+    pub fn same_layout(&self, other: &DeviceModel) -> bool {
+        let ((aw, ah), (bw, bh)) = (self.panel_size(), other.panel_size());
+        let (aw, ah, bw, bh) = (u64::from(aw), u64::from(ah), u64::from(bw), u64::from(bh));
+        // a / aw == b / bw, without dividing.
+        let same = |a: u32, b: u32, a_span: u64, b_span: u64| {
+            u64::from(a) * b_span == u64::from(b) * a_span
+        };
+        self.columns == other.columns
+            && self.rows == other.rows
+            && aw * bh == bw * ah
+            && self
+                .key_rects()
+                .iter()
+                .zip(other.key_rects())
+                .all(|(a, b)| {
+                    same(a.x, b.x, aw, bw) && same(a.y, b.y, ah, bh) && same(a.size, b.size, aw, bw)
+                })
+    }
+
+    /// The models in groups that share a layout (see [`Self::same_layout`]),
+    /// in table order.
+    pub fn layouts() -> Vec<Vec<&'static DeviceModel>> {
+        let mut groups: Vec<Vec<&'static DeviceModel>> = Vec::new();
+        for model in Self::ALL {
+            match groups
+                .iter_mut()
+                .find(|g| g.first().is_some_and(|first| first.same_layout(model)))
+            {
+                Some(group) => group.push(model),
+                None => groups.push(vec![model]),
+            }
+        }
+        groups
+    }
+
     /// Where each key sits on the panel, row by row from the top left.
     /// Keys are spread evenly with no outer margin (inferred for the
     /// screens we know; see the clean-room note).
@@ -333,6 +372,32 @@ impl DeviceModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_that_cut_a_wallpaper_alike_share_a_layout() {
+        use DeviceKind as K;
+        let kinds: Vec<Vec<DeviceKind>> = DeviceModel::layouts()
+            .iter()
+            .map(|g| g.iter().map(|m| m.kind).collect())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                vec![K::Mk2, K::OriginalV2, K::Mk2Scissor, K::Module15],
+                vec![K::Xl, K::XlV2, K::Module32],
+                // Same grid and gaps in proportion to their key size.
+                vec![K::Neo, K::Plus],
+                vec![K::PlusXl],
+                vec![K::Mini, K::MiniV2, K::MiniDiscord, K::Module6],
+            ]
+        );
+        let mk2 = DeviceModel::of(K::Mk2);
+        assert!(mk2.same_layout(mk2));
+        assert!(!mk2.same_layout(DeviceModel::of(K::Xl)));
+        // Every model is in exactly one group.
+        let total: usize = DeviceModel::layouts().iter().map(Vec::len).sum();
+        assert_eq!(total, DeviceModel::ALL.len());
+    }
 
     #[test]
     fn every_kind_has_one_model() {

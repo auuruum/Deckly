@@ -49,7 +49,10 @@ profile default, and [Wallpaper across all keys](2026-11-04-key-wallpaper.md).
 - Preferences > Style shows a small picture of the global wallpaper with
   **Choose…**/**Edit…** and **Remove**. The Global Wallpaper window lets the
   user choose a picture, drag and zoom it, remove it, and preview it on
-  any model. Changes apply at once; a drag is saved when the mouse is let
+  any model. The preview list shows one entry per layout: models with the
+  same rows and columns and the same panel shape and key places once
+  scaled (for example the four 15-key models, or Neo and +) cut the
+  picture alike and share an entry, named after the key grid. Changes apply at once; a drag is saved when the mouse is let
   go. The Wallpaper window's Profile tab says when the profile uses the
   global picture and offers **Use Global** and **No Wallpaper**.
 - Chosen pictures go through the existing wallpaper decoding and limits
@@ -67,6 +70,7 @@ profile default, and [Wallpaper across all keys](2026-11-04-key-wallpaper.md).
 - Tests: `the_nearest_wallpaper_setting_wins`,
   `profiles_follow_the_global_wallpaper_unless_they_opt_out`,
   `older_profiles_follow_the_global_wallpaper`,
+  `models_that_cut_a_wallpaper_alike_share_a_layout` (device),
   `profile_wallpaper_respects_page_and_folder_overrides_after_saving`
   (profile); `round_trip`, `older_settings_files_have_no_global_wallpaper`,
   `the_global_wallpaper_is_brought_within_limits` (settings);
