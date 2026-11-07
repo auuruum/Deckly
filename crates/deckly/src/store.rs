@@ -162,6 +162,52 @@ pub fn save_wallpaper(profile: &str, image: &RgbaImage) -> Result<PathBuf, Strin
     write_png(&root, profile, image, crate::render::MAX_WALLPAPER_SIDE)
 }
 
+/// The global wallpaper lives in a folder of its own: it belongs to no
+/// profile, and leaves with none.
+pub fn save_global_wallpaper(image: &RgbaImage) -> Result<PathBuf, String> {
+    let root = config_dir().ok_or("no configuration folder")?;
+    write_global_wallpaper(&root, image)
+}
+
+/// Where the global wallpaper's pictures are kept.
+pub fn global_wallpaper_dir(root: &Path) -> PathBuf {
+    root.join("wallpapers")
+}
+
+fn write_global_wallpaper(root: &Path, image: &RgbaImage) -> Result<PathBuf, String> {
+    let max_side = crate::render::MAX_WALLPAPER_SIDE;
+    if image.width() == 0 || image.height() == 0 || image.width().max(image.height()) > max_side {
+        return Err("invalid wallpaper size".into());
+    }
+    write_in(&global_wallpaper_dir(root), "png", |output| {
+        image
+            .write_to(output, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Deletes the global wallpaper pictures other than `keep`, which the
+/// settings point at. Earlier choices are left behind when another picture
+/// is chosen or the wallpaper removed.
+pub fn prune_global_wallpapers(keep: Option<&Path>) {
+    if let Some(root) = config_dir() {
+        prune_wallpapers_in(&global_wallpaper_dir(&root), keep);
+    }
+}
+
+fn prune_wallpapers_in(dir: &Path, keep: Option<&Path>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+        if is_file && keep.is_none_or(|keep| keep != path) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn write_key_image(root: &Path, profile: &str, image: &RgbaImage) -> Result<PathBuf, String> {
     write_png(root, profile, image, 512)
 }
@@ -227,8 +273,16 @@ fn write_new(
     {
         return Err("invalid profile id".into());
     }
-    let dir = root.join("images").join(profile);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    write_in(&root.join("images").join(profile), ext, write)
+}
+
+/// Writes a new, uniquely named file in `dir`.
+fn write_in(
+    dir: &Path,
+    ext: &str,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
     let result = (|| {
         let file = std::fs::OpenOptions::new()
@@ -371,6 +425,30 @@ mod tests {
         assert_eq!(pictures, 3);
         assert!(copy_pictures(source.duplicate("Another".into()), &root).is_err());
         assert_eq!(std::fs::read_dir(root.join("images")).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn global_wallpapers_have_their_own_folder_and_old_ones_are_pruned() {
+        let root = std::env::temp_dir().join(format!("deckly-global-wall-{}", uuid::Uuid::new_v4()));
+        let image = RgbaImage::from_pixel(64, 32, image::Rgba([1, 2, 3, 255]));
+        let first = write_global_wallpaper(&root, &image).unwrap();
+        let second = write_global_wallpaper(&root, &image).unwrap();
+        let dir = global_wallpaper_dir(&root);
+        assert_ne!(first, second);
+        assert_eq!(second.parent(), Some(dir.as_path()));
+        assert_eq!(crate::render::decode_file(&second).unwrap(), image);
+        // Limits are the profile wallpapers' limits.
+        let wide = RgbaImage::new(crate::render::MAX_WALLPAPER_SIDE + 1, 1);
+        assert!(write_global_wallpaper(&root, &wide).is_err());
+        assert!(write_global_wallpaper(&root, &RgbaImage::new(0, 0)).is_err());
+        prune_wallpapers_in(&dir, Some(&second));
+        assert!(!first.exists());
+        assert!(second.exists());
+        prune_wallpapers_in(&dir, None);
+        assert!(!second.exists());
+        // A folder that is not there is not an error.
+        prune_wallpapers_in(&root.join("missing"), None);
         let _ = std::fs::remove_dir_all(root);
     }
 

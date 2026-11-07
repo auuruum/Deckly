@@ -18,7 +18,7 @@ use crate::store;
 use deckly_core::profile::{DEFAULT_PROFILE_NAME, MAX_FOLDER_DEPTH};
 use deckly_core::{
     DeviceKind, DeviceModel, KeyConfig, LockLook, Orientation, Page, Profile, Settings, TitleStyle,
-    Wallpaper,
+    Wallpaper, WallpaperChoice, resolve_wallpaper,
 };
 use deckly_device::{ConnectedDevice, DeviceManager, Event, Handle};
 use deckly_plugin_host::{Host, Instance, Status, protocol};
@@ -1701,9 +1701,12 @@ fn refresh(
                     }
                 })
                 .collect();
-            let wallpaper = page
-                .effective_wallpaper(profile.and_then(|p| p.wallpaper.as_ref()))
-                .cloned();
+            let global = s.settings.wallpaper.as_ref();
+            let wallpaper = match profile {
+                Some(p) => p.wallpaper_of(&page, global),
+                None => resolve_wallpaper(global, WallpaperChoice::Inherit, page.wallpaper_choice()),
+            }
+            .map(|(w, _)| w.clone());
             work.push((d.handle, keys, members, wallpaper));
         }
     }

@@ -5,7 +5,9 @@
 use crate::render::{self, Renderer};
 use crate::store;
 use crate::theme::*;
-use deckly_core::{DeviceModel, Page, Wallpaper};
+use deckly_core::{
+    DeviceModel, Page, Wallpaper, WallpaperChoice, WallpaperLevel, resolve_wallpaper,
+};
 use eframe::egui::{
     self, Align2, Color32, ColorImage, CornerRadius, Rect, RichText, Sense, Stroke, TextureHandle,
     TextureOptions, Vec2, pos2, vec2,
@@ -21,7 +23,26 @@ const PREVIEW_WIDTH: f32 = 380.0;
 const WHEEL_ZOOM: f32 = 0.25;
 const GAP_SHADE: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 150);
 
+/// The levels a page's or folder's wallpaper comes from, as the window
+/// edits them. The global wallpaper is only shown here; Preferences > Style
+/// edits it.
+pub struct Layers<'a> {
+    pub global: Option<&'a Wallpaper>,
+    pub profile: &'a mut Option<Wallpaper>,
+    pub profile_disabled: &'a mut bool,
+    pub page: &'a mut Page,
+}
+
+/// Where chosen pictures are kept.
+enum Owner {
+    /// In the profile's images folder.
+    Profile(String),
+    /// In Deckly's wallpapers folder, for the global wallpaper.
+    Global,
+}
+
 pub struct WallpaperEditor {
+    owner: Owner,
     pub profile: String,
     pub page: String,
     editing_profile: bool,
@@ -35,6 +56,7 @@ pub struct WallpaperEditor {
 impl WallpaperEditor {
     pub fn new(profile: &str, page: &str) -> Self {
         Self {
+            owner: Owner::Profile(profile.to_owned()),
             profile: profile.to_owned(),
             page: page.to_owned(),
             editing_profile: false,
@@ -45,23 +67,37 @@ impl WallpaperEditor {
         }
     }
 
-    /// Shows the window over `page`. Returns `None` once it is closed,
-    /// else the undo group of this frame's changes.
+    /// An editor for the global wallpaper of Preferences > Style.
+    pub fn global() -> Self {
+        Self {
+            owner: Owner::Global,
+            ..Self::new("", "")
+        }
+    }
+
+    /// Shows the window over `layers.page`. Returns `None` once it is
+    /// closed, else the undo group of this frame's changes.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
-        profile_wallpaper: &mut Option<Wallpaper>,
-        page: &mut Page,
+        layers: Layers<'_>,
         scope: &str,
         model: &DeviceModel,
         renderer: &mut Renderer,
     ) -> Option<u64> {
+        let Layers {
+            global,
+            profile: profile_wallpaper,
+            profile_disabled,
+            page,
+        } = layers;
         if ctx.input(|i| i.pointer.any_pressed()) {
             self.gesture = self.gesture.wrapping_add(1);
         }
         if let Some(wallpaper) = self.receive() {
             if self.editing_profile {
                 *profile_wallpaper = Some(wallpaper);
+                *profile_disabled = false;
             } else {
                 page.wallpaper = Some(wallpaper);
                 page.wallpaper_disabled = false;
@@ -83,101 +119,63 @@ impl WallpaperEditor {
                         ui.selectable_value(&mut self.editing_profile, true, "Profile");
                     });
                 });
+                let profile_choice =
+                    WallpaperChoice::of(profile_wallpaper.as_ref(), *profile_disabled);
                 let (shown, wallpaper) = if self.editing_profile {
-                    (profile_wallpaper.clone(), &mut *profile_wallpaper)
+                    let shown = resolve_wallpaper(global, profile_choice, WallpaperChoice::Inherit);
+                    (shown.map(|(w, l)| (w.clone(), l)), &mut *profile_wallpaper)
                 } else {
-                    (
-                        page.effective_wallpaper(profile_wallpaper.as_ref())
-                            .cloned(),
-                        &mut page.wallpaper,
-                    )
+                    let shown = resolve_wallpaper(global, profile_choice, page.wallpaper_choice());
+                    (shown.map(|(w, l)| (w.clone(), l)), &mut page.wallpaper)
                 };
+                let level = shown.as_ref().map(|(_, level)| *level);
+                let shown = shown.map(|(w, _)| w);
                 self.preview(ui, shown.as_ref(), wallpaper.as_mut(), model, renderer);
                 ui.add_space(8.0);
                 if let Some(wallpaper) = wallpaper {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Zoom").color(TEXT_DIM));
-                        ui.spacing_mut().slider_width = PREVIEW_WIDTH - 110.0;
-                        ui.add(
-                            egui::Slider::new(
-                                &mut wallpaper.zoom,
-                                Wallpaper::MIN_ZOOM..=Wallpaper::MAX_ZOOM,
-                            )
-                            .suffix("%"),
-                        );
-                    });
-                    ui.label(
-                        RichText::new(
-                            "Drag the picture to move it. Key pictures cover it; their \
-                             transparent parts let it through.",
-                        )
-                        .color(TEXT_FAINT),
-                    );
+                    zoom_row(ui, wallpaper);
                 }
                 let status = if self.editing_profile {
-                    "Applies to pages and folders that use the profile wallpaper."
-                } else if page.wallpaper_disabled {
-                    "Wallpaper is off here."
-                } else if page.wallpaper.is_some() {
-                    "This layout uses its own wallpaper."
-                } else if shown.is_some() {
-                    "This layout uses the profile wallpaper."
+                    profile_status(*profile_disabled, level)
                 } else {
-                    "This layout follows the profile, which has no wallpaper yet."
+                    local_status(page.wallpaper_disabled, level)
                 };
                 ui.label(RichText::new(status).color(TEXT_DIM));
-                if !self.editing_profile {
-                    ui.horizontal(|ui| {
-                        let inherits = !page.wallpaper_disabled && page.wallpaper.is_none();
-                        if ui
-                            .add_enabled(!busy && !inherits, egui::Button::new("Use Profile"))
-                            .clicked()
-                        {
-                            page.wallpaper = None;
-                            page.wallpaper_disabled = false;
-                            self.error = None;
-                        }
-                        if ui
-                            .add_enabled(
-                                !busy && !page.wallpaper_disabled,
-                                egui::Button::new("No Wallpaper"),
-                            )
-                            .clicked()
-                        {
-                            page.wallpaper = None;
-                            page.wallpaper_disabled = true;
-                            self.error = None;
-                        }
-                    });
-                }
-                if let Some(error) = &self.error {
-                    ui.label(RichText::new(format!("{}  {error}", icon::WARNING)).color(WARNING));
-                }
-                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let choose = ui
-                        .add_enabled(
-                            !busy,
-                            egui::Button::new(format!("{}  Choose Image…", icon::IMAGE)),
+                    let (inherits, off, inherit_label) = if self.editing_profile {
+                        (
+                            !*profile_disabled && profile_wallpaper.is_none(),
+                            *profile_disabled,
+                            "Use Global",
                         )
+                    } else {
+                        (
+                            !page.wallpaper_disabled && page.wallpaper.is_none(),
+                            page.wallpaper_disabled,
+                            "Use Profile",
+                        )
+                    };
+                    let inherit = ui
+                        .add_enabled(!busy && !inherits, egui::Button::new(inherit_label))
                         .clicked();
-                    if choose {
-                        self.choose(ctx);
-                    }
-                    if busy {
-                        ui.spinner();
-                    }
-                    if self.editing_profile
-                        && ui
-                            .add_enabled(
-                                profile_wallpaper.is_some() && !busy,
-                                egui::Button::new(format!("{}  Remove", icon::TRASH)),
-                            )
-                            .clicked()
-                    {
-                        *profile_wallpaper = None;
+                    let disable = ui
+                        .add_enabled(!busy && !off, egui::Button::new("No Wallpaper"))
+                        .clicked();
+                    if inherit || disable {
+                        if self.editing_profile {
+                            *profile_wallpaper = None;
+                            *profile_disabled = disable;
+                        } else {
+                            page.wallpaper = None;
+                            page.wallpaper_disabled = disable;
+                        }
                         self.error = None;
                     }
+                });
+                self.error_row(ui);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    self.choose_button(ui, ctx, busy);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close = ui.button("Done").clicked();
                     });
@@ -187,6 +185,99 @@ impl WallpaperEditor {
             return None;
         }
         Some(egui::Id::new(("wallpaper-edit", &self.page, self.gesture)).value())
+    }
+
+    /// Shows the global wallpaper's window, with the keys of `model`.
+    /// Returns whether it is still open.
+    pub fn show_global(
+        &mut self,
+        ctx: &egui::Context,
+        wallpaper: &mut Option<Wallpaper>,
+        model: &mut &'static DeviceModel,
+        renderer: &mut Renderer,
+    ) -> bool {
+        if let Some(chosen) = self.receive() {
+            *wallpaper = Some(chosen);
+        }
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new("Global Wallpaper")
+            .id(egui::Id::new("global-wallpaper"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_width(PREVIEW_WIDTH);
+                let busy = self.job.is_some();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Preview on").color(TEXT_DIM));
+                    egui::ComboBox::from_id_salt("global-wallpaper-model")
+                        .selected_text(model.name)
+                        .show_ui(ui, |ui| {
+                            for m in DeviceModel::ALL {
+                                if ui.selectable_label(std::ptr::eq(*model, m), m.name).clicked() {
+                                    *model = m;
+                                }
+                            }
+                        });
+                });
+                ui.add_space(4.0);
+                let shown = wallpaper.clone();
+                self.preview(ui, shown.as_ref(), wallpaper.as_mut(), model, renderer);
+                ui.add_space(8.0);
+                if let Some(wallpaper) = wallpaper.as_mut() {
+                    zoom_row(ui, wallpaper);
+                }
+                let status = if wallpaper.is_some() {
+                    "Shown behind the keys of every profile, page and folder that does not \
+                     choose its own wallpaper or turn it off. Each model shows the picture \
+                     across its own keys."
+                } else {
+                    "No global wallpaper. Profiles, pages and folders can still have their own."
+                };
+                ui.label(RichText::new(status).color(TEXT_DIM));
+                self.error_row(ui);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    self.choose_button(ui, ctx, busy);
+                    if ui
+                        .add_enabled(
+                            wallpaper.is_some() && !busy,
+                            egui::Button::new(format!("{}  Remove", icon::TRASH)),
+                        )
+                        .clicked()
+                    {
+                        *wallpaper = None;
+                        self.error = None;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = ui.button("Done").clicked();
+                    });
+                });
+            });
+        open && !close
+    }
+
+    fn error_row(&self, ui: &mut egui::Ui) {
+        if let Some(error) = &self.error {
+            ui.label(RichText::new(format!("{}  {error}", icon::WARNING)).color(WARNING));
+        }
+    }
+
+    fn choose_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, busy: bool) {
+        let choose = ui
+            .add_enabled(
+                !busy,
+                egui::Button::new(format!("{}  Choose Image…", icon::IMAGE)),
+            )
+            .clicked();
+        if choose {
+            self.choose(ctx);
+        }
+        if busy {
+            ui.spinner();
+        }
     }
 
     /// The keys as the device lays them out, with the wallpaper behind them.
@@ -308,14 +399,19 @@ impl WallpaperEditor {
             return;
         };
         let (tx, rx) = mpsc::sync_channel(1);
-        let profile = self.profile.clone();
+        let owner = match &self.owner {
+            Owner::Profile(id) => Some(id.clone()),
+            Owner::Global => None,
+        };
         let repaint = ctx.clone();
         // Large pictures take a moment; the window stays responsive.
         let spawned = std::thread::Builder::new()
             .name("deckly-wallpaper".into())
             .spawn(move || {
-                let saved = render::decode_wallpaper(&path)
-                    .and_then(|img| store::save_wallpaper(&profile, &img));
+                let saved = render::decode_wallpaper(&path).and_then(|img| match &owner {
+                    Some(profile) => store::save_wallpaper(profile, &img),
+                    None => store::save_global_wallpaper(&img),
+                });
                 let _ = tx.send(saved);
                 repaint.request_repaint();
             });
@@ -346,6 +442,55 @@ impl WallpaperEditor {
                 None
             }
         }
+    }
+}
+
+fn zoom_row(ui: &mut egui::Ui, wallpaper: &mut Wallpaper) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Zoom").color(TEXT_DIM));
+        ui.spacing_mut().slider_width = PREVIEW_WIDTH - 110.0;
+        ui.add(
+            egui::Slider::new(
+                &mut wallpaper.zoom,
+                Wallpaper::MIN_ZOOM..=Wallpaper::MAX_ZOOM,
+            )
+            .suffix("%"),
+        );
+    });
+    ui.label(
+        RichText::new(
+            "Drag the picture to move it. Key pictures cover it; their \
+             transparent parts let it through.",
+        )
+        .color(TEXT_FAINT),
+    );
+}
+
+/// What the Profile tab says about the profile's wallpaper.
+fn profile_status(disabled: bool, shown: Option<WallpaperLevel>) -> &'static str {
+    match (disabled, shown) {
+        (true, _) => "Wallpaper is off for this profile. Pages and folders can still have their own.",
+        (false, Some(WallpaperLevel::Global)) => {
+            "This profile uses the global wallpaper from Preferences > Style."
+        }
+        (false, Some(_)) => "Applies to pages and folders that use the profile wallpaper.",
+        (false, None) => {
+            "This profile follows the global wallpaper, which is not set. \
+             Choose a picture here or in Preferences > Style."
+        }
+    }
+}
+
+/// What the page or folder tab says about the wallpaper on the canvas.
+fn local_status(disabled: bool, shown: Option<WallpaperLevel>) -> &'static str {
+    match (disabled, shown) {
+        (true, _) => "Wallpaper is off here.",
+        (false, Some(WallpaperLevel::Local)) => "This layout uses its own wallpaper.",
+        (false, Some(WallpaperLevel::Profile)) => "This layout uses the profile wallpaper.",
+        (false, Some(WallpaperLevel::Global)) => {
+            "This layout uses the global wallpaper through its profile."
+        }
+        (false, None) => "This layout follows the profile, which shows no wallpaper.",
     }
 }
 

@@ -237,7 +237,7 @@ pub enum WallpaperChoice<'a> {
 }
 
 impl<'a> WallpaperChoice<'a> {
-    fn of(wallpaper: Option<&'a Wallpaper>, disabled: bool) -> Self {
+    pub fn of(wallpaper: Option<&'a Wallpaper>, disabled: bool) -> Self {
         match (disabled, wallpaper) {
             (true, _) => Self::Off,
             (false, Some(wallpaper)) => Self::Own(wallpaper),
