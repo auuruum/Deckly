@@ -3115,8 +3115,24 @@ impl App {
             _ => return,
         };
         let method = updater.method();
-        let width = (ctx.content_rect().width() - 64.0).clamp(240.0, 640.0);
-        let mut skip = false;
+        let view = match &status {
+            update::Status::Downloading(_) => BannerView::Downloading {
+                latest: &release.version,
+            },
+            update::Status::InstallFailed(_, error) => BannerView::Failed {
+                latest: &release.version,
+                error,
+            },
+            _ => BannerView::Available {
+                latest: &release.version,
+                hint: match &method {
+                    Method::Manual(hint) => Some(hint),
+                    _ => None,
+                },
+            },
+        };
+        let max = (ctx.content_rect().width() - 64.0).clamp(240.0, 800.0);
+        let mut click = None;
         egui::Area::new(egui::Id::new("update-banner"))
             .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -24.0))
             .order(egui::Order::Foreground)
@@ -3127,103 +3143,25 @@ impl App {
                     .corner_radius(CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(14, 10))
                     .show(ui, |ui| {
-                        ui.set_width(width);
-                        ui.horizontal(|ui| match &status {
-                            update::Status::Downloading(_) => {
-                                ui.add(egui::Spinner::new().color(ACCENT));
-                                ui.label(format!("Downloading Deckly {}…", release.version));
-                            }
-                            update::Status::InstallFailed(_, error) => {
-                                ui.label(RichText::new(icon::WARNING).color(WARNING));
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(format!(
-                                            "Could not update to {}: {error}",
-                                            release.version
-                                        ))
-                                        .color(WARNING),
-                                    )
-                                    .wrap(),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.button(icon::X).on_hover_text("Close").clicked() {
-                                            updater.dismiss();
-                                        }
-                                        if ui.button("Try Again").clicked() {
-                                            updater.install(release.clone());
-                                        }
-                                    },
-                                );
-                            }
-                            _ => {
-                                ui.label(RichText::new(icon::ARROW_CIRCLE_UP).color(ACCENT));
-                                let text = format!(
-                                    "Deckly {} is available. You have {}.",
-                                    release.version,
-                                    env!("CARGO_PKG_VERSION")
-                                );
-                                ui.add(egui::Label::new(text).wrap());
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .button(icon::X)
-                                            .on_hover_text("Remind me later")
-                                            .clicked()
-                                        {
-                                            updater.dismiss();
-                                        }
-                                        if ui.button("Skip This Version").clicked() {
-                                            skip = true;
-                                        }
-                                        if ui.button("What's New").clicked()
-                                            && let Err(e) = crate::os::open(&release.page())
-                                        {
-                                            runtime::lock(&self.state).notify(e);
-                                        }
-                                        match &method {
-                                            // Says how to update on its own line below.
-                                            Method::Manual(_) => {}
-                                            _ => {
-                                                let update = egui::Button::new(
-                                                    RichText::new("Update Now")
-                                                        .color(Color32::WHITE),
-                                                )
-                                                .fill(ACCENT);
-                                                if ui
-                                                    .add(update)
-                                                    .on_hover_text(
-                                                        "Download, install and restart Deckly. \
-                                                     Your profiles stay as they are.",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    updater.install(release.clone());
-                                                }
-                                            }
-                                        }
-                                    },
-                                );
-                            }
-                        });
-                        if let (Method::Manual(hint), update::Status::Available(_)) =
-                            (&method, &status)
-                        {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(icon::INFO).color(TEXT_DIM));
-                                ui.add(
-                                    egui::Label::new(RichText::new(*hint).color(TEXT_DIM)).wrap(),
-                                );
-                            });
-                        }
+                        click = update_banner_body(ui, &view, max).click;
                     });
             });
-        if skip {
-            let mut s = runtime::lock(&self.state);
-            s.settings.skipped_update = release.version.clone();
-            s.save_settings();
+        match click {
+            Some(BannerButton::UpdateNow | BannerButton::TryAgain) => {
+                updater.install(release.clone());
+            }
+            Some(BannerButton::WhatsNew) => {
+                if let Err(e) = crate::os::open(&release.page()) {
+                    runtime::lock(&self.state).notify(e);
+                }
+            }
+            Some(BannerButton::Skip) => {
+                let mut s = runtime::lock(&self.state);
+                s.settings.skipped_update = release.version.clone();
+                s.save_settings();
+            }
+            Some(BannerButton::Close) => updater.dismiss(),
+            None => {}
         }
     }
 
@@ -3258,6 +3196,228 @@ impl App {
                     });
             });
         ctx.request_repaint_after(left);
+    }
+}
+
+/// What the update banner says, without the updater behind it.
+enum BannerView<'a> {
+    /// A newer release. `hint` says how to update when Deckly cannot do it
+    /// itself; then there is no Update Now button.
+    Available {
+        latest: &'a str,
+        hint: Option<&'a str>,
+    },
+    Downloading {
+        latest: &'a str,
+    },
+    Failed {
+        latest: &'a str,
+        error: &'a str,
+    },
+}
+
+impl BannerView<'_> {
+    fn buttons(&self) -> &'static [BannerButton] {
+        match self {
+            BannerView::Available { hint: None, .. } => &[
+                BannerButton::UpdateNow,
+                BannerButton::WhatsNew,
+                BannerButton::Skip,
+                BannerButton::Close,
+            ],
+            BannerView::Available { hint: Some(_), .. } => &[
+                BannerButton::WhatsNew,
+                BannerButton::Skip,
+                BannerButton::Close,
+            ],
+            BannerView::Failed { .. } => &[BannerButton::TryAgain, BannerButton::Close],
+            BannerView::Downloading { .. } => &[],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BannerButton {
+    UpdateNow,
+    WhatsNew,
+    Skip,
+    TryAgain,
+    Close,
+}
+
+/// Where the banner put its parts, and the button clicked this frame.
+/// Only the layout tests look past `click`.
+#[cfg_attr(not(test), allow(dead_code))]
+struct BannerLayout {
+    click: Option<BannerButton>,
+    rows: BannerRows,
+    message: Rect,
+    buttons: Vec<(BannerButton, Rect)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BannerRows {
+    /// The message on the left, the buttons on the right.
+    One,
+    /// The message, wrapped if it must, and the buttons below it.
+    Two,
+}
+
+/// Space between the message and the buttons on one row.
+const BANNER_GAP: f32 = 24.0;
+
+/// Picks the rows and the width of the banner from the unwrapped widths of
+/// its message, hint line and buttons: the banner is as wide as its content
+/// and never wider than `max`.
+fn banner_shape(max: f32, message: f32, hint: f32, buttons: f32) -> (BannerRows, f32) {
+    let one_row = if buttons > 0.0 {
+        message + BANNER_GAP + buttons
+    } else {
+        message
+    };
+    if one_row <= max {
+        (BannerRows::One, one_row.max(hint).min(max))
+    } else {
+        (BannerRows::Two, message.max(hint).max(buttons).min(max))
+    }
+}
+
+/// Draws the banner at most `max` points wide and returns what was clicked.
+fn update_banner_body(ui: &mut Ui, view: &BannerView, max: f32) -> BannerLayout {
+    let buttons = view.buttons();
+    let hint = match view {
+        BannerView::Available { hint, .. } => *hint,
+        _ => None,
+    };
+    // Natural widths from an invisible pass, so the decision matches the
+    // widgets exactly.
+    let measure = |ui: &mut Ui, salt: &str, add: &mut dyn FnMut(&mut Ui)| {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(salt)
+                .layout(egui::Layout::left_to_right(egui::Align::Center))
+                .sizing_pass()
+                .invisible(),
+        );
+        add(&mut child);
+        child.min_rect().width()
+    };
+    let message_width = measure(ui, "banner-message", &mut |ui| {
+        banner_message(ui, view, false);
+    });
+    let hint_width = match hint {
+        Some(hint) => measure(ui, "banner-hint", &mut |ui| {
+            banner_hint(ui, hint, false);
+        }),
+        None => 0.0,
+    };
+    let buttons_width = if buttons.is_empty() {
+        0.0
+    } else {
+        measure(ui, "banner-buttons", &mut |ui| {
+            banner_buttons(ui, view, &mut Vec::new());
+        })
+    };
+    let (rows, width) = banner_shape(max, message_width, hint_width, buttons_width);
+    ui.set_width(width);
+    let mut placed = Vec::new();
+    let message = match rows {
+        BannerRows::One => {
+            ui.horizontal(|ui| {
+                let message = banner_message(ui, view, false);
+                if !buttons.is_empty() {
+                    ui.add_space((ui.available_width() - buttons_width).max(BANNER_GAP));
+                    banner_buttons(ui, view, &mut placed);
+                }
+                message
+            })
+            .inner
+        }
+        BannerRows::Two => {
+            let message = ui.horizontal(|ui| banner_message(ui, view, true)).inner;
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                // Right-aligned like dialog buttons, while they fit one line.
+                let free = ui.available_width() - buttons_width;
+                if free > 0.0 {
+                    ui.add_space(free);
+                }
+                banner_buttons(ui, view, &mut placed);
+            });
+            message
+        }
+    };
+    if let Some(hint) = hint {
+        ui.horizontal(|ui| banner_hint(ui, hint, true));
+    }
+    BannerLayout {
+        click: placed
+            .iter()
+            .find(|(_, response)| response.clicked())
+            .map(|(button, _)| *button),
+        rows,
+        message,
+        buttons: placed
+            .iter()
+            .map(|(button, response)| (*button, response.rect))
+            .collect(),
+    }
+}
+
+/// The icon and the sentence; returns where the sentence went.
+fn banner_message(ui: &mut Ui, view: &BannerView, wrap: bool) -> Rect {
+    let text = match view {
+        BannerView::Available { latest, .. } => {
+            ui.label(RichText::new(icon::ARROW_CIRCLE_UP).color(ACCENT));
+            RichText::new(format!(
+                "Deckly {latest} is available. You have {}.",
+                env!("CARGO_PKG_VERSION")
+            ))
+        }
+        BannerView::Downloading { latest } => {
+            ui.add(egui::Spinner::new().color(ACCENT));
+            RichText::new(format!("Downloading Deckly {latest}…"))
+        }
+        BannerView::Failed { latest, error } => {
+            ui.label(RichText::new(icon::WARNING).color(WARNING));
+            RichText::new(format!("Could not update to {latest}: {error}")).color(WARNING)
+        }
+    };
+    let label = egui::Label::new(text);
+    ui.add(if wrap { label.wrap() } else { label.extend() })
+        .rect
+}
+
+fn banner_hint(ui: &mut Ui, hint: &str, wrap: bool) {
+    ui.label(RichText::new(icon::INFO).color(TEXT_DIM));
+    let label = egui::Label::new(RichText::new(hint).color(TEXT_DIM));
+    ui.add(if wrap { label.wrap() } else { label.extend() });
+}
+
+fn banner_buttons(
+    ui: &mut Ui,
+    view: &BannerView,
+    placed: &mut Vec<(BannerButton, egui::Response)>,
+) {
+    for &button in view.buttons() {
+        let response = match button {
+            BannerButton::UpdateNow => ui
+                .add(
+                    egui::Button::new(RichText::new("Update Now").color(Color32::WHITE))
+                        .fill(ACCENT),
+                )
+                .on_hover_text(
+                    "Download, install and restart Deckly. Your profiles stay as they are.",
+                ),
+            BannerButton::WhatsNew => ui.button("What's New"),
+            BannerButton::Skip => ui.button("Skip This Version"),
+            BannerButton::TryAgain => ui.button("Try Again"),
+            BannerButton::Close => ui.button(icon::X).on_hover_text(match view {
+                BannerView::Failed { .. } => "Close",
+                _ => "Remind me later",
+            }),
+        };
+        placed.push((button, response));
     }
 }
 
@@ -5216,5 +5376,155 @@ mod plugin_page_tests {
         ] {
             assert_eq!(plugin_page_placement(area, inner, 1.0), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod update_banner_tests {
+    use super::*;
+
+    /// Lays the banner out at most `max` wide, with the app's fonts.
+    /// Returns the strip the banner may use and what it drew.
+    fn layout(view: &BannerView, max: f32) -> (Rect, BannerLayout) {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let mut result = None;
+        let input = || egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))),
+            ..Default::default()
+        };
+        // The first pass loads the fonts; measure the second.
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(input(), |ui| {
+                ui.scope(|ui| {
+                    let left = ui.min_rect().left();
+                    let body = update_banner_body(ui, view, max);
+                    let area =
+                        Rect::from_x_y_ranges(left..=left + max, f32::NEG_INFINITY..=f32::INFINITY);
+                    result = Some((area, body));
+                });
+            });
+            output.textures_delta.clear();
+        }
+        result.expect("the banner was laid out")
+    }
+
+    fn views() -> Vec<BannerView<'static>> {
+        vec![
+            BannerView::Available {
+                latest: "10.10.10",
+                hint: None,
+            },
+            BannerView::Available {
+                latest: "10.10.10",
+                hint: Some("Download the new version from the release page."),
+            },
+            BannerView::Downloading { latest: "10.10.10" },
+            BannerView::Failed {
+                latest: "10.10.10",
+                error: "curl failed: curl: (22) The requested URL returned error: 404",
+            },
+        ]
+    }
+
+    #[test]
+    fn message_and_buttons_never_overlap() {
+        // The banner may use 240..800 points.
+        for max in [240.0, 320.0, 480.0, 640.0, 788.0, 800.0] {
+            for view in views() {
+                let (area, body) = layout(&view, max);
+                let inside =
+                    |r: Rect| r.left() >= area.left() - 0.5 && r.right() <= area.right() + 0.5;
+                assert!(inside(body.message), "message leaves the banner at {max}");
+                for (i, &(button, rect)) in body.buttons.iter().enumerate() {
+                    assert!(inside(rect), "{button:?} leaves the banner at {max}");
+                    assert!(
+                        !rect.intersects(body.message),
+                        "{button:?} covers the message at {max}"
+                    );
+                    for &(other, other_rect) in &body.buttons[i + 1..] {
+                        assert!(
+                            !rect.intersects(other_rect),
+                            "{button:?} and {other:?} overlap at {max}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_smallest_window_fits_the_offer_on_one_row() {
+        // The window is at least 852 wide, which leaves the banner 788.
+        let views = views();
+        let (_, wide) = layout(&views[0], 788.0);
+        assert_eq!(wide.rows, BannerRows::One);
+        let (_, narrow) = layout(&views[0], 240.0);
+        assert_eq!(narrow.rows, BannerRows::Two);
+    }
+
+    #[test]
+    fn the_banner_hugs_its_content() {
+        assert_eq!(
+            banner_shape(800.0, 300.0, 0.0, 350.0),
+            (BannerRows::One, 674.0)
+        );
+        // Without buttons there is no gap to keep.
+        assert_eq!(
+            banner_shape(800.0, 300.0, 0.0, 0.0),
+            (BannerRows::One, 300.0)
+        );
+        // A longer hint line widens the banner but does not split the row.
+        assert_eq!(
+            banner_shape(800.0, 200.0, 500.0, 200.0),
+            (BannerRows::One, 500.0)
+        );
+    }
+
+    #[test]
+    fn a_narrow_banner_puts_the_buttons_under_the_message() {
+        assert_eq!(
+            banner_shape(640.0, 300.0, 0.0, 350.0),
+            (BannerRows::Two, 350.0)
+        );
+        // Never wider than allowed; the message wraps instead.
+        assert_eq!(
+            banner_shape(240.0, 300.0, 0.0, 350.0),
+            (BannerRows::Two, 240.0)
+        );
+        assert_eq!(
+            banner_shape(240.0, 900.0, 0.0, 0.0),
+            (BannerRows::Two, 240.0)
+        );
+    }
+
+    #[test]
+    fn buttons_depend_on_the_state_and_update_method() {
+        let names = |view: &BannerView| -> Vec<BannerButton> {
+            layout(view, 640.0).1.buttons.iter().map(|b| b.0).collect()
+        };
+        let views = views();
+        let [available, manual, downloading, failed] = &views[..] else {
+            panic!("four banner states");
+        };
+        assert_eq!(
+            names(available),
+            [
+                BannerButton::UpdateNow,
+                BannerButton::WhatsNew,
+                BannerButton::Skip,
+                BannerButton::Close
+            ]
+        );
+        assert_eq!(
+            names(manual),
+            [
+                BannerButton::WhatsNew,
+                BannerButton::Skip,
+                BannerButton::Close
+            ]
+        );
+        assert!(names(downloading).is_empty());
+        assert_eq!(names(failed), [BannerButton::TryAgain, BannerButton::Close]);
     }
 }
