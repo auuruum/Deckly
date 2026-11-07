@@ -12,7 +12,7 @@ use crate::os;
 use crate::render;
 use crate::runtime::{self, Msg, Repaint, Shared, State};
 use crate::store;
-use deckly_core::{DeviceKind, KeyConfig, Page};
+use deckly_core::{DeviceKind, FeedbackMarks, KeyConfig, MarkStyle, Page};
 use deckly_device::ConnectedDevice;
 use deckly_plugin_host::manifest::{image_file, safe_join};
 use deckly_plugin_host::{Command, Host, HostEvent, Instance, Status, protocol};
@@ -23,13 +23,12 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Plugin images are decoded at the largest key size used today.
 const IMAGE_SIZE: u32 = 144;
 const MAX_IMAGE_DATA: usize = 4 * 1024 * 1024;
 const MAX_GLOBAL_SETTINGS_BYTES: usize = 1024 * 1024;
-const MARK_TIME: Duration = Duration::from_millis(1500);
 
 /// A decoded image with an id that changes with its pixels.
 pub struct KeyImage {
@@ -55,6 +54,16 @@ pub enum Mark {
     Ok,
 }
 
+impl Mark {
+    /// How this mark looks and how long it stays.
+    pub fn style(self, marks: &FeedbackMarks) -> &MarkStyle {
+        match self {
+            Mark::Alert => &marks.failure,
+            Mark::Ok => &marks.success,
+        }
+    }
+}
+
 /// What a plugin key shows besides its configuration.
 #[derive(Clone, Default)]
 pub struct Overlay {
@@ -74,11 +83,12 @@ pub struct PageTile {
     pub icon: Option<PathBuf>,
 }
 
+/// Leaves out the mark: whether it shows, and how, depends on the user's
+/// settings, so [`render::Renderer::key_hash`] adds it.
 impl Hash for Overlay {
     fn hash<H: Hasher>(&self, h: &mut H) {
         self.image.as_ref().map(|i| i.id).hash(h);
         self.title.hash(h);
-        self.mark.hash(h);
         self.page.hash(h);
     }
 }
@@ -267,8 +277,9 @@ impl State {
 
     /// Shows a short mark on a key.
     pub fn mark_key(&mut self, context: &str, mark: Mark) {
+        let until = Instant::now() + mark.style(&self.settings.feedback_marks).duration();
         let key = self.plugin_keys.entry(context.to_owned()).or_default();
-        key.mark = Some((mark, Instant::now() + MARK_TIME));
+        key.mark = Some((mark, until));
     }
 
     /// Ends a Multi Action run on the key at `context`: a finished run shows
@@ -305,12 +316,16 @@ impl State {
         }
     }
 
-    /// When the next Alert/OK mark should disappear.
+    /// When the next Alert/OK mark should disappear. Hidden marks are not
+    /// drawn, so nothing waits for them.
     pub fn next_mark_end(&self) -> Option<Instant> {
         let now = Instant::now();
+        let marks = &self.settings.feedback_marks;
         self.plugin_keys
             .values()
-            .filter_map(|k| k.mark.map(|(_, until)| until))
+            .filter_map(|k| k.mark)
+            .filter(|(mark, _)| mark.style(marks).visible)
+            .map(|(_, until)| until)
             .filter(|until| *until > now)
             .min()
     }
@@ -774,7 +789,8 @@ impl Worker {
             return;
         };
         let n = s.states_of(&key);
-        s.plugin_key(context, n).mark = Some((mark, Instant::now() + MARK_TIME));
+        let until = Instant::now() + mark.style(&s.settings.feedback_marks).duration();
+        s.plugin_key(context, n).mark = Some((mark, until));
         drop(s);
         self.redraw();
     }
