@@ -430,7 +430,8 @@ mod tests {
 
     #[test]
     fn global_wallpapers_have_their_own_folder_and_old_ones_are_pruned() {
-        let root = std::env::temp_dir().join(format!("deckly-global-wall-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("deckly-global-wall-{}", uuid::Uuid::new_v4()));
         let image = RgbaImage::from_pixel(64, 32, image::Rgba([1, 2, 3, 255]));
         let first = write_global_wallpaper(&root, &image).unwrap();
         let second = write_global_wallpaper(&root, &image).unwrap();

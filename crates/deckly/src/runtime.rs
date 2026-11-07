@@ -1704,7 +1704,9 @@ fn refresh(
             let global = s.settings.wallpaper.as_ref();
             let wallpaper = match profile {
                 Some(p) => p.wallpaper_of(&page, global),
-                None => resolve_wallpaper(global, WallpaperChoice::Inherit, page.wallpaper_choice()),
+                None => {
+                    resolve_wallpaper(global, WallpaperChoice::Inherit, page.wallpaper_choice())
+                }
             }
             .map(|(w, _)| w.clone());
             work.push((d.handle, keys, members, wallpaper));

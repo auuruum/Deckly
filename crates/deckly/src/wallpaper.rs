@@ -216,7 +216,10 @@ impl WallpaperEditor {
                         .selected_text(model.name)
                         .show_ui(ui, |ui| {
                             for m in DeviceModel::ALL {
-                                if ui.selectable_label(std::ptr::eq(*model, m), m.name).clicked() {
+                                if ui
+                                    .selectable_label(std::ptr::eq(*model, m), m.name)
+                                    .clicked()
+                                {
                                     *model = m;
                                 }
                             }
@@ -469,7 +472,9 @@ fn zoom_row(ui: &mut egui::Ui, wallpaper: &mut Wallpaper) {
 /// What the Profile tab says about the profile's wallpaper.
 fn profile_status(disabled: bool, shown: Option<WallpaperLevel>) -> &'static str {
     match (disabled, shown) {
-        (true, _) => "Wallpaper is off for this profile. Pages and folders can still have their own.",
+        (true, _) => {
+            "Wallpaper is off for this profile. Pages and folders can still have their own."
+        }
         (false, Some(WallpaperLevel::Global)) => {
             "This profile uses the global wallpaper from Preferences > Style."
         }
