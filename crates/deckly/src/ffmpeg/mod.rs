@@ -18,6 +18,8 @@ use std::process::Command;
 use std::time::Duration;
 use version::Version;
 
+/// Development switch: ignore FFmpeg on PATH and in package folders.
+const FAKE_NO_FFMPEG_ENV: &str = "DECKLY_FAKE_NO_FFMPEG";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROBE_OUTPUT: usize = 64 * 1024;
 
@@ -161,8 +163,14 @@ fn package_folders() -> Vec<PathBuf> {
 /// thread.
 pub fn locate(chosen: Option<&Path>) -> Result<Found, Missing> {
     let own = own_dir().map(|dir| dir.join(program_name()));
-    let path_var = std::env::var_os("PATH");
-    let list = candidates(chosen, own, path_var.as_deref(), package_folders());
+    // Development switch: act as if the system had no FFmpeg, to see the
+    // setup window. A chosen FFmpeg and Deckly's own copy still count.
+    let (path_var, folders) = if std::env::var_os(FAKE_NO_FFMPEG_ENV).is_some() {
+        (None, Vec::new())
+    } else {
+        (std::env::var_os("PATH"), package_folders())
+    };
+    let list = candidates(chosen, own, path_var.as_deref(), folders);
     locate_in(list, &|p| p.is_file(), &probe)
 }
 
