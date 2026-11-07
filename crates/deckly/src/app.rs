@@ -1148,7 +1148,10 @@ impl App {
             }
             None => HashMap::new(),
         };
-        if overlays.values().any(|o| o.mark.is_some()) {
+        if overlays
+            .values()
+            .any(|o| self.renderer.shown_mark(Some(o)).is_some())
+        {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
         let global = runtime::lock(&self.state).settings.wallpaper.clone();
@@ -3484,12 +3487,14 @@ impl eframe::App for App {
             host.set_owner_window(handle);
             self.owner_set = true;
         }
-        let (title_style, key_press) = {
+        {
             let s = runtime::lock(&self.state);
-            (s.settings.title_style.clone(), s.settings.key_press)
-        };
-        self.renderer.title_defaults = title_style;
-        self.renderer.key_press = key_press;
+            self.renderer
+                .title_defaults
+                .clone_from(&s.settings.title_style);
+            self.renderer.key_press = s.settings.key_press;
+            self.renderer.marks.clone_from(&s.settings.feedback_marks);
+        }
         let (device, profile_id) = self.resolve();
         let (mut profile, mut view) = {
             let s = runtime::lock(&self.state);

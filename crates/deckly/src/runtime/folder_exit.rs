@@ -293,6 +293,27 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_ring_wakes_the_event_loop_only_to_close_the_folder() {
+        use super::super::{Groups, Links, next_wake};
+        use std::sync::{Arc, Mutex};
+        let (mut s, _, _) = setup(10);
+        let now = Instant::now();
+        s.arm_folder_exit(source(&s), now);
+        s.settings.feedback_marks.folder_exit.visible = false;
+        let deadline = s.folder_exit.deadline();
+        let state = Arc::new(Mutex::new(s));
+        let wake = next_wake(&state, &Links::new(), &Groups::default());
+        assert_eq!(wake, deadline);
+        super::super::lock(&state)
+            .settings
+            .feedback_marks
+            .folder_exit
+            .visible = true;
+        let wake = next_wake(&state, &Links::new(), &Groups::default());
+        assert!(wake < deadline);
+    }
+
+    #[test]
     fn a_short_countdown_is_limited_in_frames_and_zero_has_none() {
         let now = Instant::now();
         let (mut s, _, _) = setup(1);

@@ -1,10 +1,12 @@
 //! App settings: per-device preferences, which profile each device shows,
-//! the global key title style and the global wallpaper. Stored as one JSON file; loading never trusts
+//! the global key title style, the global wallpaper and the look of the
+//! feedback marks. Stored as one JSON file; loading never trusts
 //! it and brings every value within limits.
 //!
 //! The set of settings follows the official app's Preferences window
 //! (docs/clean-room/2026-10-26-preferences.md).
 
+use crate::feedback::FeedbackMarks;
 use crate::profile::{Profile, TitleStyle, Wallpaper};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -42,6 +44,8 @@ pub struct Settings {
     /// `wallpapers` folder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<Wallpaper>,
+    /// How the failure, success and Auto Exit marks look on every key.
+    pub feedback_marks: FeedbackMarks,
     /// Profile ids in the order lists show them. Profiles not on it follow,
     /// by name.
     pub profile_order: Vec<String>,
@@ -81,6 +85,7 @@ impl Default for Settings {
             title_style: TitleStyle::default(),
             key_press: KeyPress::default(),
             wallpaper: None,
+            feedback_marks: FeedbackMarks::default(),
             profile_order: Vec::new(),
             lock_keys: true,
             lock_look: LockLook::default(),
@@ -387,6 +392,7 @@ impl Settings {
         }
         self.title_style.sanitize();
         self.key_press.sanitize();
+        self.feedback_marks.sanitize();
         if self
             .wallpaper
             .as_ref()
@@ -515,8 +521,29 @@ mod tests {
             y: 750,
             ..Wallpaper::new("wallpapers/w.png".into())
         });
+        s.feedback_marks.failure.visible = false;
+        s.feedback_marks.success.icon = "thumbs-up".into();
+        s.feedback_marks.success.duration_ms = 3000;
+        s.feedback_marks.folder_exit.color = [10, 20, 30];
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(Settings::from_json(&text).unwrap(), s);
+    }
+
+    #[test]
+    fn older_settings_files_show_the_default_feedback_marks() {
+        let s = Settings::from_json(r#"{"brightness":50,"key_press":{"size":70}}"#).unwrap();
+        assert_eq!(s.feedback_marks, FeedbackMarks::default());
+    }
+
+    #[test]
+    fn feedback_marks_are_brought_within_limits() {
+        let text = r#"{"feedback_marks":{"failure":{"icon":"nope","size":250,"duration_ms":1},
+            "folder_exit":{"size":300}}}"#;
+        let marks = Settings::from_json(text).unwrap().feedback_marks;
+        assert_eq!(marks.failure.icon, "warning");
+        assert_eq!(marks.failure.size, crate::MarkStyle::MAX_SIZE);
+        assert_eq!(marks.failure.duration_ms, crate::MarkStyle::MIN_DURATION_MS);
+        assert_eq!(marks.folder_exit.size, crate::RingStyle::MAX_SIZE);
     }
 
     #[test]

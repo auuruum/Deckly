@@ -1406,7 +1406,15 @@ fn next_wake(state: &Shared, links: &Links, groups: &Groups) -> Option<Instant> 
         .chain(s.next_mark_end())
         .chain(s.follower.deadline())
         .chain(s.folder_exit.deadline())
-        .chain(s.folder_exit.next_frame(Instant::now()))
+        // A hidden ring has nothing to redraw.
+        .chain(
+            s.settings
+                .feedback_marks
+                .folder_exit
+                .visible
+                .then(|| s.folder_exit.next_frame(Instant::now()))
+                .flatten(),
+        )
         .chain(groups.presses.values().filter_map(|p| p.press.deadline()))
         .min()
 }
@@ -1656,6 +1664,7 @@ fn refresh(
         let s = lock(state);
         renderer.title_defaults = s.settings.title_style.clone();
         renderer.key_press = s.settings.key_press;
+        renderer.marks.clone_from(&s.settings.feedback_marks);
         for d in &s.devices {
             // A screensaver keeps its keys until the device wakes.
             if !links
@@ -1950,6 +1959,55 @@ mod tests {
         assert_eq!(mark(&bench.state), None);
         lock(&bench.state).finish_run(&context, false);
         assert_eq!(mark(&bench.state), Some(plugins::Mark::Ok));
+    }
+
+    #[test]
+    fn marks_last_as_long_as_the_settings_say() {
+        let mut settings = Settings::default();
+        settings.feedback_marks.failure.duration_ms = 4000;
+        settings.feedback_marks.success.duration_ms = 250;
+        let mut s = State::new(Vec::new(), settings);
+        let before = Instant::now();
+        s.mark_key("p.0", plugins::Mark::Alert);
+        s.mark_key("p.1", plugins::Mark::Ok);
+        let after = Instant::now();
+        let until = |s: &State, context: &str| s.plugin_keys[context].mark.map(|(_, t)| t);
+        let alert = until(&s, "p.0").unwrap();
+        let ok = until(&s, "p.1").unwrap();
+        assert!(alert >= before + Duration::from_millis(4000));
+        assert!(alert <= after + Duration::from_millis(4000));
+        assert!(ok >= before + Duration::from_millis(250));
+        assert!(ok <= after + Duration::from_millis(250));
+        assert_eq!(s.next_mark_end(), Some(ok));
+        // Hidden marks wait for nothing.
+        s.settings.feedback_marks.success.visible = false;
+        assert_eq!(s.next_mark_end(), Some(alert));
+        s.settings.feedback_marks.failure.visible = false;
+        assert_eq!(s.next_mark_end(), None);
+    }
+
+    #[test]
+    fn a_hidden_failure_mark_still_ends_a_run_as_failed() {
+        let mut settings = Settings::default();
+        settings.feedback_marks.failure.visible = false;
+        let mut profile = Profile::new("Test", DeviceKind::Mk2);
+        let mut key = KeyConfig::new(actions::MULTI_ACTION, json!({}));
+        key.groups[0].push(KeyConfig::new(actions::NEXT_PAGE, json!({})));
+        profile.pages[0].keys.insert(0, key.clone());
+        let context = plugins::context(&profile.pages[0].id, 0);
+        let mut s = State::new(vec![profile], settings);
+        s.fail(&context, "step failed");
+        s.notice = None;
+        s.finish_run(&context, false);
+        // Recorded, not a success, and drawn as nothing.
+        let overlay = s.overlay(&context, &key);
+        assert_eq!(
+            overlay.as_ref().and_then(|o| o.mark),
+            Some(plugins::Mark::Alert)
+        );
+        let mut r = Renderer::new();
+        r.marks = s.settings.feedback_marks.clone();
+        assert!(r.shown_mark(overlay.as_ref()).is_none());
     }
 
     #[test]
