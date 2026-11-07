@@ -12,6 +12,6 @@ pub use device::{
 };
 pub use profile::{
     ActionDelays, AppRule, AutoExit, KeyConfig, Page, Profile, ProfileError, TitleAlign,
-    TitleStyle, Wallpaper,
+    TitleStyle, Wallpaper, WallpaperChoice, WallpaperLevel, resolve_wallpaper,
 };
 pub use settings::{DeviceSettings, KeyPress, LockLook, Orientation, Settings, Turn};

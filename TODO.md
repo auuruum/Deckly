@@ -79,11 +79,15 @@ Planned features, chosen by the project owner on 2026-11-02.
       image, or opt out. See the [clean-room notes](docs/clean-room/2026-11-05-key-appearance.md)
       for the behavior documented by Elgato and the remaining unknowns.
 
-- [ ] Global wallpaper in Preferences > Style: one picture for all profiles,
+- [x] Global wallpaper in Preferences > Style: one picture for all profiles,
       pages and folders, like the global key style. Anything below can
       override it: a profile, a page or a folder uses its own image or opts
       out. The order becomes global, profile, page or folder, with the nearest
       setting winning.
+      Done: Preferences > Style chooses, places and removes the global
+      picture; the Wallpaper window's Profile tab follows it or turns it off.
+      Backups carry it, profile exports do not. See the
+      [clean-room notes](docs/clean-room/2026-11-07-global-wallpaper.md).
 - [ ] Style the feedback marks in Preferences > Style: the failure mark, the
       success check after an action ran, and the auto-exit from folders. Let
       people change or hide each one (icon, color, size, duration). Decide

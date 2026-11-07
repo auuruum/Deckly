@@ -20,13 +20,14 @@ use crate::store;
 use crate::theme::*;
 use crate::transfer::{self, Job, Outcome, PluginKind, Section, SharedJob, Summary, Tone};
 use crate::update::{self, Method, Updater};
+use crate::wallpaper::WallpaperEditor;
 use deckly_core::profile::{
     MAX_PAGE_NAME_CHARS, MAX_PAGES, MAX_PROFILE_APPLICATIONS, MAX_PROFILE_NAME_CHARS,
 };
 use deckly_core::settings::{self, MAX_DEVICE_NAME_CHARS, SLEEP_CHOICES};
 use deckly_core::{
     AppRule, DeviceKind, DeviceModel, KeyConfig, KeyPress, LockLook, Orientation, Page, Profile,
-    TitleAlign, TitleStyle,
+    TitleAlign, TitleStyle, Wallpaper,
 };
 use deckly_plugin_host::Host;
 use eframe::egui::{
@@ -126,6 +127,12 @@ pub struct Preferences {
     app_note: Option<String>,
     /// Pictures of the applications a profile lists, while the window is open.
     app_icons: Option<app_picker::icons::Cache>,
+    /// The global wallpaper's window, and the model it shows the keys of.
+    global_wallpaper: Option<(WallpaperEditor, &'static DeviceModel)>,
+    /// A dragged global wallpaper is saved once the mouse is let go.
+    global_wallpaper_unsaved: bool,
+    /// The small picture of the global wallpaper on the Style tab.
+    wallpaper_thumb: Option<(u64, TextureHandle)>,
 }
 
 struct PageIconEditor {
@@ -313,6 +320,9 @@ impl Preferences {
             app_picker: None,
             app_note: None,
             app_icons: None,
+            global_wallpaper: None,
+            global_wallpaper_unsaved: false,
+            wallpaper_thumb: None,
         }
     }
 
@@ -328,6 +338,7 @@ impl Preferences {
 
     pub fn close(&mut self) {
         self.open = false;
+        self.global_wallpaper = None;
         self.advanced = None;
         self.page_icon_editor = None;
         self.app_picker = None;
@@ -373,6 +384,7 @@ impl Preferences {
             self.application_picker(ui.ctx(), env);
         });
         if !self.open {
+            self.global_wallpaper = None;
             self.advanced = None;
             self.page_icon_editor = None;
             self.app_picker = None;
@@ -549,6 +561,9 @@ impl Preferences {
             if resp.clicked() {
                 self.tab = tab;
             }
+        }
+        if self.tab != Tab::Style {
+            self.global_wallpaper = None;
         }
         match self.tab {
             Tab::General => self.general(ui, origin, env),
@@ -2063,6 +2078,120 @@ impl Preferences {
         }
 
         self.key_press(ui, o, env);
+        self.global_wallpaper(ui, o, env);
+    }
+
+    /// The global wallpaper: a small picture of it, and buttons to edit or
+    /// remove it. Changes apply at once, like the key press effect.
+    fn global_wallpaper(&mut self, ui: &mut Ui, o: Pos2, env: &mut Env<'_>) {
+        let saved = runtime::lock(env.state).settings.wallpaper.clone();
+        let model = self
+            .global_wallpaper
+            .as_ref()
+            .map_or(DeviceModel::of(env.kind), |(_, model)| *model);
+        label(ui, o, 410.0, 22.0, "Global Wallpaper:");
+        let thumb = at(o, 219.0, 410.0, 96.0, 54.0);
+        self.wallpaper_thumb(ui, thumb, saved.as_ref(), model, env.renderer);
+        let edit = if saved.is_some() {
+            "Edit…"
+        } else {
+            "Choose…"
+        };
+        if button(ui, at(o, 329.0, 410.0, 72.0, 22.0), edit).clicked() {
+            self.global_wallpaper = Some((WallpaperEditor::global(), DeviceModel::of(env.kind)));
+        }
+        let mut wallpaper = saved.clone();
+        if ui
+            .add_enabled_ui(saved.is_some(), |ui| {
+                button(ui, at(o, 411.0, 410.0, 72.0, 22.0), "Remove")
+            })
+            .inner
+            .clicked()
+        {
+            wallpaper = None;
+        }
+        value_dim(
+            ui,
+            o,
+            329.0,
+            440.0,
+            380.0,
+            "Behind the keys of all profiles. A profile, page or folder can use its own or turn it off.",
+        );
+        if let Some((editor, model)) = &mut self.global_wallpaper
+            && !editor.show_global(ui.ctx(), &mut wallpaper, model, env.renderer)
+        {
+            self.global_wallpaper = None;
+        }
+        let dragging = ui.input(|i| i.pointer.any_down());
+        if wallpaper != saved {
+            set_global_wallpaper(env, wallpaper, !dragging);
+            self.global_wallpaper_unsaved = dragging;
+        } else if self.global_wallpaper_unsaved && !dragging {
+            runtime::lock(env.state).save_settings();
+            self.global_wallpaper_unsaved = false;
+        }
+    }
+
+    fn wallpaper_thumb(
+        &mut self,
+        ui: &Ui,
+        rect: Rect,
+        wallpaper: Option<&Wallpaper>,
+        model: &DeviceModel,
+        renderer: &mut Renderer,
+    ) {
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(3), KEY_EMPTY);
+        let Some(wallpaper) = wallpaper else {
+            centered_glyph(ui, rect.center(), icon::IMAGE_SQUARE, 20.0, TEXT_FAINT);
+            return;
+        };
+        let Some(src) = renderer.wallpaper(&wallpaper.image) else {
+            centered_glyph(
+                ui,
+                rect.center() - vec2(0.0, 8.0),
+                icon::WARNING,
+                18.0,
+                WARNING,
+            );
+            painter.text(
+                rect.center() + vec2(0.0, 14.0),
+                Align2::CENTER_CENTER,
+                "Cannot be read",
+                font(11.0),
+                WARNING,
+            );
+            return;
+        };
+        let (pw, ph) = model.panel_size();
+        let height = rect.width() * ph as f32 / pw.max(1) as f32;
+        let shown =
+            Rect::from_center_size(rect.center(), vec2(rect.width(), height.min(rect.height())));
+        let px = (shown.width() * ui.ctx().pixels_per_point()).round() as u32;
+        let mut h = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&(wallpaper, px, model.kind), &mut h);
+        let hash = std::hash::Hasher::finish(&h);
+        let texture = match &self.wallpaper_thumb {
+            Some((shown, texture)) if *shown == hash => texture.id(),
+            _ => {
+                let img = render::wallpaper_panel(&src, wallpaper, model, px);
+                let size = [img.width() as usize, img.height() as usize];
+                let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                let texture =
+                    ui.ctx()
+                        .load_texture("global-wallpaper", color, TextureOptions::LINEAR);
+                let id = texture.id();
+                self.wallpaper_thumb = Some((hash, texture));
+                id
+            }
+        };
+        painter.image(
+            texture,
+            shown,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
 
     /// The press effect, saved as soon as it changes.
@@ -2145,6 +2274,28 @@ impl Preferences {
             .with_texture(texture, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
         );
     }
+}
+
+/// Puts a new global wallpaper in place and on the devices. A saved change
+/// of picture deletes the pictures chosen before.
+fn set_global_wallpaper(env: &mut Env<'_>, wallpaper: Option<Wallpaper>, save: bool) {
+    let mut s = runtime::lock(env.state);
+    let new_picture =
+        s.settings.wallpaper.as_ref().map(|w| &w.image) != wallpaper.as_ref().map(|w| &w.image);
+    s.settings.wallpaper = wallpaper;
+    if save {
+        match store::save_settings(&s.settings) {
+            Ok(()) if new_picture => {
+                store::prune_global_wallpapers(
+                    s.settings.wallpaper.as_ref().map(|w| w.image.as_path()),
+                );
+            }
+            Ok(()) => {}
+            Err(e) => s.notify(format!("Cannot save settings: {e}")),
+        }
+    }
+    drop(s);
+    let _ = env.runtime.send(Msg::Settings);
 }
 
 fn finished(failed: &str, result: Result<Summary, String>) -> Job {

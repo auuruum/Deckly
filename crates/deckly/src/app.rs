@@ -18,7 +18,7 @@ use crate::runtime::{self, Msg, NOTICE_TIME, Shared};
 use crate::store;
 use crate::theme::*;
 use crate::update::{self, Method};
-use crate::wallpaper::WallpaperEditor;
+use crate::wallpaper::{Layers, WallpaperEditor};
 use deckly_core::profile::{self, MAX_FOLDER_DEPTH, MAX_GROUP_ACTIONS};
 use deckly_core::{ActionDelays, AutoExit, DeviceKind, KeyConfig, Page, Profile, TitleStyle};
 use deckly_plugin_host::{Host, Status};
@@ -1151,11 +1151,12 @@ impl App {
         if overlays.values().any(|o| o.mark.is_some()) {
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
+        let global = runtime::lock(&self.state).settings.wallpaper.clone();
         let wallpaper = view
             .shown(profile)
-            .and_then(|p| p.effective_wallpaper(profile.wallpaper.as_ref()))
-            .cloned();
-        self.wallpaper_button(ui, &geo, profile, view);
+            .and_then(|p| profile.wallpaper_of(p, global.as_ref()))
+            .map(|(w, _)| w.clone());
+        self.wallpaper_button(ui, &geo, profile, view, wallpaper.is_some());
         let Some(keys) = view.keys(profile) else {
             return;
         };
@@ -1420,6 +1421,7 @@ impl App {
         geo: &CanvasGeometry,
         profile: &Profile,
         view: &View,
+        has_wallpaper: bool,
     ) {
         let Some(page) = view.shown(profile) else {
             return;
@@ -1433,12 +1435,7 @@ impl App {
             .wallpaper_editor
             .as_ref()
             .is_some_and(|w| w.page == page.id);
-        let color = if open
-            || page
-                .effective_wallpaper(profile.wallpaper.as_ref())
-                .is_some()
-            || resp.hovered()
-        {
+        let color = if open || has_wallpaper || resp.hovered() {
             TEXT
         } else {
             TEXT_DIM
@@ -1460,13 +1457,18 @@ impl App {
         let editor = self.wallpaper_editor.as_mut()?;
         let model = profile.model();
         let page_id = editor.page.clone();
-        let (page, scope) = if editor.profile == profile.id {
-            match profile.pages.iter_mut().find(|p| p.id == page_id) {
+        let same_profile = editor.profile == profile.id;
+        let Profile {
+            wallpaper,
+            wallpaper_disabled,
+            pages,
+            folders,
+            ..
+        } = profile;
+        let (page, scope) = if same_profile {
+            match pages.iter_mut().find(|p| p.id == page_id) {
                 Some(page) => (Some(page), "Page"),
-                None => (
-                    profile.folders.iter_mut().find(|p| p.id == page_id),
-                    "Folder",
-                ),
+                None => (folders.iter_mut().find(|p| p.id == page_id), "Folder"),
             }
         } else {
             (None, "Page")
@@ -1476,14 +1478,14 @@ impl App {
             self.wallpaper_editor = None;
             return None;
         };
-        let group = editor.show(
-            ctx,
-            &mut profile.wallpaper,
+        let global = runtime::lock(&self.state).settings.wallpaper.clone();
+        let layers = Layers {
+            global: global.as_ref(),
+            profile: wallpaper,
+            profile_disabled: wallpaper_disabled,
             page,
-            scope,
-            model,
-            &mut self.renderer,
-        );
+        };
+        let group = editor.show(ctx, layers, scope, model, &mut self.renderer);
         if group.is_none() {
             self.wallpaper_editor = None;
         }
@@ -2201,10 +2203,11 @@ impl App {
             })
         });
         let model = profile.model();
+        let global = runtime::lock(&self.state).settings.wallpaper.clone();
         let wallpaper = view
             .shown(profile)
-            .and_then(|p| p.effective_wallpaper(profile.wallpaper.as_ref()))
-            .cloned()
+            .and_then(|p| profile.wallpaper_of(p, global.as_ref()))
+            .map(|(w, _)| w.clone())
             .filter(|_| top_level);
         let Some(key) = edited_key(profile, view, index, group) else {
             self.app_picker = None;
