@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 const MAX_SETTINGS_BYTES: u64 = 4 * 1024 * 1024;
 
 pub fn config_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return Some(test_root());
+    }
     let env = |name| {
         std::env::var_os(name)
             .filter(|v| !v.is_empty())
@@ -42,6 +45,9 @@ pub fn data_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
     };
+    if cfg!(test) {
+        return Some(test_root().join("data"));
+    }
     if let Some(dir) = env("DECKLY_CONFIG_DIR") {
         return Some(dir.join("data"));
     }
@@ -52,6 +58,39 @@ pub fn data_dir() -> Option<PathBuf> {
     } else {
         let base = env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?;
         Some(base.join("deckly"))
+    }
+}
+
+/// Unit tests never read or write the user's real Deckly folders: every path
+/// above points into one throwaway folder per test process instead. Folders
+/// left by earlier test runs are removed when the next run starts.
+fn test_root() -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let parent = std::env::temp_dir().join("deckly-tests");
+        sweep_old_test_roots(&parent);
+        parent.join(std::process::id().to_string())
+    })
+    .clone()
+}
+
+/// Removes test folders untouched for an hour. A test run takes minutes, so
+/// such a folder belongs to a run that has finished.
+fn sweep_old_test_roots(parent: &Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -394,6 +433,31 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: a plugin-host test saved a profile named "Test" into the
+    // user's real configuration folder on every `cargo test`.
+    #[test]
+    fn tests_never_use_the_real_folders() {
+        let root = std::env::temp_dir().join("deckly-tests");
+        let config = config_dir().unwrap();
+        let data = data_dir().unwrap();
+        assert!(config.starts_with(&root), "{config:?}");
+        assert!(data.starts_with(&config), "{data:?}");
+        let profile = Profile::new("Test", deckly_core::DeviceKind::Mk2);
+        save_profile(&profile).unwrap();
+        assert!(profile_path(&profile.id).unwrap().starts_with(&root));
+        delete_profile(&profile.id).unwrap();
+    }
+
+    #[test]
+    fn old_test_folders_are_swept() {
+        let parent = std::env::temp_dir().join(format!("deckly-sweep-{}", uuid::Uuid::new_v4()));
+        let fresh = parent.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        sweep_old_test_roots(&parent);
+        assert!(fresh.exists());
+        let _ = std::fs::remove_dir_all(&parent);
+    }
 
     #[test]
     fn a_duplicate_owns_page_folder_and_nested_action_pictures() {
