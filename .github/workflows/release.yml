@@ -99,7 +99,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## /{p=index($0,"## " v " ")==1; next} p' CHANGELOG.md > dist/notes.md
+          if [ -s dist/notes.md ]; then notes="--notes-file dist/notes.md"; else notes="--generate-notes"; fi
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
-            --title "Deckly $GITHUB_REF_NAME" --generate-notes \
+            --title "Deckly $GITHUB_REF_NAME" $notes \
             dist/deckly-*.tar.gz dist/deckly-*.zip dist/deckly-setup-windows-x64.exe dist/SHA256SUMS \
             dist/packages/deckly.rb dist/aur-deckly-bin.tar.gz
