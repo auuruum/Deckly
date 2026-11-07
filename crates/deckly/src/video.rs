@@ -28,33 +28,17 @@ fn demuxer(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn ffmpeg() -> Result<PathBuf, String> {
-    let name = if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
-    std::env::var_os("PATH")
-        .and_then(|paths| {
-            std::env::split_paths(&paths)
-                .filter(|dir| dir.is_absolute())
-                .map(|dir| dir.join(name))
-                .find(|file| file.is_file())
-        })
-        .ok_or_else(|| "Video import requires FFmpeg 7 or newer on Deckly's PATH.".into())
-}
-
-pub fn import(path: &Path, profile: &str) -> Result<PathBuf, String> {
+/// Converts `path` with the FFmpeg at `exe`, found by `ffmpeg::locate`.
+pub fn import(path: &Path, profile: &str, exe: &Path) -> Result<PathBuf, String> {
     let _slot = CONVERTING
         .try_lock()
         .map_err(|_| "A video is already being converted. Try again when it finishes.")?;
     let format = demuxer(path).ok_or("Choose an MP4, MOV, WebM or MKV video.")?;
-    let exe = ffmpeg()?;
     let output = tempfile::Builder::new()
         .suffix(".apng")
         .tempfile()
         .map_err(|e| format!("Cannot create a temporary file for the video: {e}"))?;
-    convert(&exe, path, format, output.as_file())?;
+    convert(exe, path, format, output.as_file())?;
     if animation::decode(output.path())
         .map_err(|e| format!("Cannot read the converted video: {e}"))?
         .is_none()
@@ -202,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires FFmpeg with MPEG-4 and VP9 encoders on PATH"]
+    #[ignore = "requires FFmpeg 7+ with MPEG-4 and VP9 encoders"]
     fn ffmpeg_converts_mp4_and_webm_to_bounded_playable_apng_and_rejects_garbage() {
-        let exe = ffmpeg().unwrap();
+        let exe = crate::ffmpeg::locate(None).unwrap().path;
         let dir = tempfile::tempdir().unwrap();
         for (name, codec) in [("clip.mp4", "mpeg4"), ("clip.webm", "libvpx-vp9")] {
             let path = dir.path().join(name);

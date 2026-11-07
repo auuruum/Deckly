@@ -213,7 +213,8 @@ impl Editor {
         false
     }
 
-    pub fn upload_video(&mut self, ctx: &egui::Context, profile: &str) -> bool {
+    /// Asks for a video and converts it with the FFmpeg at `ffmpeg`.
+    pub fn upload_video(&mut self, ctx: &egui::Context, profile: &str, ffmpeg: PathBuf) -> bool {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Import a video for this key")
             .add_filter("Videos", crate::video::EXTENSIONS)
@@ -225,7 +226,7 @@ impl Editor {
         self.mode = Mode::Video;
         self.saving = true;
         self.start(ctx, move || {
-            crate::video::import(&path, &profile).map(Work::Saved)
+            crate::video::import(&path, &profile, &ffmpeg).map(Work::Saved)
         });
         true
     }

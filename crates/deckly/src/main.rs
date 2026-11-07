@@ -12,6 +12,7 @@ mod background;
 mod backup;
 mod clipboard;
 mod cropper;
+mod ffmpeg;
 mod fonts;
 mod history;
 mod image_editor;
@@ -30,6 +31,7 @@ mod theme;
 mod transfer;
 mod update;
 mod video;
+mod video_setup;
 mod wallpaper;
 
 fn main() -> eframe::Result {
