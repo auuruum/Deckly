@@ -63,9 +63,14 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub device: DeviceKind,
-    /// Default for pages and folders without a wallpaper override.
+    /// Default for pages and folders without a wallpaper override. `None`
+    /// follows the global wallpaper in the settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<Wallpaper>,
+    /// An explicit choice to leave this profile without the global
+    /// wallpaper. Its pages and folders can still have their own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wallpaper_disabled: bool,
     pub pages: Vec<Page>,
     /// Folders, each one page of keys opened by a folder key. Only folders
     /// that a key leads to are kept.
@@ -197,7 +202,7 @@ impl Wallpaper {
         self.y = self.y.min(Self::END);
     }
 
-    fn sanitize_optional(wallpaper: &mut Option<Self>) {
+    pub(crate) fn sanitize_optional(wallpaper: &mut Option<Self>) {
         if let Some(wall) = wallpaper {
             if wall.image.as_os_str().is_empty() {
                 *wallpaper = None;
@@ -215,6 +220,55 @@ impl Wallpaper {
                 Some(image) => wall.image = image,
                 None => *wallpaper = None,
             }
+        }
+    }
+}
+
+/// What one level of the wallpaper chain says: the profile, or a page or
+/// folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallpaperChoice<'a> {
+    /// Use what the level above shows.
+    Inherit,
+    /// Use this picture.
+    Own(&'a Wallpaper),
+    /// Show no wallpaper, whatever the levels above have.
+    Off,
+}
+
+impl<'a> WallpaperChoice<'a> {
+    fn of(wallpaper: Option<&'a Wallpaper>, disabled: bool) -> Self {
+        match (disabled, wallpaper) {
+            (true, _) => Self::Off,
+            (false, Some(wallpaper)) => Self::Own(wallpaper),
+            (false, None) => Self::Inherit,
+        }
+    }
+}
+
+/// The level a shown wallpaper comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallpaperLevel {
+    Global,
+    Profile,
+    /// The page or folder itself.
+    Local,
+}
+
+/// The wallpaper a page or folder shows. The nearest level that says
+/// something wins: the page or folder, then its profile, then the global
+/// wallpaper. `Off` on a level hides the levels above it.
+pub fn resolve_wallpaper<'a>(
+    global: Option<&'a Wallpaper>,
+    profile: WallpaperChoice<'a>,
+    local: WallpaperChoice<'a>,
+) -> Option<(&'a Wallpaper, WallpaperLevel)> {
+    match (local, profile) {
+        (WallpaperChoice::Own(w), _) => Some((w, WallpaperLevel::Local)),
+        (WallpaperChoice::Off, _) | (WallpaperChoice::Inherit, WallpaperChoice::Off) => None,
+        (WallpaperChoice::Inherit, WallpaperChoice::Own(w)) => Some((w, WallpaperLevel::Profile)),
+        (WallpaperChoice::Inherit, WallpaperChoice::Inherit) => {
+            global.map(|w| (w, WallpaperLevel::Global))
         }
     }
 }
@@ -406,15 +460,9 @@ impl Page {
         }
     }
 
-    pub fn effective_wallpaper<'a>(
-        &'a self,
-        default: Option<&'a Wallpaper>,
-    ) -> Option<&'a Wallpaper> {
-        if self.wallpaper_disabled {
-            None
-        } else {
-            self.wallpaper.as_ref().or(default)
-        }
+    /// What this page or folder says about its wallpaper.
+    pub fn wallpaper_choice(&self) -> WallpaperChoice<'_> {
+        WallpaperChoice::of(self.wallpaper.as_ref(), self.wallpaper_disabled)
     }
 
     /// The name people see for the page at `index`.
@@ -514,6 +562,7 @@ impl Profile {
             name: name.into(),
             device,
             wallpaper: None,
+            wallpaper_disabled: false,
             pages: vec![Page::new()],
             folders: Vec::new(),
             applications: Vec::new(),
@@ -629,6 +678,21 @@ impl Profile {
         self.folders.iter_mut().find(|f| f.id == id)
     }
 
+    /// What the profile says about the wallpaper of its pages and folders.
+    pub fn wallpaper_choice(&self) -> WallpaperChoice<'_> {
+        WallpaperChoice::of(self.wallpaper.as_ref(), self.wallpaper_disabled)
+    }
+
+    /// The wallpaper `page`, one of this profile's pages or folders, shows
+    /// under `global`, and where it comes from.
+    pub fn wallpaper_of<'a>(
+        &'a self,
+        page: &'a Page,
+        global: Option<&'a Wallpaper>,
+    ) -> Option<(&'a Wallpaper, WallpaperLevel)> {
+        resolve_wallpaper(global, self.wallpaper_choice(), page.wallpaper_choice())
+    }
+
     /// Visits every key on pages and in folders, and every action a key holds.
     pub fn for_each_key(&mut self, mut visit: impl FnMut(&mut KeyConfig)) {
         for page in self.pages.iter_mut().chain(&mut self.folders) {
@@ -656,6 +720,7 @@ impl Profile {
             && self.folders.is_empty()
             && self.applications.is_empty()
             && self.wallpaper.is_none()
+            && !self.wallpaper_disabled
             && matches!(self.pages.as_slice(), [page]
                 if page.keys.is_empty()
                     && page.name.is_empty()
@@ -701,6 +766,9 @@ impl Profile {
     /// of the app can rely on them.
     pub fn sanitize(&mut self) {
         let key_count = self.model().key_count();
+        if self.wallpaper_disabled {
+            self.wallpaper = None;
+        }
         Wallpaper::sanitize_optional(&mut self.wallpaper);
         self.pages.truncate(MAX_PAGES);
         if self.pages.is_empty() {
@@ -1211,24 +1279,97 @@ mod tests {
             .keys
             .insert(0, KeyConfig::new(FOLDER_ACTION, serde_json::json!({})));
         p.normalize_folders();
-        assert_eq!(
-            p.folders[0].effective_wallpaper(p.wallpaper.as_ref()),
-            Some(&default)
-        );
+        let shown = |p: &Profile, page: &Page| p.wallpaper_of(page, None).map(|(w, _)| w.clone());
+        assert_eq!(shown(&p, &p.folders[0]), Some(default.clone()));
         p.folders[0].wallpaper = Some(local.clone());
         let p = Profile::from_json(&p.to_json().unwrap()).unwrap();
-        assert_eq!(
-            p.pages[0].effective_wallpaper(p.wallpaper.as_ref()),
-            Some(&default)
-        );
-        assert_eq!(p.pages[1].effective_wallpaper(p.wallpaper.as_ref()), None);
-        assert_eq!(
-            p.folders[0].effective_wallpaper(p.wallpaper.as_ref()),
-            Some(&local)
-        );
+        assert_eq!(shown(&p, &p.pages[0]), Some(default));
+        assert_eq!(shown(&p, &p.pages[1]), None);
+        assert_eq!(shown(&p, &p.folders[0]), Some(local));
         let mut disabled = p.folders[0].clone();
         disabled.wallpaper_disabled = true;
-        assert_eq!(disabled.effective_wallpaper(p.wallpaper.as_ref()), None);
+        assert_eq!(shown(&p, &disabled), None);
+    }
+
+    #[test]
+    fn the_nearest_wallpaper_setting_wins() {
+        use WallpaperChoice::{Inherit, Off, Own};
+        use WallpaperLevel::{Global, Local, Profile as FromProfile};
+        let g = Wallpaper::new("global.png".into());
+        let p = Wallpaper::new("profile.png".into());
+        let l = Wallpaper::new("local.png".into());
+        let profiles = [Inherit, Own(&p), Off];
+        let locals = [Inherit, Own(&l), Off];
+        for global in [None, Some(&g)] {
+            for profile in profiles {
+                for local in locals {
+                    let expected = match (local, profile) {
+                        (Own(w), _) => Some((w, Local)),
+                        (Off, _) | (Inherit, Off) => None,
+                        (Inherit, Own(w)) => Some((w, FromProfile)),
+                        (Inherit, Inherit) => global.map(|w| (w, Global)),
+                    };
+                    assert_eq!(
+                        resolve_wallpaper(global, profile, local),
+                        expected,
+                        "global {global:?}, profile {profile:?}, local {local:?}"
+                    );
+                }
+            }
+        }
+        // Spelled out: inheriting all the way up reaches the global picture.
+        assert_eq!(
+            resolve_wallpaper(Some(&g), Inherit, Inherit),
+            Some((&g, Global))
+        );
+        // A profile that opts out hides the global picture, but its pages
+        // can still have their own.
+        assert_eq!(resolve_wallpaper(Some(&g), Off, Inherit), None);
+        assert_eq!(resolve_wallpaper(Some(&g), Off, Own(&l)), Some((&l, Local)));
+        // A page that opts out hides both levels above it.
+        assert_eq!(resolve_wallpaper(Some(&g), Own(&p), Off), None);
+        // Without a global picture, inheriting shows nothing.
+        assert_eq!(resolve_wallpaper(None, Inherit, Inherit), None);
+    }
+
+    #[test]
+    fn profiles_follow_the_global_wallpaper_unless_they_opt_out() {
+        let global = Wallpaper::new("global.png".into());
+        let mut p = Profile::new("x", DeviceKind::Mk2);
+        p.add_page();
+        p.pages[1].wallpaper = Some(Wallpaper::new("own.png".into()));
+        let level = |p: &Profile, i: usize| p.wallpaper_of(&p.pages[i], Some(&global)).map(|w| w.1);
+        assert_eq!(level(&p, 0), Some(WallpaperLevel::Global));
+        assert_eq!(level(&p, 1), Some(WallpaperLevel::Local));
+        p.wallpaper_disabled = true;
+        // Saved and loaded back, the opt-out holds.
+        let text = p.to_json().unwrap();
+        assert!(text.contains(r#""wallpaper_disabled": true"#));
+        let p = Profile::from_json(&text).unwrap();
+        assert!(p.wallpaper_disabled);
+        assert_eq!(level(&p, 0), None);
+        assert_eq!(level(&p, 1), Some(WallpaperLevel::Local));
+        assert!(!p.is_placeholder());
+    }
+
+    #[test]
+    fn older_profiles_follow_the_global_wallpaper() {
+        let text = r#"{"id":"a","name":"x","device":"mk2",
+            "wallpaper":{"image":"w.png"},"pages":[{"id":"p","keys":{}}]}"#;
+        let p = Profile::from_json(text).unwrap();
+        assert!(!p.wallpaper_disabled);
+        assert_eq!(
+            p.wallpaper_choice(),
+            WallpaperChoice::Own(&Wallpaper::new("w.png".into()))
+        );
+        // An opt-out leaves no picture behind on load.
+        let text = r#"{"id":"a","name":"x","device":"mk2","wallpaper_disabled":true,
+            "wallpaper":{"image":"w.png"},"pages":[{"id":"p","keys":{}}]}"#;
+        let p = Profile::from_json(text).unwrap();
+        assert_eq!(p.wallpaper, None);
+        assert_eq!(p.wallpaper_choice(), WallpaperChoice::Off);
+        let fresh = Profile::new("x", DeviceKind::Mk2);
+        assert!(!fresh.to_json().unwrap().contains("wallpaper"));
     }
 
     #[test]
