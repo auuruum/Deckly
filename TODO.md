@@ -62,6 +62,25 @@ Planned features, chosen by the project owner on 2026-11-02.
 - [x] Animated keys: import a video through FFmpeg 7+ on PATH. Deckly saves
       up to ten seconds as a looping, silent APNG that plays without FFmpeg.
 - [ ] Offer video import without requiring a separate FFmpeg installation.
+      A "Turn on video import" window shown when FFmpeg 7+ is missing:
+      - Install through the system: run the package manager (`apt`, `dnf`,
+        `pacman`, `zypper`, `winget`, `brew`) with elevation by the OS itself
+        (`pkexec` on Linux, UAC on Windows). The OS draws the password
+        window; Deckly never asks for or sees a password. Show the exact
+        command first and the live output after. Offer it only when the
+        repository has FFmpeg 7+ (not Fedora's `ffmpeg-free`, which lacks
+        H.264) and `pkexec` exists.
+      - Copy the command, for people who want to run it themselves.
+      - Download for Deckly: fetch an LGPL FFmpeg build into Deckly's data
+        folder, SHA-256 pinned, run as a separate process. Needs no
+        administrator rights and works everywhere, so it is the fallback when
+        the repository version is too old or `pkexec` is missing, and likely
+        the main path on Windows and macOS. Only after a click, with source
+        and size shown.
+      - Choose the path of an existing `ffmpeg`.
+      Lookup order: the path from Preferences, Deckly's own copy, then PATH.
+      After any route, re-check `ffmpeg -version` and explain a version below 7.
+      Open: which build source per system, and how the pinned hashes are updated.
 - [x] Wallpaper across all keys.
       Done: the button beside the page strip spreads one picture over the
       keys of a page or folder, gaps included; drag and zoom to place it.
