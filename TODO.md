@@ -128,6 +128,26 @@ A static registry, with no server or accounts.
 - [ ] List only what the license or the author allows. Take nothing from
       Elgato's marketplace.
 
+### Alternatives to plugins Deckly cannot import
+
+Some plugins (for example BarRaider's) cannot be imported: their package is
+protected, so Deckly cannot read the manifest, and some others do not run for
+other reasons. Once the SDK and the marketplace exist, Deckly answers with its
+own plugin instead of a dead end.
+
+- [ ] Write Deckly's own Rust alternatives to the popular plugins that do not
+      import, with the same features, faster and the same on every system.
+      Build each one clean-room: from its public documentation, its store
+      page, its visible behavior and its source where the license allows
+      reading it. Never from protected or decrypted files, and never by
+      copying code or assets. Log each one in `docs/clean-room/`.
+- [ ] When an import skips a protected plugin, say so plainly ("this plugin is
+      protected, so Deckly cannot import it") and offer the matching Deckly
+      alternative from the marketplace, if there is one. Map the keys that used
+      it to the alternative's actions where the settings line up.
+- [ ] Keep a list of the known unimportable plugins and their alternatives in
+      the registry, so the import window can look it up.
+
 ## Lower priority
 
 - [ ] Conditions in Multi Actions: if window X is open, do Y.
