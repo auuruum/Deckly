@@ -1,4 +1,6 @@
-//! Plugin manifests (`manifest.json` in a `<uuid>.sdPlugin` folder).
+//! Plugin manifests (`manifest.json` in a `<uuid>.sdPlugin` folder). Deckly
+//! plugins (`deckly-plugin.json`) are read in `crate::pipe` and described
+//! with the same types.
 //!
 //! Manifests come from third parties and are read leniently: a field with an
 //! unexpected type reads as missing instead of rejecting the plugin, and
@@ -42,6 +44,9 @@ pub struct Manifest {
     /// files in its folder.
     pub profiles: Vec<String>,
     pub actions: Vec<Action>,
+    /// Set for a Deckly plugin (`deckly-plugin.json`), which runs over pipes
+    /// instead of the Stream Deck protocol; see `crate::pipe`.
+    pub deckly: Option<std::sync::Arc<deckly_plugin_protocol::Manifest>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -203,7 +208,17 @@ impl Manifest {
                 })
                 .unwrap_or_default(),
             actions,
+            deckly: None,
         })
+    }
+
+    /// The name of the folder the plugin is installed in.
+    pub fn folder_name(&self) -> String {
+        if self.deckly.is_some() {
+            self.uuid.clone()
+        } else {
+            format!("{}.sdPlugin", self.uuid)
+        }
     }
 
     /// The name the action list groups this plugin's actions under.

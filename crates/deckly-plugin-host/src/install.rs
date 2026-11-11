@@ -1,6 +1,7 @@
 //! Installing plugins: `.streamDeckPlugin` archives (zip files holding one
 //! `<uuid>.sdPlugin` folder), zip downloads holding either, and plain
-//! plugin folders.
+//! plugin folders, including Deckly plugin folders (`<id>` holding a
+//! `deckly-plugin.json`).
 //!
 //! Archives are untrusted: entry names must stay inside the target folder and
 //! sizes and counts are bounded. Files are unpacked into a staging folder
@@ -69,13 +70,17 @@ fn staging_root(plugins_dir: &Path) -> io::Result<TempDir> {
 }
 
 fn staged(root: TempDir, dir: PathBuf) -> Result<Staged, InstallError> {
-    let manifest = Manifest::load(&dir).map_err(InstallError::Manifest)?;
-    if manifest.offers_nothing() {
+    let manifest = if crate::pipe::is_plugin_dir(&dir) {
+        crate::pipe::load(&dir).map_err(InstallError::NotAPlugin)?
+    } else {
+        Manifest::load(&dir).map_err(InstallError::Manifest)?
+    };
+    if manifest.deckly.is_none() && manifest.offers_nothing() {
         return Err(InstallError::NotAPlugin(
             "it has no actions and no code Deckly can use".into(),
         ));
     }
-    let expected = format!("{}.sdPlugin", manifest.uuid);
+    let expected = manifest.folder_name();
     if dir.file_name().and_then(|n| n.to_str()) != Some(expected.as_str()) {
         return Err(InstallError::NotAPlugin(format!(
             "the plugin folder should be named {expected}"
@@ -209,6 +214,15 @@ fn unpack(archive: &Path, plugins_dir: &Path, open_inner: bool) -> Result<Staged
 /// Copies a `<uuid>.sdPlugin` folder, or the one such folder inside `src`
 /// (an unpacked download), into a staging folder.
 pub fn stage_folder(src: &Path, plugins_dir: &Path) -> Result<Staged, InstallError> {
+    if crate::pipe::is_plugin_dir(src) {
+        // A Deckly plugin folder is copied under its plugin id.
+        let manifest = crate::pipe::load(src).map_err(InstallError::NotAPlugin)?;
+        let root = staging_root(plugins_dir)?;
+        let dir = root.0.join(manifest.folder_name());
+        let mut budget = (MAX_TOTAL_BYTES, MAX_FILES);
+        copy_dir(src, &dir, &mut budget, 0)?;
+        return staged(root, dir);
+    }
     let Some(name) = src
         .file_name()
         .and_then(|n| n.to_str())
@@ -269,7 +283,7 @@ fn copy_dir(
 /// The running plugin must be stopped first. Returns the plugin id.
 pub fn commit(staged: Staged, plugins_dir: &Path) -> Result<String, InstallError> {
     let uuid = staged.manifest.uuid.clone();
-    let target = plugins_dir.join(format!("{uuid}.sdPlugin"));
+    let target = plugins_dir.join(staged.manifest.folder_name());
     if target.exists() {
         remove(plugins_dir, &uuid)?;
     }
@@ -289,7 +303,13 @@ pub fn remove(plugins_dir: &Path, uuid: &str) -> Result<(), InstallError> {
     if !crate::manifest::valid_uuid(uuid) {
         return Err(InstallError::NotAPlugin(format!("bad plugin id {uuid}")));
     }
-    let dir = plugins_dir.join(format!("{uuid}.sdPlugin"));
+    let stream_deck = plugins_dir.join(format!("{uuid}.sdPlugin"));
+    let deckly = plugins_dir.join(uuid);
+    let dir = if !stream_deck.exists() && crate::pipe::is_plugin_dir(&deckly) {
+        deckly
+    } else {
+        stream_deck
+    };
     let trash = plugins_dir.join(format!(".trash-{}", uuid::Uuid::new_v4().simple()));
     retry(|| std::fs::rename(&dir, &trash))?;
     std::fs::remove_dir_all(&trash)?;
@@ -448,6 +468,31 @@ mod tests {
         commit(stage_folder(&dir.join("src"), &plugins).unwrap(), &plugins).unwrap();
         std::fs::create_dir_all(dir.join("src/com.other.sdPlugin")).unwrap();
         assert!(stage_folder(&dir.join("src"), &plugins).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn installs_and_removes_a_deckly_plugin_folder() {
+        let dir = temp("deckly-folder");
+        let plugins = dir.join("plugins");
+        // The source folder may have any name; it is installed by its id.
+        let src = dir.join("build/counter");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&plugins).unwrap();
+        let manifest = br#"{"id":"com.example.c","name":"C","version":"1","protocol":1,
+            "programs":{"x86_64-unknown-linux-gnu":"c"}}"#;
+        std::fs::write(src.join("deckly-plugin.json"), manifest).unwrap();
+        std::fs::write(src.join("c"), b"x").unwrap();
+        let staged = stage_folder(&src, &plugins).unwrap();
+        assert!(staged.manifest.deckly.is_some());
+        assert_eq!(commit(staged, &plugins).unwrap(), "com.example.c");
+        assert!(plugins.join("com.example.c/c").is_file());
+        // Again, replacing the installed copy.
+        commit(stage_folder(&src, &plugins).unwrap(), &plugins).unwrap();
+        remove(&plugins, "com.example.c").unwrap();
+        assert!(!plugins.join("com.example.c").exists());
+        std::fs::write(src.join("deckly-plugin.json"), b"{\"id\":\"../x\"}").unwrap();
+        assert!(stage_folder(&src, &plugins).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

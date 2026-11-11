@@ -15,4 +15,5 @@ serde.workspace = true
 workspace = true
 
 [dev-dependencies]
+deckly-plugin-host.workspace = true
 serde_json.workspace = true

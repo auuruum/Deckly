@@ -1,4 +1,4 @@
-//! Messages of the plugin protocol (docs/clean-room/2026-10-28-plugin-host.md):
+//! Messages of the Stream Deck plugin protocol (docs/clean-room/2026-10-28-plugin-host.md):
 //! parsing commands from plugins and property inspectors, and building the
 //! events sent to them. Pure functions, no I/O.
 
@@ -65,6 +65,18 @@ pub enum Command {
         device: String,
         profile: Option<String>,
         page: Option<usize>,
+    },
+    /// A face drawn by the host (Deckly plugins); `None` clears it.
+    SetFace {
+        context: String,
+        face: Option<deckly_plugin_protocol::Face>,
+    },
+    /// Image bytes sent as a blob (Deckly plugins).
+    SetImageData {
+        context: String,
+        format: deckly_plugin_protocol::ImageFormat,
+        data: Vec<u8>,
+        state: Option<usize>,
     },
     /// A command Deckly does not handle (yet), by event name.
     Other(String),

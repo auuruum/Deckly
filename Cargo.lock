@@ -887,6 +887,7 @@ dependencies = [
 name = "counter-plugin"
 version = "0.1.0"
 dependencies = [
+ "deckly-plugin-host",
  "deckly-sdk",
  "serde",
  "serde_json",
@@ -1079,6 +1080,7 @@ dependencies = [
 name = "deckly-plugin-host"
 version = "0.0.4"
 dependencies = [
+ "deckly-plugin-protocol",
  "serde_json",
  "sha2",
  "tungstenite",
