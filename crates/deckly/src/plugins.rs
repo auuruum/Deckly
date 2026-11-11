@@ -15,7 +15,7 @@ use crate::store;
 use deckly_core::{DeviceKind, FeedbackMarks, KeyConfig, MarkStyle, Page};
 use deckly_device::ConnectedDevice;
 use deckly_plugin_host::manifest::{image_file, safe_join};
-use deckly_plugin_host::{Command, Host, HostEvent, Instance, Status, protocol};
+use deckly_plugin_host::{Command, Face, Host, HostEvent, ImageFormat, Instance, Status, protocol};
 use image::RgbaImage;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -73,6 +73,21 @@ pub struct Overlay {
     pub mark: Option<Mark>,
     /// The page a Go to Page key leads to.
     pub page: Option<PageTile>,
+    /// What a Deckly plugin asked to draw on the key.
+    pub face: Option<Arc<ShownFace>>,
+}
+
+/// A face a Deckly plugin shows, with its icon decoded.
+pub struct ShownFace {
+    pub face: Face,
+    pub icon: Option<Image>,
+}
+
+impl Hash for ShownFace {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.face.hash(h);
+        self.icon.as_ref().map(|i| i.id).hash(h);
+    }
 }
 
 /// What a Go to Page key's picture shows of its page.
@@ -90,6 +105,7 @@ impl Hash for Overlay {
         self.image.as_ref().map(|i| i.id).hash(h);
         self.title.hash(h);
         self.page.hash(h);
+        self.face.hash(h);
     }
 }
 
@@ -152,6 +168,7 @@ pub struct PluginKey {
     pub titles: Vec<Option<String>>,
     pub images: Vec<Option<Image>>,
     pub mark: Option<(Mark, Instant)>,
+    pub face: Option<Arc<ShownFace>>,
 }
 
 /// The id a plugin knows a placed key by.
@@ -240,10 +257,13 @@ impl State {
             .map_or(0, |l| l.state)
             .min(action.states.len().saturating_sub(1));
         let def = action.states.get(state);
+        let face = live.and_then(|l| l.face.clone());
+        // A face replaces the manifest's pictures; an image the plugin
+        // sent still shows under it.
         let image = live
             .and_then(|l| l.images.get(state).cloned().flatten())
-            .or_else(|| def.and_then(|d| d.image.clone()))
-            .or_else(|| action.icon.clone());
+            .or_else(|| face.is_none().then(|| def.and_then(|d| d.image.clone()))?)
+            .or_else(|| face.is_none().then(|| action.icon.clone())?);
         let title = live
             .and_then(|l| l.titles.get(state).cloned().flatten())
             .or_else(|| def.map(|d| d.title.clone()).filter(|t| !t.is_empty()));
@@ -251,6 +271,7 @@ impl State {
             image,
             title,
             mark,
+            face,
             ..Overlay::default()
         })
     }
@@ -437,6 +458,7 @@ pub fn start(
             runtime,
             host,
             repaint,
+            face_icons: HashMap::new(),
         };
         worker.rebuild_catalog();
         while let Ok(event) = events.recv() {
@@ -456,7 +478,12 @@ struct Worker {
     runtime: Sender<Msg>,
     host: Host,
     repaint: Repaint,
+    /// Face icons by plugin and path, decoded once.
+    face_icons: HashMap<(String, String), Option<Image>>,
 }
+
+/// Face icons kept decoded; more start the cache over.
+const MAX_FACE_ICONS: usize = 256;
 
 impl Worker {
     fn redraw(&self) {
@@ -619,6 +646,55 @@ impl Worker {
                 drop(s);
                 self.redraw();
             }
+            Command::SetImageData {
+                context,
+                format,
+                data,
+                state,
+            } => {
+                if runtime::lock(&self.state)
+                    .own_key(plugin, &context)
+                    .is_none()
+                {
+                    return;
+                }
+                let image = match decode_image_data(format, data) {
+                    Ok(img) => key_image(img),
+                    Err(e) => {
+                        self.log(plugin, &format!("set_image: {e}"));
+                        return;
+                    }
+                };
+                let mut s = runtime::lock(&self.state);
+                let Some(key) = s.own_key(plugin, &context) else {
+                    return;
+                };
+                let n = s.states_of(&key);
+                let k = s.plugin_key(&context, n);
+                set_for_states(&mut k.images, state, Some(image));
+                drop(s);
+                self.redraw();
+            }
+            Command::SetFace { context, face } => {
+                if runtime::lock(&self.state)
+                    .own_key(plugin, &context)
+                    .is_none()
+                {
+                    return;
+                }
+                let shown = face.map(|face| {
+                    let icon = face.icon.as_deref().and_then(|p| self.face_icon(plugin, p));
+                    Arc::new(ShownFace { face, icon })
+                });
+                let mut s = runtime::lock(&self.state);
+                let Some(key) = s.own_key(plugin, &context) else {
+                    return;
+                };
+                let n = s.states_of(&key);
+                s.plugin_key(&context, n).face = shown;
+                drop(s);
+                self.redraw();
+            }
             Command::SetState { context, state } => {
                 let mut s = runtime::lock(&self.state);
                 let Some(key) = s.own_key(plugin, &context) else {
@@ -772,6 +848,26 @@ impl Worker {
             .catalog
             .action(action)
             .is_some_and(|(p, _)| p.id == plugin)
+    }
+
+    /// A face icon from the plugin's folder, decoded once.
+    fn face_icon(&mut self, plugin: &str, path: &str) -> Option<Image> {
+        let id = (plugin.to_owned(), path.to_owned());
+        if let Some(icon) = self.face_icons.get(&id) {
+            return icon.clone();
+        }
+        let icon = self
+            .plugin_dir(plugin)
+            .and_then(|dir| load_file_image(&dir, path))
+            .map(key_image);
+        if icon.is_none() {
+            self.log(plugin, &format!("face icon {path} cannot be read"));
+        }
+        if self.face_icons.len() >= MAX_FACE_ICONS {
+            self.face_icons.clear();
+        }
+        self.face_icons.insert(id, icon.clone());
+        icon
     }
 
     fn plugin_dir(&self, plugin: &str) -> Option<PathBuf> {
@@ -937,6 +1033,33 @@ pub fn decode_plugin_image(data: &str, dir: &Path) -> Result<RgbaImage, String> 
             return Err("image is too large".into());
         }
         Ok(img.into_rgba8())
+    }
+}
+
+/// Decodes image bytes a Deckly plugin sent as a blob.
+fn decode_image_data(format: ImageFormat, data: Vec<u8>) -> Result<RgbaImage, String> {
+    match format {
+        ImageFormat::Svg => render_svg(&data),
+        ImageFormat::Rgba { width, height } => {
+            RgbaImage::from_raw(width, height, data).ok_or_else(|| "wrong raw image size".into())
+        }
+        ImageFormat::Png | ImageFormat::Jpeg => {
+            let kind = if format == ImageFormat::Png {
+                image::ImageFormat::Png
+            } else {
+                image::ImageFormat::Jpeg
+            };
+            let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), kind);
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(2048);
+            limits.max_image_height = Some(2048);
+            limits.max_alloc = Some(64 * 1024 * 1024);
+            reader.limits(limits);
+            reader
+                .decode()
+                .map(|img| img.into_rgba8())
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -1130,6 +1253,44 @@ mod tests {
         assert_eq!(base64("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64("aGVs\nbG8").unwrap(), b"hello");
         assert_eq!(percent_decode("a%20b%zz"), b"a b%zz");
+    }
+
+    #[test]
+    fn image_blobs_decode_by_their_format() {
+        let rgba = decode_image_data(
+            ImageFormat::Rgba {
+                width: 2,
+                height: 1,
+            },
+            vec![9; 8],
+        )
+        .unwrap();
+        assert_eq!(rgba.dimensions(), (2, 1));
+        assert!(
+            decode_image_data(
+                ImageFormat::Rgba {
+                    width: 2,
+                    height: 2
+                },
+                vec![9; 8]
+            )
+            .is_err()
+        );
+        let mut png = Vec::new();
+        RgbaImage::from_pixel(3, 4, image::Rgba([1, 2, 3, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(
+            decode_image_data(ImageFormat::Png, png.clone())
+                .unwrap()
+                .dimensions(),
+            (3, 4)
+        );
+        // Bytes that do not match the format are an error, not a crash.
+        assert!(decode_image_data(ImageFormat::Jpeg, png).is_err());
+        assert!(decode_image_data(ImageFormat::Png, b"junk".to_vec()).is_err());
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><rect width="4" height="4" fill="red"/></svg>"#;
+        assert!(decode_image_data(ImageFormat::Svg, svg.to_vec()).is_ok());
     }
 
     #[test]
