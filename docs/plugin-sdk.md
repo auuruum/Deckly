@@ -19,7 +19,8 @@ confirmation and may change.
 - The marketplace is part of this work, not a later project. Its index is
   signed; the signing key is a secret of the organization's CI.
 - Plugin secrets (an OBS password) are stored in the system's own secret
-  store.
+  store when there is one; without one Deckly falls back to something of its
+  own (the owner left the choice of fallback to the design).
 - All of it is built on the branch `feature/plugin-sdk`, cut from `dev`. Each
   piece gets its own task branch cut from `feature/plugin-sdk` and is merged
   back into it. `feature/plugin-sdk` goes into `dev` only when the SDK and the
@@ -191,9 +192,12 @@ fields (shown only when another has a value) and carry simple validation.
 
 Secrets are stored in the system's own store: Credential Manager on Windows,
 Keychain on macOS, the Secret Service on Linux (decided on 2026-11-11). They
-never go into a profile, a profile export or a backup. A system without such a
-store, as some minimal Linux sessions are, gets a clear "unsupported" message
-on the field; what else to offer there is open.
+never go into a profile, a profile export or a backup. On a system without
+such a store, as some minimal Linux sessions are, Deckly keeps them in one
+file of its own in its data folder, readable by the user only, and the form
+says under the field that the secret is stored on this computer without the
+system's protection. When a store appears later, Deckly moves the secrets
+into it and removes the file. The plugin sees no difference.
 
 ### Host services
 
@@ -310,6 +314,5 @@ Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
   one by one.
 - The signature scheme for the registry index and how the public key in
   Deckly is replaced if the CI key has to change.
-- What a secret field does on a system without a secret store.
 - How `deckly-cli dev` reaches the running app.
 - The rule for the oldest Rust version the SDK supports.
