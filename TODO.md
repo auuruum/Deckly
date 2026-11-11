@@ -99,16 +99,21 @@ Planned features, chosen by the project owner on 2026-11-02.
 
 ## Plugin SDK
 
-Extends the Stream Deck plugin protocol instead of replacing it, so one plugin
-runs in both apps.
+For Deckly only, in pure Rust, with its own protocol beside the Stream Deck one
+(decided on 2026-11-11). Stream Deck SDK plugins keep running as they do. See
+the [design draft](docs/plugin-sdk.md).
 
+- [ ] `deckly-plugin-protocol`: messages and framing shared by host and SDK.
+- [ ] Deckly plugins in the host: pipes instead of a WebSocket.
 - [ ] `deckly-sdk`: a Rust crate for writing plugins.
-- [ ] `deckly-cli`: `new`, `dev` (restart on changes, live log), `validate`,
-      `pack`, `publish`.
-- [ ] An optional `"Deckly"` block in the manifest, and the host telling plugins
-      what it can do.
+- [ ] Key faces: the plugin describes a key and Deckly draws it.
 - [ ] Declarative plugin settings: the plugin describes its fields and Deckly
       draws the form in egui, with no HTML or web view.
+- [ ] Host services: a plugin asks Deckly for hotkeys, text, the active window
+      and similar, so one plugin works on X11, Wayland, Windows and macOS.
+- [ ] `deckly-cli`: `new`, `dev` (restart on changes, live log), `validate`,
+      `pack`, `publish`.
+- [ ] First plugins: Timer, System stats, OBS.
 
 ## Marketplace
 
@@ -130,15 +135,15 @@ A static registry, with no server or accounts.
 
 ## Repositories and organization
 
-Noted by the project owner on 2026-11-11; nothing here is decided yet.
+Decided by the project owner on 2026-11-11. The steps are in the
+[design draft](docs/plugin-sdk.md).
 
-- [ ] Decide where `deckly-sdk` lives: in this repository next to the plugin
-      host, or in a repository of its own.
+- [x] Where `deckly-sdk` lives: in this repository, next to the plugin host.
 - [ ] Create a GitHub organization and publish Deckly's own plugins there. The
       name `deckly` is taken on GitHub, so the organization needs another one.
-- [ ] Decide whether Deckly itself moves into that organization. The repository
-      path is written into the updater, the install scripts, the Homebrew
-      formula, the AUR package and the Windows installer.
+- [ ] Move Deckly into that organization, then change the repository path in
+      the updater, the install scripts, the Homebrew formula, the AUR package
+      and the Windows installer.
 
 ## Lower priority
 
