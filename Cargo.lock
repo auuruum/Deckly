@@ -1078,6 +1078,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "deckly-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "deckly-web"
 version = "0.0.4"
 dependencies = [
