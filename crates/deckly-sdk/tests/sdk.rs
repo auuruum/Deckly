@@ -39,7 +39,9 @@ impl Action for Repeater {
     }
 
     fn key_appear(&mut self, key: &Key<Self>) {
-        KEYS.lock().unwrap_or_else(|p| p.into_inner()).push(key.clone());
+        KEYS.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(key.clone());
     }
 
     fn key_down(&mut self, key: &Key<Self>) {

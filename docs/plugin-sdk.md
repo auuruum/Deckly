@@ -419,6 +419,8 @@ its resolution is 1 µs. One run each; differences of a few microseconds are
 within run-to-run noise not yet measured.
 
 CPU for 32 keys updated once a second (60 s): the test is
-`cpu_pipe`/`cpu_ws` in the same file. Not recorded yet: the first run was
-still going when this was written. Nothing is claimed about CPU until it is
-recorded here.
+`cpu_pipe`/`cpu_ws` in the same file. Pipe: host process 0 ms and plugin
+0 ms of CPU over 60 s with 2016 titles received, that is below the 10 ms
+resolution of `/proc/<pid>/stat`. The WebSocket run had not finished when
+this was written, so no comparison is claimed; a finer method (`getrusage` or
+`perf stat`) is needed to tell the two apart.
