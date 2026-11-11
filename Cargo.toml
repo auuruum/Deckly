@@ -11,6 +11,7 @@ members = [
     "crates/deckly-sdk",
     "crates/deckly-web",
     "examples/counter-plugin",
+    "examples/transport-bench",
 ]
 
 [workspace.package]

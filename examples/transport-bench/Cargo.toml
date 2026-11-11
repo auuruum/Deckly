@@ -1,0 +1,21 @@
+[package]
+name = "transport-bench"
+description = "Measures the Deckly plugin pipe transport against the Stream Deck WebSocket path"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+deckly-sdk.workspace = true
+serde_json.workspace = true
+# The same WebSocket library the host uses, for a native Stream Deck style
+# plugin with the same logic as the SDK one.
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+
+[dev-dependencies]
+deckly-plugin-host.workspace = true
+
+[lints]
+workspace = true

@@ -4811,6 +4811,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "transport-bench"
+version = "0.1.0"
+dependencies = [
+ "deckly-plugin-host",
+ "deckly-sdk",
+ "serde_json",
+ "tungstenite",
+]
+
+[[package]]
 name = "tray-icon"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
