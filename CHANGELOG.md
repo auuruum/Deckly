@@ -39,4 +39,4 @@ video import that no longer sends you hunting for FFmpeg.
 
 ## 0.0.3 and earlier
 
-See the [GitHub releases](https://github.com/auuruum/Deckly/releases).
+See the [GitHub releases](https://github.com/deckly-app/Deckly/releases).

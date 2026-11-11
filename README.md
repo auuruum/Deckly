@@ -44,14 +44,14 @@ new model.
 ## Install
 
 Ready-made builds are on the
-[releases page](https://github.com/auuruum/Deckly/releases). The commands
+[releases page](https://github.com/deckly-app/Deckly/releases). The commands
 below download the latest one, check its checksum and install it for your
 user. Close the official Stream Deck app first.
 
 Linux (x86_64) and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/auuruum/Deckly/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/deckly-app/Deckly/main/install.sh | sh
 ```
 
 On Linux this installs to `~/.local`, adds Deckly to the app menu and, with
@@ -60,13 +60,13 @@ Plugins with web pages also need WebKitGTK 4.1. On macOS it puts
 `Deckly.app` in `~/Applications`. To remove Deckly (your profiles stay):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/auuruum/Deckly/main/install.sh | sh -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/deckly-app/Deckly/main/install.sh | sh -s -- --uninstall
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/auuruum/Deckly/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/deckly-app/Deckly/main/install.ps1 | iex
 ```
 
 This installs to `%LOCALAPPDATA%\Programs\Deckly` with a Start menu entry,

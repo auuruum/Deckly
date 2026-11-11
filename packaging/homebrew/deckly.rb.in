@@ -2,16 +2,16 @@
 # in the Deckly repository instead.
 class Deckly < Formula
   desc "Unofficial, independent app for Stream Deck hardware"
-  homepage "https://github.com/auuruum/Deckly"
+  homepage "https://github.com/deckly-app/Deckly"
   version "@VERSION@"
   license "MIT"
 
   on_arm do
-    url "https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-aarch64-apple-darwin.tar.gz"
+    url "https://github.com/deckly-app/Deckly/releases/download/@TAG@/deckly-aarch64-apple-darwin.tar.gz"
     sha256 "@SHA256_MACOS_ARM64@"
   end
   on_intel do
-    url "https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-x86_64-apple-darwin.tar.gz"
+    url "https://github.com/deckly-app/Deckly/releases/download/@TAG@/deckly-x86_64-apple-darwin.tar.gz"
     sha256 "@SHA256_MACOS_X86_64@"
   end
 

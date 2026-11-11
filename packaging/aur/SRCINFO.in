@@ -2,7 +2,7 @@ pkgbase = deckly-bin
 	pkgdesc = Unofficial, independent app for Stream Deck hardware
 	pkgver = @PKGVER@
 	pkgrel = 1
-	url = https://github.com/auuruum/Deckly
+	url = https://github.com/deckly-app/Deckly
 	install = deckly-bin.install
 	arch = x86_64
 	license = MIT
@@ -17,7 +17,7 @@ pkgbase = deckly-bin
 	optdepends = wine: run Windows-only plugins
 	provides = deckly
 	conflicts = deckly
-	source = deckly-bin-@PKGVER@.tar.gz::https://github.com/auuruum/Deckly/releases/download/@TAG@/deckly-x86_64-unknown-linux-gnu.tar.gz
+	source = deckly-bin-@PKGVER@.tar.gz::https://github.com/deckly-app/Deckly/releases/download/@TAG@/deckly-x86_64-unknown-linux-gnu.tar.gz
 	sha256sums = @SHA256_LINUX_X86_64@
 
 pkgname = deckly-bin
