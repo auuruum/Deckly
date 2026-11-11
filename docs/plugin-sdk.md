@@ -11,10 +11,18 @@ confirmation and may change.
   protocol.
 - Pure Rust, like Deckly, with performance as a first goal.
 - The SDK lives in this repository, in the same workspace as the plugin host.
-- A GitHub organization is created now and Deckly moves into it. Deckly's own
-  plugins are published there.
+- A GitHub organization named `deckly-app` is created now and Deckly moves
+  into it. Deckly's own plugins are published there, one repository per
+  plugin.
 - The first plugins, which decide what version 1 must hold: Timer, System
   stats and OBS.
+- The marketplace is part of this work, not a later project.
+- All of it is built on the branch `feature/plugin-sdk`, cut from `dev`. Each
+  piece gets its own task branch cut from `feature/plugin-sdk` and is merged
+  back into it. `feature/plugin-sdk` goes into `dev` only when the SDK and the
+  first plugins work, on the owner's word, and from there into `main`. This
+  replaces "branch from `origin/dev`" in AGENTS.md for this work only; the
+  rules for `dev` and `main` are unchanged.
 
 Running existing Stream Deck SDK plugins unchanged stays a goal (AGENTS.md).
 The host keeps that path as it is. Deckly plugins are a second kind of plugin
@@ -29,8 +37,8 @@ beside it.
 - A plugin starts fast, idles at zero CPU and never blocks or crashes Deckly.
 - The host treats everything a plugin sends as untrusted, as it already does.
 
-Not goals for version 1: sandboxing, a marketplace, dials and touch strips
-(the protocol leaves room for them), async runtimes inside the SDK.
+Not goals for version 1: sandboxing, dials and touch strips (the protocol
+leaves room for them), async runtimes inside the SDK.
 
 ## Proposed
 
@@ -215,24 +223,62 @@ from one machine is promised.
 - SDK: a test harness that plays the host, so plugin authors test without
   Deckly.
 
+### Plugin repositories
+
+Each plugin is its own repository in the organization, with its own issues,
+releases and version. To keep many small repositories alike:
+
+- `deckly-cli new` writes the whole repository: the crate, the licence and a
+  CI workflow that builds on Linux, Windows and macOS and attaches one
+  `.decklyPlugin` per target to a GitHub release when a version tag is
+  pushed.
+- A plugin depends on `deckly-sdk` from crates.io. Until the SDK is published,
+  the first plugins use a git dependency on `feature/plugin-sdk`.
+
+### Marketplace
+
+A static registry, with no server and no accounts, as TODO.md already plans.
+
+- A registry repository in the organization holds one JSON file per plugin:
+  id, name, author, licence, source repository, and per version the release
+  link and SHA-256 for each target.
+- A plugin is added or updated by pull request. CI checks the entry: the
+  schema, that the links answer, that the SHA-256 matches, that the manifest
+  inside the package agrees with the entry.
+- CI builds one index file from all entries and publishes it on GitHub Pages.
+  Deckly downloads that one file, bounded in size, and never more often than
+  the user opens the Plugins tab or the update check runs.
+- The Plugins tab gets browse, search, install and update. A download is
+  checked against the SHA-256 from the index and then goes through the
+  existing install path.
+- The install window names the author, the source repository and the host
+  services the plugin uses. Plugins run with the user's rights, so "verified"
+  means reviewed, not safe.
+- `deckly-cli publish` writes the registry entry from a plugin's release and
+  opens the pull request.
+
+Later, not in this work: `deckly://install/<id>` links and a website.
+
 ### Order of work
 
-1. Organization and repository move (below).
+1. Organization and repository move (below). It does not block the rest.
 2. Protocol crate, the pipe transport in the host, a minimal SDK (key events,
    titles, faces, settings), the example plugin and its test.
 3. Settings forms in egui.
 4. Host services.
 5. `deckly-cli new`, `dev`, `validate`, `pack`.
-6. Timer and System stats, in the organization.
+6. Timer and System stats, each in its own repository.
 7. OBS.
+8. Marketplace: registry repository and its CI, the index, the Plugins tab,
+   `deckly-cli publish`. It comes last because it needs plugins to list.
 
 ## Organization and repository move
 
 Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
 `decklyapp`, `getdeckly`, `deckly-dev` and `deckly-rs` were free.
 
-- The owner creates the organization and transfers the repository in GitHub's
-  settings.
+- The owner creates the organization `deckly-app` and transfers the
+  repository in GitHub's settings.
 - Then the repository path changes in `crates/deckly/src/update.rs`,
   `install.sh`, `install.ps1`, `README.md`, `CHANGELOG.md`, the Homebrew
   formula and its tap, the AUR package, the Windows installer and
@@ -247,11 +293,14 @@ Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
 
 ## Open questions
 
-- The organization's name.
-- Deckly's own plugins: one repository for all of them (one workspace, one
-  CI), or one per plugin.
-- Whether `deckly-sdk`, `deckly-cli` and `deckly-plugin-protocol` are free on
-  crates.io.
+- Crate names: `cargo search deckly` on 2026-11-11 listed no crate whose name
+  starts with `deckly` among its first results. The exact names
+  `deckly-sdk`, `deckly-cli` and `deckly-plugin-protocol` were not looked up
+  one by one.
+- Whether the registry index is signed, as TODO.md says, and with which key.
+  A key kept in the organization's CI protects little more than HTTPS and
+  the SHA-256 sums do; a key kept offline makes every registry update a
+  manual step.
 - Where secrets are stored.
 - How `deckly-cli dev` reaches the running app.
 - The rule for the oldest Rust version the SDK supports.

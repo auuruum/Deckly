@@ -117,7 +117,8 @@ the [design draft](docs/plugin-sdk.md).
 
 ## Marketplace
 
-A static registry, with no server or accounts.
+A static registry, with no server or accounts. Built together with the SDK
+(decided on 2026-11-11), as its last step.
 
 - [ ] Registry repository: one JSON file per plugin with version, release link,
       SHA-256 per system and license. Plugins are added by pull request and
@@ -139,8 +140,8 @@ Decided by the project owner on 2026-11-11. The steps are in the
 [design draft](docs/plugin-sdk.md).
 
 - [x] Where `deckly-sdk` lives: in this repository, next to the plugin host.
-- [ ] Create a GitHub organization and publish Deckly's own plugins there. The
-      name `deckly` is taken on GitHub, so the organization needs another one.
+- [ ] Create the GitHub organization `deckly-app` (the name `deckly` is taken)
+      and publish Deckly's own plugins there, one repository per plugin.
 - [ ] Move Deckly into that organization, then change the repository path in
       the updater, the install scripts, the Homebrew formula, the AUR package
       and the Windows installer.
