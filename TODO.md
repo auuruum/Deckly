@@ -128,6 +128,18 @@ A static registry, with no server or accounts.
 - [ ] List only what the license or the author allows. Take nothing from
       Elgato's marketplace.
 
+## Repositories and organization
+
+Noted by the project owner on 2026-11-11; nothing here is decided yet.
+
+- [ ] Decide where `deckly-sdk` lives: in this repository next to the plugin
+      host, or in a repository of its own.
+- [ ] Create a GitHub organization and publish Deckly's own plugins there. The
+      name `deckly` is taken on GitHub, so the organization needs another one.
+- [ ] Decide whether Deckly itself moves into that organization. The repository
+      path is written into the updater, the install scripts, the Homebrew
+      formula, the AUR package and the Windows installer.
+
 ## Lower priority
 
 - [ ] Conditions in Multi Actions: if window X is open, do Y.
