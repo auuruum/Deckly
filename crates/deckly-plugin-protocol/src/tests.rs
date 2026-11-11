@@ -376,3 +376,21 @@ fn bad_manifests_are_refused() {
     let bom = format!("\u{FEFF}{MANIFEST}");
     assert!(Manifest::parse(bom.as_bytes()).is_ok());
 }
+
+#[test]
+fn built_faces_always_pass_the_checks() {
+    let face = Face::new()
+        .label("x".repeat(100))
+        .value("12")
+        .detail("é".repeat(MAX_FACE_TEXT_CHARS + 5))
+        .progress(7.0)
+        .accent(Color::rgb(1, 2, 3));
+    assert!(face.validate().is_ok());
+    assert_eq!(face.progress, Some(1.0));
+    assert_eq!(
+        face.label.as_deref().map(str::len),
+        Some(MAX_FACE_TEXT_CHARS)
+    );
+    assert_eq!(Face::new().progress(f32::NAN).progress, None);
+    assert_eq!(Face::new().progress(-1.0).progress, Some(0.0));
+}

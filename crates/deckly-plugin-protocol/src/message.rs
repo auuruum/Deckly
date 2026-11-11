@@ -220,6 +220,60 @@ pub struct Face {
     pub icon: Option<String>,
 }
 
+/// Builders. Text is cut to [`MAX_FACE_TEXT_CHARS`] and progress clamped
+/// to 0..=1, so a face built here always passes the host's checks.
+impl Face {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn label(mut self, text: impl AsRef<str>) -> Self {
+        self.label = Some(face_text(text.as_ref()));
+        self
+    }
+
+    pub fn value(mut self, text: impl AsRef<str>) -> Self {
+        self.value = Some(face_text(text.as_ref()));
+        self
+    }
+
+    pub fn detail(mut self, text: impl AsRef<str>) -> Self {
+        self.detail = Some(face_text(text.as_ref()));
+        self
+    }
+
+    /// From 0 (empty) to 1 (full); a value that is not a number shows no bar.
+    pub fn progress(mut self, fraction: f32) -> Self {
+        self.progress = (!fraction.is_nan()).then(|| fraction.clamp(0.0, 1.0));
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    pub fn background(mut self, color: Color) -> Self {
+        self.background = Some(color);
+        self
+    }
+
+    pub fn accent(mut self, color: Color) -> Self {
+        self.accent = Some(color);
+        self
+    }
+
+    /// An image file inside the plugin folder.
+    pub fn icon(mut self, path: impl Into<String>) -> Self {
+        self.icon = Some(path.into());
+        self
+    }
+}
+
+fn face_text(text: &str) -> String {
+    truncate(text, MAX_FACE_TEXT_CHARS).to_owned()
+}
+
 impl std::hash::Hash for Face {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
         self.label.hash(h);
