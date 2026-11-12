@@ -368,7 +368,9 @@ fn bad_manifests_are_refused() {
     assert!(with(&|v| v["actions"][0]["id"] = json!("")).is_err());
     assert!(with(&|v| v["actions"][0]["states"] = json!(vec![json!({}); MAX_STATES + 1])).is_err());
     assert!(with(&|v| v["actions"] = json!(vec![json!({}); MAX_ACTIONS + 1])).is_err());
-    assert!(with(&|v| v["form"] = json!({"x": "y".repeat(MAX_FORM_BYTES)})).is_err());
+    assert!(with(&|v| v["form"] = big_form()).is_err());
+    assert!(with(&|v| v["actions"][0]["form"] = big_form()).is_err());
+    assert!(with(&|v| v["form"] = json!({"fields": "none"})).is_err());
     let newer = with(&|v| v["protocol"] = json!(PROTOCOL + 1)).unwrap();
     assert!(!newer.supported());
     assert!(Manifest::parse(&vec![b' '; MAX_MANIFEST_BYTES + 1]).is_err());
@@ -393,4 +395,303 @@ fn built_faces_always_pass_the_checks() {
     );
     assert_eq!(Face::new().progress(f32::NAN).progress, None);
     assert_eq!(Face::new().progress(-1.0).progress, Some(0.0));
+}
+
+// ----- settings forms ------------------------------------------------------
+
+/// Valid fields that add up to more than a form may hold.
+fn big_form() -> serde_json::Value {
+    let options: Vec<_> = (0..200)
+        .map(|i| json!({"value": format!("option-{i}")}))
+        .collect();
+    let fields: Vec<_> = (0..MAX_FORM_FIELDS)
+        .map(|i| json!({"kind": "choice", "key": format!("c{i}"), "options": options}))
+        .collect();
+    json!({ "fields": fields })
+}
+
+fn sample_form() -> Form {
+    serde_json::from_value(json!({"fields": [
+        {"kind": "section", "label": "Counting"},
+        {"kind": "number", "key": "step", "label": "Step", "min": 1, "max": 100,
+         "integer": true, "default": 1, "help": "Added on each press"},
+        {"kind": "text", "key": "name", "label": "Name", "min_length": 2, "max_length": 5},
+        {"kind": "secret", "key": "token", "label": "Token", "required": true},
+        {"kind": "checkbox", "key": "advanced", "label": "Advanced", "default": false},
+        {"kind": "slider", "key": "level", "label": "Level", "min": 0, "max": 10, "step": 0.5,
+         "visible_when": {"field": "advanced", "equals": true}},
+        {"kind": "choice", "key": "mode", "label": "Mode", "default": "up",
+         "options": [{"value": "up", "label": "Up"}, {"value": "down"}],
+         "visible_when": {"field": "level", "equals": 5}},
+        {"kind": "choice", "key": "scene", "label": "Scene", "dynamic": true},
+        {"kind": "file", "key": "sound", "label": "Sound", "extensions": ["wav", "ogg"]},
+        {"kind": "folder", "key": "dir", "label": "Folder"},
+        {"kind": "color", "key": "tint", "label": "Tint", "default": "#ff8800"},
+        {"kind": "hotkey", "key": "keys", "label": "Keys"},
+        {"kind": "button", "key": "reset", "label": "Reset"},
+        {"kind": "note", "label": "A note under everything."}
+    ]}))
+    .unwrap()
+}
+
+#[test]
+fn forms_round_trip_in_manifests() {
+    let form = sample_form();
+    assert!(form.validate().is_ok(), "{:?}", form.validate());
+    let mut m = Manifest {
+        id: "com.example.counter".into(),
+        name: "Counter".into(),
+        version: "1".into(),
+        protocol: 1,
+        form: Some(form.clone()),
+        ..Manifest::default()
+    };
+    m.actions.push(ManifestAction {
+        id: "com.example.counter.count".into(),
+        name: "Count".into(),
+        form: Some(form.clone()),
+        ..ManifestAction::default()
+    });
+    let text = serde_json::to_vec(&m).unwrap();
+    let back = Manifest::parse(&text).unwrap();
+    assert_eq!(back, m);
+    assert_eq!(back.actions[0].form.as_ref(), Some(&form));
+    // Properties that are not set stay out of the file.
+    let note = serde_json::to_value(&form.fields[13]).unwrap();
+    assert_eq!(
+        note,
+        json!({"kind": "note", "label": "A note under everything."})
+    );
+}
+
+#[test]
+fn unknown_field_kinds_and_properties_are_ignored() {
+    let form: Form = serde_json::from_value(json!({"fields": [
+        {"kind": "map_picker", "key": "where", "zoom": 3, "label": "Where"},
+        {"kind": "text", "key": "name", "label": "Name", "glow": true},
+        {"kind": "map_picker", "key": "name"}
+    ], "layout": "columns"}))
+    .unwrap();
+    assert!(form.validate().is_ok());
+    assert_eq!(form.fields[0].kind, FieldKind::Unknown);
+    assert!(!form.is_visible(0, &json!({})));
+    assert!(form.is_visible(1, &json!({})));
+    assert_eq!(form.field("name").map(|f| f.kind), Some(FieldKind::Text));
+    assert_eq!(form.field("where"), None);
+}
+
+#[test]
+fn hostile_forms_are_refused() {
+    let field = |extra: serde_json::Value| {
+        let mut f = json!({"kind": "text", "key": "k", "label": "L"});
+        if let (Some(f), Some(extra)) = (f.as_object_mut(), extra.as_object()) {
+            f.extend(extra.clone());
+        }
+        f
+    };
+    let bad = [
+        field(json!({"key": ""})),
+        field(json!({"key": "has space"})),
+        field(json!({"key": "k".repeat(MAX_FIELD_KEY_BYTES + 1)})),
+        field(json!({"label": "x".repeat(MAX_LABEL_CHARS + 1)})),
+        field(json!({"help": "x".repeat(MAX_HELP_CHARS + 1)})),
+        field(json!({"kind": "number", "min": 5, "max": 1})),
+        field(json!({"kind": "number", "step": 0})),
+        field(json!({"kind": "slider", "min": 0})),
+        field(json!({"min_length": 9, "max_length": 3})),
+        field(json!({"max_length": MAX_TEXT_VALUE_CHARS + 1})),
+        field(
+            json!({"kind": "choice", "options": [{"value": "v".repeat(MAX_CHOICE_VALUE_BYTES + 1)}]}),
+        ),
+        field(json!({"kind": "file", "extensions": ["../x"]})),
+        field(json!({"kind": "number", "default": "five"})),
+        field(json!({"kind": "choice", "options": [{"value": "a"}], "default": "b"})),
+        field(json!({"default": "x".repeat(MAX_DEFAULT_BYTES)})),
+        field(json!({"visible_when": {"field": "", "equals": 1}})),
+        field(json!({"kind": "number", "min": "low"})),
+    ];
+    for f in bad {
+        let form = json!({"fields": [f]});
+        let parsed = serde_json::from_value::<Form>(form.clone());
+        assert!(
+            parsed.map_or(true, |p| p.validate().is_err()),
+            "accepted {form}"
+        );
+    }
+    let many = (0..=MAX_FORM_FIELDS)
+        .map(|i| json!({"kind": "text", "key": format!("k{i}")}))
+        .collect::<Vec<_>>();
+    let form: Form = serde_json::from_value(json!({ "fields": many })).unwrap();
+    assert!(form.validate().is_err());
+    let options = (0..=MAX_CHOICES)
+        .map(|i| json!({"value": i.to_string()}))
+        .collect::<Vec<_>>();
+    let form: Form = serde_json::from_value(
+        json!({"fields": [{"kind": "choice", "key": "c", "options": options}]}),
+    )
+    .unwrap();
+    assert!(form.validate().is_err());
+    let twice: Form = serde_json::from_value(json!({"fields": [
+        {"kind": "text", "key": "a"}, {"kind": "button", "key": "a"}
+    ]}))
+    .unwrap();
+    assert!(twice.validate().is_err());
+    // Within every other limit, but larger than a form may be.
+    let huge: Form = serde_json::from_value(big_form()).unwrap();
+    assert!(huge.fields.iter().all(|f| f.validate().is_ok()));
+    assert!(huge.validate().is_err_and(|e| e.contains("larger")));
+}
+
+#[test]
+fn field_values_are_checked_with_plain_messages() {
+    let form = sample_form();
+    let f = |k: &str| form.field(k).unwrap();
+    assert_eq!(f("step").check(Some(&json!(5))), Ok(()));
+    assert_eq!(
+        f("step").check(Some(&json!(0))),
+        Err("Enter a number from 1 to 100.".into())
+    );
+    assert_eq!(
+        f("step").check(Some(&json!(2.5))),
+        Err("Enter a whole number.".into())
+    );
+    assert_eq!(
+        f("step").check(Some(&json!("2"))),
+        Err("Enter a number.".into())
+    );
+    assert_eq!(f("step").check(None), Ok(()));
+    assert_eq!(
+        f("name").check(Some(&json!("a"))),
+        Err("Use at least 2 characters.".into())
+    );
+    assert_eq!(
+        f("name").check(Some(&json!("abcdef"))),
+        Err("Use at most 5 characters.".into())
+    );
+    assert_eq!(f("name").check(Some(&json!("ééé"))), Ok(()));
+    assert_eq!(f("name").check(Some(&json!(""))), Ok(()));
+    assert_eq!(
+        f("token").check(Some(&json!(""))),
+        Err("This field is required.".into())
+    );
+    assert_eq!(f("mode").check(Some(&json!("down"))), Ok(()));
+    assert!(f("mode").check(Some(&json!("sideways"))).is_err());
+    // Dynamic choices accept what the plugin offered.
+    assert_eq!(f("scene").check(Some(&json!("anything"))), Ok(()));
+    assert_eq!(f("tint").check(Some(&json!("#00ff00"))), Ok(()));
+    assert!(f("tint").check(Some(&json!("green"))).is_err());
+    assert_eq!(
+        f("keys").check(Some(&json!({"key": "K", "ctrl": true}))),
+        Ok(())
+    );
+    assert!(
+        f("keys")
+            .check(Some(&json!({"key": "K", "ctrl": "yes"})))
+            .is_err()
+    );
+    assert_eq!(f("advanced").check(Some(&json!(true))), Ok(()));
+    assert!(f("advanced").check(Some(&json!(1))).is_err());
+    let problems = form.problems(&json!({"step": 500, "token": "t"}));
+    assert_eq!(
+        problems,
+        vec![(
+            "step".to_owned(),
+            "Enter a number from 1 to 100.".to_owned()
+        )]
+    );
+    assert_eq!(
+        form.problems(&json!({})),
+        vec![("token".to_owned(), "This field is required.".to_owned())]
+    );
+    assert_eq!(form.secrets().collect::<Vec<_>>(), ["token"]);
+}
+
+#[test]
+fn conditions_show_and_hide_fields() {
+    let form = sample_form();
+    let index = |k: &str| form.fields.iter().position(|f| f.key == k).unwrap();
+    let (level, mode) = (index("level"), index("mode"));
+    // Defaults count: "advanced" is false by default.
+    assert!(!form.is_visible(level, &json!({})));
+    assert!(form.is_visible(level, &json!({"advanced": true})));
+    // "mode" needs level 5, and level itself must be shown.
+    assert!(!form.is_visible(mode, &json!({"level": 5})));
+    assert!(form.is_visible(mode, &json!({"level": 5, "advanced": true})));
+    assert!(!form.is_visible(mode, &json!({"level": 4, "advanced": true})));
+    // Hidden fields are not checked.
+    assert!(
+        form.problems(&json!({"token": "t", "level": 99}))
+            .is_empty()
+    );
+    assert!(
+        !form
+            .problems(&json!({"token": "t", "level": 99, "advanced": true}))
+            .is_empty()
+    );
+    // A loop of conditions hides its fields instead of hanging.
+    let looped: Form = serde_json::from_value(json!({"fields": [
+        {"kind": "checkbox", "key": "a", "default": true, "visible_when": {"field": "b", "equals": true}},
+        {"kind": "checkbox", "key": "b", "default": true, "visible_when": {"field": "a", "equals": true}}
+    ]}))
+    .unwrap();
+    assert!(looped.validate().is_ok());
+    assert!(!looped.is_visible(0, &json!({})));
+    assert!(!looped.is_visible(1, &json!({})));
+    // A condition on a property no field shows uses the setting alone.
+    let plain: Form = serde_json::from_value(json!({"fields": [
+        {"kind": "text", "key": "a", "visible_when": {"field": "mode", "equals": "x"}}
+    ]}))
+    .unwrap();
+    assert!(plain.is_visible(0, &json!({"mode": "x"})));
+    assert!(!plain.is_visible(0, &json!({})));
+}
+
+#[test]
+fn choice_and_button_messages_round_trip_and_are_bounded() {
+    let messages = [
+        HostMessage::GetChoices {
+            request: 7,
+            field: "scene".into(),
+            key: Some(key("p.1")),
+        },
+        HostMessage::GetChoices {
+            request: u64::MAX,
+            field: "scene".into(),
+            key: None,
+        },
+        HostMessage::Button {
+            field: "reset".into(),
+            key: None,
+        },
+    ];
+    for m in &messages {
+        let frame = encode_message(m).unwrap();
+        assert_eq!(&decode::<HostMessage>(&frame[5..]).unwrap(), m);
+    }
+    let answer = PluginMessage::Choices {
+        request: 7,
+        options: vec![Choice::new("a", "A"), Choice::new("b", "")],
+        error: None,
+    };
+    let frame = encode_message(&answer).unwrap();
+    assert_eq!(decode::<PluginMessage>(&frame[5..]).unwrap(), answer);
+    let failed = br#"{"type":"choices","request":3,"error":"OBS is not running"}"#;
+    assert!(matches!(
+        decode::<PluginMessage>(failed).unwrap(),
+        PluginMessage::Choices { request: 3, ref options, error: Some(_) } if options.is_empty()
+    ));
+    let too_many = json!({"type": "choices", "request": 1,
+        "options": (0..=MAX_CHOICES).map(|i| json!({"value": i.to_string()})).collect::<Vec<_>>()});
+    assert!(decode::<PluginMessage>(too_many.to_string().as_bytes()).is_err());
+    let long_error =
+        json!({"type": "choices", "request": 1, "error": "x".repeat(MAX_ERROR_CHARS + 1)});
+    assert!(decode::<PluginMessage>(long_error.to_string().as_bytes()).is_err());
+    let no_request = br#"{"type":"choices","options":[]}"#;
+    assert!(decode::<PluginMessage>(no_request).is_err());
+    let bad_field = br#"{"type":"button","field":"has space"}"#;
+    assert!(decode::<HostMessage>(bad_field).is_err());
+    // Choices built in code always pass.
+    let long = Choice::new("é".repeat(MAX_CHOICE_VALUE_BYTES), "x".repeat(500));
+    assert!(long.validate().is_ok());
+    assert_eq!(long.text(), "x".repeat(MAX_LABEL_CHARS));
 }

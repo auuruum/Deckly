@@ -52,6 +52,26 @@ pub enum HostMessage {
     },
     /// The computer woke from sleep.
     SystemWake,
+    /// Asks for the options of a choice field marked `dynamic`, when its
+    /// form opens. The plugin answers with `choices` and the same request
+    /// number; Deckly gives up waiting after a few seconds.
+    GetChoices {
+        request: u64,
+        /// The field's key.
+        field: String,
+        /// The key whose form asks; none for the plugin-wide form.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<KeyInfo>,
+    },
+    /// The user pressed a button field.
+    Button {
+        /// The button's key.
+        field: String,
+        /// The key whose form holds the button; none for the plugin-wide
+        /// form. The key need not be on a device.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<KeyInfo>,
+    },
     /// A message type this side does not know; ignored.
     #[serde(other)]
     Unknown,
@@ -170,6 +190,15 @@ pub enum PluginMessage {
     /// The short failure mark.
     ShowAlert {
         context: String,
+    },
+    /// The answer to `get_choices`: the options, or why there are none.
+    Choices {
+        request: u64,
+        #[serde(default)]
+        options: Vec<crate::Choice>,
+        /// A short reason shown to the user.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -459,6 +488,12 @@ impl Validate for HostMessage {
             | HostMessage::KeyUp { key }
             | HostMessage::Settings { key } => key.validate(),
             HostMessage::GlobalSettings { settings } => check_settings(settings),
+            HostMessage::GetChoices { field, key, .. } | HostMessage::Button { field, key } => {
+                if !crate::form::valid_field_key(field) {
+                    return Err("bad field key".into());
+                }
+                key.as_ref().map_or(Ok(()), Validate::validate)
+            }
             HostMessage::SystemWake | HostMessage::Unknown => Ok(()),
         }
     }
@@ -550,6 +585,9 @@ impl Validate for PluginMessage {
             PluginMessage::SetGlobalSettings { settings } => check_settings(settings),
             PluginMessage::ShowOk { context } | PluginMessage::ShowAlert { context } => {
                 check_context(context)
+            }
+            PluginMessage::Choices { options, error, .. } => {
+                crate::form::check_choices(options, error.as_deref())
             }
             PluginMessage::GetGlobalSettings | PluginMessage::Unknown => Ok(()),
         }

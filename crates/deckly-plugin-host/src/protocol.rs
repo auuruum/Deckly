@@ -78,6 +78,13 @@ pub enum Command {
         data: Vec<u8>,
         state: Option<usize>,
     },
+    /// A Deckly plugin's answer to a choice request: the options of a
+    /// choice field, or why there are none.
+    Choices {
+        request: u64,
+        options: Vec<deckly_plugin_protocol::Choice>,
+        error: Option<String>,
+    },
     /// A command Deckly does not handle (yet), by event name.
     Other(String),
 }

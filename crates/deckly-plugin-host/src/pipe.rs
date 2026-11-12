@@ -311,6 +311,28 @@ pub fn translate(text: &str) -> Option<HostMessage> {
     Some(message)
 }
 
+/// A placed key as a Deckly plugin sees it.
+pub fn key_of(instance: &crate::protocol::Instance) -> Option<KeyInfo> {
+    let v: Value = serde_json::from_str(&instance.event("keyDown")).ok()?;
+    key_info(&v)
+}
+
+/// Lets `filter` see and change the settings in a message before it goes
+/// to the plugin (the app puts secrets back in).
+pub fn filter_settings(message: &mut HostMessage, filter: &dyn Fn(&mut Value)) {
+    match message {
+        HostMessage::KeyAppear { key }
+        | HostMessage::KeyDisappear { key }
+        | HostMessage::KeyDown { key }
+        | HostMessage::KeyUp { key }
+        | HostMessage::Settings { key }
+        | HostMessage::GetChoices { key: Some(key), .. }
+        | HostMessage::Button { key: Some(key), .. } => filter(&mut key.settings),
+        HostMessage::GlobalSettings { settings } => filter(settings),
+        _ => {}
+    }
+}
+
 fn key_info(v: &Value) -> Option<KeyInfo> {
     let payload = v.get("payload")?;
     let small = |p: &str| {
@@ -395,6 +417,15 @@ pub fn command(r: Received<PluginMessage>) -> Result<Option<Command>, String> {
         PluginMessage::GetGlobalSettings => Command::GetGlobalSettings,
         PluginMessage::ShowOk { context } => Command::ShowOk { context },
         PluginMessage::ShowAlert { context } => Command::ShowAlert { context },
+        PluginMessage::Choices {
+            request,
+            options,
+            error,
+        } => Command::Choices {
+            request,
+            options,
+            error,
+        },
         PluginMessage::Ready { .. } | PluginMessage::Unknown => return Ok(None),
     }))
 }
@@ -542,6 +573,55 @@ mod tests {
             Ok(Some(Command::SetImage { image: None, .. }))
         ));
         assert_eq!(command(msg(PluginMessage::Unknown)), Ok(None));
+    }
+
+    #[test]
+    fn choices_answers_and_settings_filters() {
+        let answer = Received {
+            message: PluginMessage::Choices {
+                request: 9,
+                options: vec![deckly_plugin_protocol::Choice::new("a", "A")],
+                error: None,
+            },
+            blob: None,
+        };
+        assert!(matches!(
+            command(answer),
+            Ok(Some(Command::Choices { request: 9, ref options, error: None })) if options.len() == 1
+        ));
+        let key = key_of(&instance()).unwrap();
+        assert_eq!(key.context, "page.3");
+        assert_eq!(key.settings, json!({"step": 2}));
+        let reveal = |v: &mut Value| {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("secret".into(), json!("shh"));
+            }
+        };
+        let mut down = HostMessage::KeyDown { key: key.clone() };
+        filter_settings(&mut down, &reveal);
+        let HostMessage::KeyDown { key: shown } = down else {
+            panic!("changed type");
+        };
+        assert_eq!(shown.settings["secret"], "shh");
+        let mut global = HostMessage::GlobalSettings {
+            settings: json!({}),
+        };
+        filter_settings(&mut global, &reveal);
+        assert_eq!(
+            global,
+            HostMessage::GlobalSettings {
+                settings: json!({"secret": "shh"})
+            }
+        );
+        let mut ask = HostMessage::GetChoices {
+            request: 1,
+            field: "f".into(),
+            key: Some(key),
+        };
+        filter_settings(&mut ask, &reveal);
+        assert!(
+            matches!(ask, HostMessage::GetChoices { key: Some(k), .. } if k.settings["secret"] == "shh")
+        );
     }
 
     #[test]

@@ -44,8 +44,31 @@ pub const MAX_SERVICES: usize = 64;
 pub const MAX_PROGRAMS: usize = 32;
 /// Settings of one key, or a plugin's global settings, as JSON text.
 pub const MAX_SETTINGS_BYTES: usize = 64 * 1024;
-/// A settings form description, as JSON text (reserved; see the manifest).
+/// One settings form description, as JSON text.
 pub const MAX_FORM_BYTES: usize = 64 * 1024;
+/// Fields of one form, sections and notes included.
+pub const MAX_FORM_FIELDS: usize = 64;
+/// The key of a form field: the property it sets in the settings object.
+pub const MAX_FIELD_KEY_BYTES: usize = 64;
+/// A field label, a placeholder, a choice label.
+pub const MAX_LABEL_CHARS: usize = 100;
+/// A help line under a field, or the text of a note.
+pub const MAX_HELP_CHARS: usize = 500;
+/// Options of one choice, fixed or answered by the plugin.
+pub const MAX_CHOICES: usize = 256;
+/// The value of one choice option.
+pub const MAX_CHOICE_VALUE_BYTES: usize = 256;
+/// File name extensions a file field accepts.
+pub const MAX_EXTENSIONS: usize = 16;
+/// One file name extension, without the dot.
+pub const MAX_EXTENSION_BYTES: usize = 16;
+/// A field's default value, or the value a condition compares with, as
+/// JSON text.
+pub const MAX_DEFAULT_BYTES: usize = 4096;
+/// The longest text a text or secret field may ask for.
+pub const MAX_TEXT_VALUE_CHARS: usize = 8192;
+/// The reason a plugin gives when it cannot list choices.
+pub const MAX_ERROR_CHARS: usize = 200;
 /// Largest side of a raw RGBA image.
 pub const MAX_IMAGE_SIDE: u32 = 1024;
 /// Largest `deckly-plugin.json`.

@@ -9,11 +9,13 @@
 //!
 //! Pure: no processes, pipes or threads. Design notes: docs/plugin-sdk.md.
 
+pub mod form;
 pub mod frame;
 pub mod limits;
 pub mod manifest;
 mod message;
 
+pub use form::{Choice, Condition, Field, FieldKind, Form};
 pub use frame::{Error, Frame, Reader, Received, Writer, decode, encode_blob, encode_message};
 pub use manifest::{MANIFEST_FILE, Manifest, ManifestAction, ManifestState, current_target};
 pub use message::*;

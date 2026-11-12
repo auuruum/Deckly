@@ -19,7 +19,7 @@ pub mod protocol;
 mod server;
 mod wine;
 
-pub use deckly_plugin_protocol::{Color, Face, ImageFormat};
+pub use deckly_plugin_protocol::{Color, Face, HostMessage, ImageFormat};
 pub use guard::{GUARD_ARG, run_guard};
 pub use manifest::{Entry, Manifest};
 pub use protocol::{AppInfo, Command, DeviceInfo, Instance, TitleParameters};
@@ -132,7 +132,14 @@ struct Shared {
     inspector: Option<OpenInspector>,
     /// The editor window property inspectors belong to (a Windows HWND).
     owner: Option<i64>,
+    /// Sees settings on their way to a Deckly plugin.
+    filter: Option<SettingsFilter>,
 }
+
+/// Changes the settings in a message on its way to a Deckly plugin, given
+/// the plugin id. The app uses it to put secrets back in, which the profile
+/// holds only as references.
+pub type SettingsFilter = Arc<dyn Fn(&str, &mut serde_json::Value) + Send + Sync>;
 
 enum Ctl {
     Server(ServerEvent),
@@ -253,12 +260,77 @@ impl Host {
         token.is_some_and(|t| self.server.send(&t, text))
     }
 
+    /// Sets the filter every settings object passes on its way to a
+    /// Deckly plugin.
+    pub fn set_settings_filter(&self, filter: SettingsFilter) {
+        lock(&self.shared).filter = Some(filter);
+    }
+
+    /// Sends a protocol message to a running Deckly plugin; false when it
+    /// is not one or not running. Never blocks.
+    pub fn send_message(&self, plugin: &str, message: HostMessage) -> bool {
+        let piped = lock(&self.shared).pipes.get(plugin).cloned();
+        match piped {
+            Some((token, pipe)) => self.send_pipe_message(plugin, &token, &pipe, message),
+            None => false,
+        }
+    }
+
+    /// Asks a Deckly plugin for the options of a dynamic choice field; the
+    /// answer comes back as [`Command::Choices`]. Without an instance the
+    /// field belongs to the plugin-wide form.
+    pub fn ask_choices(
+        &self,
+        plugin: &str,
+        request: u64,
+        field: &str,
+        instance: Option<&Instance>,
+    ) -> bool {
+        let key = instance.and_then(pipe::key_of);
+        if instance.is_some() && key.is_none() {
+            return false;
+        }
+        let field = field.to_owned();
+        self.send_message(
+            plugin,
+            HostMessage::GetChoices {
+                request,
+                field,
+                key,
+            },
+        )
+    }
+
+    /// Tells a Deckly plugin that a button of a form was pressed.
+    pub fn press_button(&self, plugin: &str, field: &str, instance: Option<&Instance>) -> bool {
+        let key = instance.and_then(pipe::key_of);
+        if instance.is_some() && key.is_none() {
+            return false;
+        }
+        let field = field.to_owned();
+        self.send_message(plugin, HostMessage::Button { field, key })
+    }
+
     /// Sends an app event to a Deckly plugin, translated into the protocol.
     fn send_pipe(&self, plugin: &str, token: &str, pipe: &pipe::Pipe, text: &str) -> bool {
         let Some(message) = pipe::translate(text) else {
             // Not an event Deckly plugins get.
             return true;
         };
+        self.send_pipe_message(plugin, token, pipe, message)
+    }
+
+    fn send_pipe_message(
+        &self,
+        plugin: &str,
+        token: &str,
+        pipe: &pipe::Pipe,
+        mut message: HostMessage,
+    ) -> bool {
+        let filter = lock(&self.shared).filter.clone();
+        if let Some(filter) = filter {
+            pipe::filter_settings(&mut message, &|v| filter(plugin, v));
+        }
         use deckly_plugin_protocol::Validate;
         if let Err(e) = message.validate() {
             append_log(&self.logs_dir, plugin, &format!("not sent: {e}"));

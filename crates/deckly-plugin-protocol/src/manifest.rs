@@ -3,10 +3,9 @@
 //! ignored; everything else is checked against the limits.
 
 use crate::limits::*;
-use crate::message::{check_bytes, check_chars, check_count, json_len, valid_id};
-use crate::{PROTOCOL, Validate};
+use crate::message::{check_bytes, check_chars, check_count, valid_id};
+use crate::{Form, PROTOCOL, Validate};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// The manifest's file name inside the plugin folder.
@@ -43,10 +42,9 @@ pub struct Manifest {
     pub programs: BTreeMap<String, String>,
     #[serde(default)]
     pub actions: Vec<ManifestAction>,
-    /// The plugin-wide settings form. Reserved: its shape is decided with
-    /// the settings forms.
+    /// The plugin-wide settings form, for its global settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub form: Option<Value>,
+    pub form: Option<Form>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -61,9 +59,9 @@ pub struct ManifestAction {
     /// One or more states; a key without states shows the action icon.
     #[serde(default)]
     pub states: Vec<ManifestState>,
-    /// The action's settings form. Reserved, like [`Manifest::form`].
+    /// The action's settings form, for each key's settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub form: Option<Value>,
+    pub form: Option<Form>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -160,13 +158,8 @@ fn check_path(what: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_form(form: &Option<Value>) -> Result<(), String> {
-    match form {
-        Some(f) if json_len(f) > MAX_FORM_BYTES => {
-            Err(format!("a form is larger than {MAX_FORM_BYTES} bytes"))
-        }
-        _ => Ok(()),
-    }
+fn check_form(form: &Option<Form>) -> Result<(), String> {
+    form.as_ref().map_or(Ok(()), Validate::validate)
 }
 
 impl Validate for Manifest {
