@@ -1,10 +1,11 @@
 # Deckly plugin SDK: design
 
-Status: draft, 2026-11-11. Stage 1 (step 2 of "Order of work") is built on
+Status: draft, 2026-11-12. Stage 1 (step 2 of "Order of work") is built on
 the task branch `feature/sdk-protocol-transport`; what it settled or changed
-is under "Settled by stage 1". "Decided" lists the project owner's
-decisions; everything under "Proposed" waits for the owner's confirmation
-and may change.
+is under "Settled by stage 1". Settings forms (step 3) are built on the task
+branch `feature/sdk-settings-forms`; see "Settled by the settings forms".
+"Decided" lists the project owner's decisions; everything under "Proposed"
+waits for the owner's confirmation and may change.
 
 ## Decided (owner, 2026-11-11)
 
@@ -106,8 +107,8 @@ SDK (`deckly-sdk` 0.1.0), where it departs from the sketch below:
 - `Action` needs `Default` (one value per key, made by the SDK) and
   `Settings: Clone`. Settings that do not fit the type read as `Default` with
   a line on standard error.
-- Not yet: `form()` (settings forms, stage 3), plugin-wide state and global
-  settings in the API (the protocol carries global settings), dials.
+- Not yet in stage 1: `form()` and global settings in the API (both came
+  with the settings forms, below), plugin-wide state, dials.
 - `--describe` names the running program for the current target only;
   `deckly-cli pack` is meant to merge the targets.
 - `deckly_sdk::testing::Harness` plays the host over in-process pipes.
@@ -117,6 +118,139 @@ folder, the value, a detail line and a progress bar, in the key's title font
 and colour unless the face sets colours. A title on the key (the user's or
 the plugin's) takes the label's place; the user's own picture wins over the
 face's background. Text is cut to 32 characters and shrunk to fit the key.
+
+## Settled by the settings forms (implementation, 2026-11-12)
+
+Built: forms in `crates/deckly-plugin-protocol/src/form.rs`, the builder in
+`crates/deckly-sdk/src/form.rs`, global settings in
+`crates/deckly-sdk/src/globals.rs`, drawing in `crates/deckly/src/forms.rs`,
+secrets in `crates/deckly/src/secrets.rs` and `crates/deckly/src/os/secrets/`,
+and forms in `examples/counter-plugin`. Facts of the code; the owner may
+still change them.
+
+Forms in the manifest:
+
+- `deckly-plugin.json` holds `form` per action (the key's settings) and one
+  `form` for the plugin (its global settings): `{"fields": [...]}`.
+- A field is a flat object: `kind`, `key` (the settings property), `label`,
+  `help`, `placeholder`, `default`, `required`, `min`, `max`, `step`,
+  `integer`, `min_length`, `max_length`, `multiline`, `options` (each
+  `{value, label}`), `dynamic`, `extensions` and `visible_when`
+  (`{field, equals}`). Properties that do not apply to the kind are ignored.
+- Kinds: `text`, `secret`, `number`, `slider`, `checkbox`, `choice`, `file`,
+  `folder`, `color`, `hotkey`, `button`, `section`, `note`. An unknown kind
+  reads as unknown and is not shown; unknown properties are ignored. A known
+  property of the wrong type, or a form over a limit, makes the manifest
+  invalid, like any other manifest error.
+- Values: strings for text, secret, choice, file and folder; numbers for
+  number and slider; `true`/`false`; `"#rrggbb"`; a hotkey as `{"key",
+  "ctrl", "shift", "alt", "meta"}`, the shape built-in Hotkey keys use.
+- Limits in `deckly_plugin_protocol::limits`: 64 fields, keys of 64 bytes
+  (letters, digits, `_`, `-`, `.`, unique in the form), labels of 100
+  characters, help lines and notes of 500, 256 options of 256 bytes, 16
+  extensions, 4 KiB for a default or a condition value, 8192 characters for
+  a text, 64 KiB for the whole form. A default must be a value its field
+  accepts.
+- Checks shared by host and SDK (`Field::check`) give plain messages: "This
+  field is required.", "Use at most 12 characters.", "Enter a number from 1
+  to 100.". A dynamic choice accepts any string.
+- `visible_when` uses the setting or the field's default. A field whose
+  condition names a hidden field is hidden too; a loop of conditions hides
+  its fields. A condition on a property no field shows uses the setting
+  alone. Hidden fields keep their values and are not checked.
+
+Messages (protocol number unchanged, 1; older hosts ignore them):
+
+- Host to plugin: `get_choices {request, field, key?}` and `button {field,
+  key?}`. Without `key` they belong to the plugin-wide form. The key need not
+  be on a device.
+- Plugin to host: `choices {request, options, error?}`, at most 256 options
+  and an error of 200 characters.
+- The host gives up on a choice after 5 seconds. The form shows "Loading
+  options…", then "The plugin did not answer in time." or the plugin's
+  error, with Retry; a plugin that is not running fails at once. A late
+  answer is dropped.
+- The SDK asks for the global settings (`get_global_settings`) right after
+  `ready`.
+
+SDK:
+
+- `Action::form(form: &mut Form)` and `Plugin::form(|form| ...)`, a builder:
+  `form.number("step", "Step").range(1..=100).default(1)`. `range` with
+  whole-number types sets `integer`. Text is cut to the limits, fields past
+  64 are left out with a line on standard error, and `--describe` refuses a
+  manifest the host would refuse (`Plugin::check`).
+- `Action::choices(field, &settings, &globals)` is an associated function,
+  not a method: Deckly asks for options of keys no device shows, which have
+  no action value. It runs on a thread of its own, so a slow lookup does not
+  hold key events up; a panic in it is answered as an error.
+- `Action::button(&mut self, key, button)`. For a key no device shows, the
+  SDK makes a value just for the press and drops it after. Such a key stores
+  settings but draws nothing (titles, faces, images and timers are dropped),
+  because nothing would update them.
+- `Globals` (from `key.globals()` and the plugin handlers): `get::<G>()`,
+  `set(&g)`, `update::<G>(...)`, `value()`, `is_loaded()`.
+  `Action::global_settings_changed` and `Plugin::on_global_settings` hear of
+  changes; `Plugin::on_choices` and `Plugin::on_button` answer the plugin-wide
+  form. Storing a typed value drops properties the type does not hold, so
+  the type should hold every field of the form (the counter keeps the rest
+  in a `#[serde(flatten)]` map).
+- The harness answers `get_global_settings` itself and adds `place` (a key
+  in the editor only), `choices`, `plugin_choices`, `button`,
+  `plugin_button`, `set_globals`, `globals`, `stored_globals`, `form`,
+  `plugin_form` and `manifest`.
+
+App:
+
+- A Deckly action with a form shows it in the rows of the key form, with
+  the same grid, label column, widths and widgets as the built-in actions
+  (DragValue for numbers, ComboBox for choices, the built-in hotkey
+  recorder). The rows scroll when the form is taller than the panel.
+- Edits go into the key's settings in the profile copy the editor works on,
+  so they are saved and undone like any other edit; the plugin gets
+  `settings` after each change. Undo and redo do not tell the plugin yet; it
+  hears of the restored settings when the key appears again.
+- Input that fails its checks stays in the field with the message under it
+  and is not saved; the last value that passed stays in the profile.
+- A plugin with a plugin-wide form gets a gear button in the Plugins tab
+  (and "Settings…" in its menu), which opens a window with the form. It
+  edits the plugin's global settings file and sends them to the plugin; it
+  reads the file again when the plugin stores global settings itself.
+
+Secrets:
+
+- The settings (a key's, or the global settings file in `plugin-data`, which
+  backups include) hold a reference `{"deckly_secret": "<id>"}`, never the
+  value. A key's id is a random UUID; a plugin-wide secret's id is
+  `global.<field>`. The value is stored under the plugin's id and that id.
+- On the way to a Deckly plugin the host passes every settings object through
+  a filter that puts the values back (`Host::set_settings_filter`); a secret
+  that cannot be read reaches the plugin as an empty string. Settings the
+  plugin sends back lose their secret values again before they are saved; a
+  value equal to the stored one, or one sent while the store could not be
+  read, does not overwrite the store.
+- A secret is stored when its field loses focus or Enter is pressed, not on
+  every key.
+- Stores: Credential Manager (generic credential `Deckly/<plugin>/<id>`, kept
+  on this computer), the Keychain (generic password, service `Deckly`,
+  account `<plugin>/<id>`) and the Secret Service (attributes `xdg:schema`
+  `app.deckly.PluginSecret`, `deckly-plugin`, `deckly-secret`, default
+  collection, a `plain` session over the user's own bus, 3 s timeout). A
+  locked keyring is reported; Deckly does not ask to unlock it.
+- The fallback is `secrets.json` in Deckly's data folder, mode 0600 on Linux
+  and macOS, written through a temporary file. It is used when the system's
+  store does not answer, or with `DECKLY_SECRET_STORE=file`; the field then
+  says "Kept in a file on this computer, without the system's protection."
+  with the reason on hover. At start, when the store answers, the file's
+  secrets move into it and the file is removed; if one cannot move, the file
+  stays in use.
+- Tested: the file and the reference handling in unit tests; the Secret
+  Service by a test against a private GNOME Keyring in its own D-Bus session
+  (`secret_service_round_trip`, ignored by default) and by running the app
+  against such a keyring. Credential Manager and the Keychain are
+  compile-checked only; they have not run.
+- A copied key shares its secret with the original until either is given a
+  new one through Deckly; secrets of deleted keys stay in the store.
 
 ## Goals
 
@@ -268,22 +402,8 @@ Three levels, cheapest first:
 
 ### Settings forms
 
-The plugin declares a form per action and one for the whole plugin (OBS
-address and password); Deckly draws both in egui.
-
-Fields: text, secret, number, slider, checkbox, choice, file, folder, colour,
-hotkey, button, section and note. A choice lists fixed options or asks the
-plugin for them when the form opens (OBS scenes). Fields may depend on other
-fields (shown only when another has a value) and carry simple validation.
-
-Secrets are stored in the system's own store: Credential Manager on Windows,
-Keychain on macOS, the Secret Service on Linux (decided on 2026-11-11). They
-never go into a profile, a profile export or a backup. On a system without
-such a store, as some minimal Linux sessions are, Deckly keeps them in one
-file of its own in its data folder, readable by the user only, and the form
-says under the field that the secret is stored on this computer without the
-system's protection. When a store appears later, Deckly moves the secrets
-into it and removes the file. The plugin sees no difference.
+Built; see "Settled by the settings forms". Storing secrets in the system's
+own store was decided on 2026-11-11.
 
 ### Host services
 
@@ -367,7 +487,7 @@ Later, not in this work: `deckly://install/<id>` links and a website.
 2. Protocol crate, the pipe transport in the host, a minimal SDK (key events,
    titles, faces, settings), the example plugin and its test. Built (see
    "Settled by stage 1").
-3. Settings forms in egui.
+3. Settings forms in egui. Built (see "Settled by the settings forms").
 4. Host services.
 5. `deckly-cli new`, `dev`, `validate`, `pack`.
 6. Timer and System stats, each in its own repository.
@@ -407,6 +527,14 @@ Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
   Deckly is replaced if the CI key has to change.
 - How `deckly-cli dev` reaches the running app.
 - The rule for the oldest Rust version the SDK supports.
+- Whether undo and redo should send the restored settings to a Deckly plugin
+  right away.
+- Whether copying a key should give its secrets new references (and copy the
+  values), and whether removing a key should remove its secrets from the
+  store.
+- Whether the Secret Service should use an encrypted session
+  (`dh-ietf1024-sha256-aes128-cbc-pkcs7`) instead of `plain`; that needs a
+  Diffie-Hellman and AES implementation in the tree.
 
 ## Measurements (2026-11-11)
 

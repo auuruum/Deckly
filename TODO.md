@@ -107,16 +107,25 @@ the [design draft](docs/plugin-sdk.md).
 - [x] Deckly plugins in the host: pipes instead of a WebSocket.
 - [x] `deckly-sdk`: a Rust crate for writing plugins. Done: actions, typed
       settings, titles, states, faces, images, marks, a per-key timer,
-      `--describe` and a test harness. Not yet: plugin-wide shared state and
-      global settings in the SDK's API (the protocol carries them).
+      settings forms, typed global settings (`Globals`), `--describe` and a
+      test harness. Not yet: plugin-wide state other than settings (statics
+      do for now).
 - [x] Key faces: the plugin describes a key and Deckly draws it.
 - [ ] Deckly plugin packages (`.decklyPlugin` archives) through the install
       path; plain Deckly plugin folders install already.
 - [ ] Faces in the editor without a device: like Stream Deck plugins, a
       Deckly plugin hears of a key only while a device shows it, so the
       editor alone shows the action's icon.
-- [ ] Declarative plugin settings: the plugin describes its fields and Deckly
-      draws the form in egui, with no HTML or web view.
+- [x] Declarative plugin settings: the plugin describes its fields and Deckly
+      draws the form in egui, with no HTML or web view. One form per action in
+      the key editor, one per plugin from the Plugins tab; dynamic choices and
+      buttons answered by the plugin.
+- [x] Plugin secrets in the system's secret store (Credential Manager, the
+      Keychain, the Secret Service), with a private file as the fallback;
+      never in a profile, an export or a backup. Only the Secret Service and
+      the file were run; Windows and macOS are compile-checked only.
+- [ ] Tell a Deckly plugin about settings that undo or redo changed; today
+      it hears of them when the key appears again.
 - [ ] Host services: a plugin asks Deckly for hotkeys, text, the active window
       and similar, so one plugin works on X11, Wayland, Windows and macOS.
 - [ ] `deckly-cli`: `new`, `dev` (restart on changes, live log), `validate`,
