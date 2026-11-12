@@ -55,7 +55,7 @@ type ChoicesFn = fn(&str, &Value, &Globals) -> std::result::Result<Vec<Choice>, 
 #[derive(Clone, Copy)]
 pub(crate) struct Maker {
     id: &'static str,
-    make: fn(KeyInfo, &Shared) -> Box<dyn Slot>,
+    make: fn(KeyInfo, &Shared, bool) -> Box<dyn Slot>,
     choices: ChoicesFn,
 }
 
@@ -76,13 +76,14 @@ fn choices_of<A: Action>(
     A::choices(field, &settings, globals)
 }
 
-fn make<A: Action>(info: KeyInfo, shared: &Shared) -> Box<dyn Slot> {
+fn make<A: Action>(info: KeyInfo, shared: &Shared, shown: bool) -> Box<dyn Slot> {
     let settings = read_settings::<A>(&info);
     let key = Key::<A>::new(KeyInner {
         context: info.context.clone(),
         info: Mutex::new(info),
         settings: Mutex::new(settings),
         alive: AtomicBool::new(true),
+        shown,
         timer: AtomicU64::new(0),
         out: shared.out.clone(),
         timers: shared.timers.clone(),
@@ -423,12 +424,13 @@ fn run_timers(rx: Receiver<TimerCtl>, events: Sender<Event>) {
 
 fn dispatch(makers: &[Maker], shared: &Shared, handlers: &Handlers, rx: Receiver<Event>) {
     let mut keys: HashMap<String, Box<dyn Slot>> = HashMap::new();
-    let create = |info: &KeyInfo| {
+    let make = |info: &KeyInfo, shown: bool| {
         makers
             .iter()
             .find(|m| m.id == info.action)
-            .map(|m| (m.make)(info.clone(), shared))
+            .map(|m| (m.make)(info.clone(), shared, shown))
     };
+    let create = |info: &KeyInfo| make(info, true);
     while let Ok(event) = rx.recv() {
         match event {
             Event::Host(HostMessage::KeyAppear { key }) => {
@@ -493,7 +495,7 @@ fn dispatch(makers: &[Maker], shared: &Shared, handlers: &Handlers, rx: Receiver
             }) => {
                 if let Some(slot) = keys.get_mut(&key.context) {
                     slot.button(key, &field);
-                } else if let Some(mut slot) = create(&key) {
+                } else if let Some(mut slot) = make(&key, false) {
                     // A key in the editor only: made for the press, then dropped.
                     slot.button(key, &field);
                     slot.discard();

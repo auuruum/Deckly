@@ -105,6 +105,7 @@ pub(crate) struct KeyInner<S> {
     pub(crate) info: Mutex<KeyInfo>,
     pub(crate) settings: Mutex<S>,
     pub(crate) alive: AtomicBool,
+    pub(crate) shown: bool,
     pub(crate) timer: AtomicU64,
     pub(crate) out: Arc<Output>,
     pub(crate) timers: Sender<TimerCtl>,
@@ -180,6 +181,13 @@ impl<A: Action> Key<A> {
         self.inner.alive.load(Ordering::Relaxed)
     }
 
+    /// Alive and shown somewhere. A key made only to answer a button of
+    /// its form in the editor stores settings but draws nothing: no device
+    /// shows it, and it is gone right after.
+    fn shows(&self) -> bool {
+        self.live() && self.inner.shown
+    }
+
     fn info(&self) -> KeyInfo {
         lock(&self.inner.info).clone()
     }
@@ -219,7 +227,7 @@ impl<A: Action> Key<A> {
 
     /// Whether the key is still shown; false after it disappeared.
     pub fn is_visible(&self) -> bool {
-        self.live()
+        self.shows()
     }
 
     /// The key's settings.
@@ -276,7 +284,7 @@ impl<A: Action> Key<A> {
     }
 
     fn send_title(&self, title: Option<String>) {
-        if !self.live() {
+        if !self.shows() {
             return;
         }
         let context = &self.inner.context;
@@ -297,7 +305,7 @@ impl<A: Action> Key<A> {
 
     /// Moves a key with several states to another state.
     pub fn set_state(&self, state: u8) {
-        if !self.live() {
+        if !self.shows() {
             return;
         }
         let context = &self.inner.context;
@@ -328,7 +336,7 @@ impl<A: Action> Key<A> {
     }
 
     fn send_face(&self, face: Option<Face>) {
-        if !self.live() {
+        if !self.shows() {
             return;
         }
         let context = &self.inner.context;
@@ -365,7 +373,7 @@ impl<A: Action> Key<A> {
     }
 
     fn send_image(&self, image: Option<&Image>) {
-        if !self.live() {
+        if !self.shows() {
             return;
         }
         let context = &self.inner.context;
@@ -389,7 +397,7 @@ impl<A: Action> Key<A> {
 
     /// Shows the short success mark.
     pub fn show_ok(&self) {
-        if self.live() {
+        if self.shows() {
             let context = self.inner.context.clone();
             self.inner
                 .out
@@ -399,7 +407,7 @@ impl<A: Action> Key<A> {
 
     /// Shows the short failure mark.
     pub fn show_alert(&self) {
-        if self.live() {
+        if self.shows() {
             let context = self.inner.context.clone();
             self.inner
                 .out
@@ -411,7 +419,7 @@ impl<A: Action> Key<A> {
     /// the key disappears. Replaces the key's earlier timer. Periods are at
     /// least 10 ms.
     pub fn every(&self, period: Duration) {
-        if !self.live() {
+        if !self.shows() {
             return;
         }
         let generation = self.inner.timer.fetch_add(1, Ordering::Relaxed) + 1;

@@ -2404,57 +2404,67 @@ impl App {
             ui.add_space(16.0);
             form = ui
                 .vertical(|ui| {
-                    egui::Grid::new("key-form")
-                        .num_columns(2)
-                        .spacing(vec2(14.0, 10.0))
+                    // A plugin's form can be longer than the panel.
+                    egui::ScrollArea::vertical()
+                        .id_salt("key-form-scroll")
                         .show(ui, |ui| {
-                            ui.label(RichText::new("Title").color(TEXT_DIM));
-                            ui.horizontal_top(|ui| {
-                                let linked = overlay.as_ref().and_then(|o| o.title.as_deref());
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut key.title)
-                                        .hint_text(
-                                            RichText::new(linked.unwrap_or("")).color(TEXT_FAINT),
-                                        )
-                                        .desired_rows(1)
-                                        .desired_width(
-                                            if top_level
-                                                && key.action != actions::PARENT_FOLDER
-                                                && folder_exit.is_some()
-                                            {
-                                                228.0
-                                            } else {
-                                                260.0
-                                            },
-                                        ),
-                                );
-                                title_style_button(ui, &mut key.title_style, &defaults);
-                                if top_level
-                                    && key.action != actions::PARENT_FOLDER
-                                    && let Some(folder_exit) = folder_exit
-                                {
-                                    folder_exit_button(ui, &mut key.auto_exit, folder_exit);
-                                }
-                            });
-                            ui.end_row();
-                            if key.action == actions::PARENT_FOLDER {
-                                reset_folder_exit = parent_auto_exit_rows(ui, &mut key.auto_exit);
-                            }
-                            match &plugin {
-                                Some(p) if p.form.is_some() => {
-                                    self.deckly_form(ui, key, p, &context);
-                                    if in_sequence {
-                                        desired_state_row(ui, key, p.states);
+                            egui::Grid::new("key-form")
+                                .num_columns(2)
+                                .spacing(vec2(14.0, 10.0))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("Title").color(TEXT_DIM));
+                                    ui.horizontal_top(|ui| {
+                                        let linked =
+                                            overlay.as_ref().and_then(|o| o.title.as_deref());
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut key.title)
+                                                .hint_text(
+                                                    RichText::new(linked.unwrap_or(""))
+                                                        .color(TEXT_FAINT),
+                                                )
+                                                .desired_rows(1)
+                                                .desired_width(
+                                                    if top_level
+                                                        && key.action != actions::PARENT_FOLDER
+                                                        && folder_exit.is_some()
+                                                    {
+                                                        228.0
+                                                    } else {
+                                                        260.0
+                                                    },
+                                                ),
+                                        );
+                                        title_style_button(ui, &mut key.title_style, &defaults);
+                                        if top_level
+                                            && key.action != actions::PARENT_FOLDER
+                                            && let Some(folder_exit) = folder_exit
+                                        {
+                                            folder_exit_button(ui, &mut key.auto_exit, folder_exit);
+                                        }
+                                    });
+                                    ui.end_row();
+                                    if key.action == actions::PARENT_FOLDER {
+                                        reset_folder_exit =
+                                            parent_auto_exit_rows(ui, &mut key.auto_exit);
                                     }
-                                }
-                                Some(p) => {
-                                    self.plugin_form(ui, p);
-                                    if in_sequence {
-                                        desired_state_row(ui, key, p.states);
+                                    match &plugin {
+                                        Some(p) if p.form.is_some() => {
+                                            self.deckly_form(ui, key, p, &context);
+                                            if in_sequence {
+                                                desired_state_row(ui, key, p.states);
+                                            }
+                                        }
+                                        Some(p) => {
+                                            self.plugin_form(ui, p);
+                                            if in_sequence {
+                                                desired_state_row(ui, key, p.states);
+                                            }
+                                        }
+                                        None => {
+                                            self.action_form(ui, key, &profiles, &pages, &context)
+                                        }
                                     }
-                                }
-                                None => self.action_form(ui, key, &profiles, &pages, &context),
-                            }
+                                });
                         });
                 })
                 .response

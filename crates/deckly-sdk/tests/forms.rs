@@ -80,7 +80,11 @@ impl Action for Lamp {
     fn button(&mut self, key: &Key<Self>, button: &str) {
         match button {
             "blink" => key.show_ok(),
-            "count" => key.update_settings(|s| s.presses += 1),
+            "count" => {
+                key.update_settings(|s| s.presses += 1);
+                // Drawn only where a device shows the key.
+                key.set_title("counted");
+            }
             _ => {}
         }
     }
@@ -271,6 +275,14 @@ fn buttons_reach_shown_keys_editor_keys_and_the_plugin() {
         deck.settings("editor", WAIT),
         Some(json!({"room": "hall", "level": 0, "presses": 5}))
     );
+    // The editor-only key drew nothing.
+    while let Some(m) = deck.recv(Duration::from_millis(300)) {
+        assert!(
+            !matches!(&m.message, PluginMessage::SetTitle { context, .. } if context == "editor"),
+            "{:?}",
+            m.message
+        );
+    }
     deck.plugin_button("pair");
     assert_eq!(
         deck.stored_globals(WAIT),
