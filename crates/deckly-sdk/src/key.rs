@@ -108,6 +108,7 @@ pub(crate) struct KeyInner<S> {
     pub(crate) timer: AtomicU64,
     pub(crate) out: Arc<Output>,
     pub(crate) timers: Sender<TimerCtl>,
+    pub(crate) globals: crate::Globals,
 }
 
 /// One key showing an action. Cheap to clone, and `Send`: hand it to a
@@ -209,6 +210,11 @@ impl<A: Action> Key<A> {
     /// Whether the key is part of a Multi Action rather than on the device.
     pub fn in_multi_action(&self) -> bool {
         self.info().in_multi_action
+    }
+
+    /// The plugin's global settings, shared by every key.
+    pub fn globals(&self) -> &crate::Globals {
+        &self.inner.globals
     }
 
     /// Whether the key is still shown; false after it disappeared.

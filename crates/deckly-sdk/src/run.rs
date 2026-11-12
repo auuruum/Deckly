@@ -2,10 +2,15 @@
 //! timer thread, and the dispatcher that calls the actions.
 
 use crate::key::{KeyInner, Output, TimerCtl};
-use crate::{Action, Error, Key, Plugin, Result, SDK_VERSION};
-use deckly_plugin_protocol::{
-    HostMessage, KeyInfo, MIN_PROTOCOL, PROTOCOL, PluginMessage, Reader, Received,
+use crate::{
+    Action, ButtonHandler, ChoicesHandler, Error, Globals, GlobalsHandler, Key, Plugin, Result,
+    SDK_VERSION,
 };
+use deckly_plugin_protocol::limits::{MAX_CHOICES, MAX_ERROR_CHARS};
+use deckly_plugin_protocol::{
+    Choice, HostMessage, KeyInfo, MIN_PROTOCOL, PROTOCOL, PluginMessage, Reader, Received, truncate,
+};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,6 +32,7 @@ enum Event {
 pub(crate) struct Shared {
     out: Arc<Output>,
     timers: Sender<TimerCtl>,
+    globals: Globals,
 }
 
 /// One key with its action value, behind a type-erased face.
@@ -37,12 +43,37 @@ pub(crate) trait Slot: Send {
     fn up(&mut self, info: KeyInfo);
     fn settings(&mut self, info: KeyInfo);
     fn tick(&mut self, generation: u64);
+    fn button(&mut self, info: KeyInfo, field: &str);
+    fn globals_changed(&mut self);
+    /// Ends a key made only to answer a button, without `key_disappear`.
+    fn discard(&mut self);
 }
 
-pub(crate) type Maker = (&'static str, fn(KeyInfo, &Shared) -> Box<dyn Slot>);
+type ChoicesFn = fn(&str, &Value, &Globals) -> std::result::Result<Vec<Choice>, String>;
+
+/// What the SDK knows of one action type.
+#[derive(Clone, Copy)]
+pub(crate) struct Maker {
+    id: &'static str,
+    make: fn(KeyInfo, &Shared) -> Box<dyn Slot>,
+    choices: ChoicesFn,
+}
 
 pub(crate) fn maker<A: Action>() -> Maker {
-    (A::ID, make::<A>)
+    Maker {
+        id: A::ID,
+        make: make::<A>,
+        choices: choices_of::<A>,
+    }
+}
+
+fn choices_of<A: Action>(
+    field: &str,
+    settings: &Value,
+    globals: &Globals,
+) -> std::result::Result<Vec<Choice>, String> {
+    let settings = serde_json::from_value(settings.clone()).unwrap_or_default();
+    A::choices(field, &settings, globals)
 }
 
 fn make<A: Action>(info: KeyInfo, shared: &Shared) -> Box<dyn Slot> {
@@ -55,6 +86,7 @@ fn make<A: Action>(info: KeyInfo, shared: &Shared) -> Box<dyn Slot> {
         timer: AtomicU64::new(0),
         out: shared.out.clone(),
         timers: shared.timers.clone(),
+        globals: shared.globals.clone(),
     });
     Box::new(Instance {
         action: A::default(),
@@ -135,6 +167,28 @@ impl<A: Action> Slot for Instance<A> {
             self.action.tick(&self.key);
         }
     }
+
+    fn button(&mut self, info: KeyInfo, field: &str) {
+        // The form edits settings the plugin may not have heard of yet.
+        *self
+            .key
+            .inner
+            .settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = read_settings::<A>(&info);
+        self.update(info);
+        self.action.button(&self.key, field);
+    }
+
+    fn globals_changed(&mut self) {
+        self.action.global_settings_changed(&self.key);
+    }
+
+    fn discard(&mut self) {
+        self.key.stop_timer();
+        self.key.inner.alive.store(false, Ordering::Relaxed);
+        self.key.inner.out.forget(&self.key.inner.context);
+    }
 }
 
 pub(crate) fn run<R, W>(plugin: Plugin, input: R, output: W, real: bool) -> Result<()>
@@ -172,9 +226,21 @@ where
         },
         None,
     );
+    out.send(&PluginMessage::GetGlobalSettings, None);
+    let globals = Globals::new(out.clone());
 
     let (events, rx) = channel();
     let (timers, timer_rx) = channel();
+    let (asks, ask_rx) = channel();
+    spawn("deckly-sdk-forms", {
+        let answerer = Answerer {
+            makers: plugin.makers.clone(),
+            plugin: plugin.on_choices.clone(),
+            globals: globals.clone(),
+            out: out.clone(),
+        };
+        move || answerer.run(ask_rx)
+    })?;
     spawn("deckly-sdk-input", {
         let events = events.clone();
         move || read_input(reader, events, real)
@@ -184,9 +250,96 @@ where
         move || run_timers(timer_rx, events)
     })?;
     drop(events);
-    let shared = Shared { out, timers };
-    dispatch(&plugin.makers, &shared, rx);
+    let shared = Shared {
+        out,
+        timers,
+        globals,
+    };
+    let handlers = Handlers {
+        button: plugin.on_button.clone(),
+        globals: plugin.on_globals.clone(),
+        asks,
+    };
+    dispatch(&plugin.makers, &shared, &handlers, rx);
     Ok(())
+}
+
+/// A request for the options of a dynamic choice.
+struct Ask {
+    request: u64,
+    field: String,
+    key: Option<KeyInfo>,
+}
+
+/// Answers choice requests on a thread of its own, so a slow handler (a
+/// network lookup) does not hold up key events.
+struct Answerer {
+    makers: Vec<Maker>,
+    plugin: Option<ChoicesHandler>,
+    globals: Globals,
+    out: Arc<Output>,
+}
+
+impl Answerer {
+    fn run(self, rx: Receiver<Ask>) {
+        while let Ok(ask) = rx.recv() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.list(&ask)))
+                .unwrap_or_else(|_| Err("the plugin failed while listing the options".into()));
+            self.out.send(&choices_answer(ask.request, result), None);
+        }
+    }
+
+    fn list(&self, ask: &Ask) -> std::result::Result<Vec<Choice>, String> {
+        match &ask.key {
+            Some(key) => {
+                let maker = self
+                    .makers
+                    .iter()
+                    .find(|m| m.id == key.action)
+                    .ok_or("the plugin has no such action")?;
+                (maker.choices)(&ask.field, &key.settings, &self.globals)
+            }
+            None => match &self.plugin {
+                Some(handler) => handler(&ask.field, &self.globals),
+                None => Err(format!("no options for {}", ask.field)),
+            },
+        }
+    }
+}
+
+/// The `choices` message for a handler's result, cut to the limits.
+pub(crate) fn choices_answer(
+    request: u64,
+    result: std::result::Result<Vec<Choice>, String>,
+) -> PluginMessage {
+    match result {
+        Ok(options) => {
+            if options.len() > MAX_CHOICES {
+                eprintln!("deckly-sdk: only the first {MAX_CHOICES} options are sent");
+            }
+            PluginMessage::Choices {
+                request,
+                options: options
+                    .into_iter()
+                    .take(MAX_CHOICES)
+                    .map(|c| Choice::new(&c.value, &c.label))
+                    .collect(),
+                error: None,
+            }
+        }
+        Err(e) => PluginMessage::Choices {
+            request,
+            options: Vec::new(),
+            error: Some(truncate(&e, MAX_ERROR_CHARS).to_owned()),
+        },
+    }
+}
+
+/// The plugin's own handlers, called by the dispatcher.
+struct Handlers {
+    button: Option<ButtonHandler>,
+    globals: Option<GlobalsHandler>,
+    asks: Sender<Ask>,
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<()> {
@@ -268,13 +421,13 @@ fn run_timers(rx: Receiver<TimerCtl>, events: Sender<Event>) {
     }
 }
 
-fn dispatch(makers: &[Maker], shared: &Shared, rx: Receiver<Event>) {
+fn dispatch(makers: &[Maker], shared: &Shared, handlers: &Handlers, rx: Receiver<Event>) {
     let mut keys: HashMap<String, Box<dyn Slot>> = HashMap::new();
     let create = |info: &KeyInfo| {
         makers
             .iter()
-            .find(|(id, _)| *id == info.action)
-            .map(|(_, make)| make(info.clone(), shared))
+            .find(|m| m.id == info.action)
+            .map(|m| (m.make)(info.clone(), shared))
     };
     while let Ok(event) = rx.recv() {
         match event {
@@ -312,6 +465,43 @@ fn dispatch(makers: &[Maker], shared: &Shared, rx: Receiver<Event>) {
             Event::Host(HostMessage::Settings { key }) => {
                 if let Some(slot) = keys.get_mut(&key.context) {
                     slot.settings(key);
+                }
+            }
+            Event::Host(HostMessage::GlobalSettings { settings }) => {
+                shared.globals.received(settings);
+                if let Some(handler) = &handlers.globals {
+                    handler(&shared.globals);
+                }
+                for slot in keys.values_mut() {
+                    slot.globals_changed();
+                }
+            }
+            Event::Host(HostMessage::GetChoices {
+                request,
+                field,
+                key,
+            }) => {
+                let _ = handlers.asks.send(Ask {
+                    request,
+                    field,
+                    key,
+                });
+            }
+            Event::Host(HostMessage::Button {
+                field,
+                key: Some(key),
+            }) => {
+                if let Some(slot) = keys.get_mut(&key.context) {
+                    slot.button(key, &field);
+                } else if let Some(mut slot) = create(&key) {
+                    // A key in the editor only: made for the press, then dropped.
+                    slot.button(key, &field);
+                    slot.discard();
+                }
+            }
+            Event::Host(HostMessage::Button { field, key: None }) => {
+                if let Some(handler) = &handlers.button {
+                    handler(&field, &shared.globals);
                 }
             }
             Event::Host(_) => {}

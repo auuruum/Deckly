@@ -44,25 +44,38 @@
 //! Inside are threads and blocking I/O; there is no async runtime. A
 //! [`Key`] is cheap to clone and can be moved to any thread.
 
+pub mod form;
+mod globals;
 mod key;
 mod run;
 pub mod testing;
 
 pub use deckly_plugin_protocol as protocol;
-pub use deckly_plugin_protocol::{Color, Face, ManifestState as State};
+pub use deckly_plugin_protocol::{Choice, Color, Face, ManifestState as State};
+pub use form::Form;
+pub use globals::Globals;
 pub use key::{Image, Key};
 
-use deckly_plugin_protocol::{Manifest, ManifestAction, PROTOCOL};
+use deckly_plugin_protocol::{Manifest, ManifestAction, PROTOCOL, Validate};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt;
 use std::io::{Read, Write};
+use std::sync::Arc;
 
 /// What a plugin author usually needs.
 pub mod prelude {
-    pub use crate::{Action, Color, Face, Image, Key, Plugin, State};
+    pub use crate::{Action, Choice, Color, Face, Form, Globals, Image, Key, Plugin, State};
     pub use serde::{Deserialize, Serialize};
 }
+
+/// Lists the options of a dynamic choice in the plugin-wide form.
+pub type ChoicesHandler =
+    Arc<dyn Fn(&str, &Globals) -> std::result::Result<Vec<Choice>, String> + Send + Sync>;
+/// Answers a button of the plugin-wide form.
+pub type ButtonHandler = Arc<dyn Fn(&str, &Globals) + Send + Sync>;
+/// Hears that the global settings changed.
+pub type GlobalsHandler = Arc<dyn Fn(&Globals) + Send + Sync>;
 
 /// The SDK version, written into `ready` and the manifest.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -136,12 +149,38 @@ pub trait Action: Default + Send + 'static {
     fn settings_changed(&mut self, _key: &Key<Self>) {}
     /// The key's timer fired; see [`Key::every`].
     fn tick(&mut self, _key: &Key<Self>) {}
+
+    /// Describes the settings form Deckly shows for a key with this action.
+    /// Each field's key names a field of `Settings`.
+    fn form(_form: &mut Form) {}
+
+    /// The options of a choice field marked [`dynamic`](form::FieldBuilder::dynamic),
+    /// asked each time a key's form opens. Runs on a thread of its own, so
+    /// a slow answer does not hold up key presses; Deckly stops waiting
+    /// after a few seconds and offers a retry. An error is shown to the user.
+    fn choices(
+        field: &str,
+        _settings: &Self::Settings,
+        _globals: &Globals,
+    ) -> std::result::Result<Vec<Choice>, String> {
+        Err(format!("no options for {field}"))
+    }
+
+    /// The user pressed a button in the key's form. The key may be in the
+    /// editor only, without a device showing it.
+    fn button(&mut self, _key: &Key<Self>, _button: &str) {}
+
+    /// The plugin's global settings changed; see [`Key::globals`].
+    fn global_settings_changed(&mut self, _key: &Key<Self>) {}
 }
 
 /// A plugin: its description and its actions.
 pub struct Plugin {
     manifest: Manifest,
     makers: Vec<run::Maker>,
+    pub(crate) on_choices: Option<ChoicesHandler>,
+    pub(crate) on_button: Option<ButtonHandler>,
+    pub(crate) on_globals: Option<GlobalsHandler>,
 }
 
 impl Plugin {
@@ -158,6 +197,9 @@ impl Plugin {
                 ..Manifest::default()
             },
             makers: Vec::new(),
+            on_choices: None,
+            on_button: None,
+            on_globals: None,
         }
     }
 
@@ -200,10 +242,59 @@ impl Plugin {
             icon: A::ICON.to_owned(),
             tooltip: A::TOOLTIP.to_owned(),
             states: A::states(),
-            form: None,
+            form: {
+                let mut form = Form::default();
+                A::form(&mut form);
+                form.into_description()
+            },
         });
         self.makers.push(run::maker::<A>());
         self
+    }
+
+    /// The plugin-wide settings form, for the global settings shared by
+    /// every key ([`Globals`]). Deckly shows it where the plugin is managed.
+    pub fn form(mut self, describe: impl FnOnce(&mut Form)) -> Self {
+        let mut form = Form::default();
+        describe(&mut form);
+        self.manifest.form = form.into_description();
+        self
+    }
+
+    /// Lists the options of a dynamic choice in the plugin-wide form. Runs
+    /// on a thread of its own, like [`Action::choices`].
+    pub fn on_choices(
+        mut self,
+        handler: impl Fn(&str, &Globals) -> std::result::Result<Vec<Choice>, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.on_choices = Some(Arc::new(handler));
+        self
+    }
+
+    /// Answers a button of the plugin-wide form.
+    pub fn on_button(mut self, handler: impl Fn(&str, &Globals) + Send + Sync + 'static) -> Self {
+        self.on_button = Some(Arc::new(handler));
+        self
+    }
+
+    /// Hears that the global settings changed, before the keys do.
+    pub fn on_global_settings(
+        mut self,
+        handler: impl Fn(&Globals) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_globals = Some(Arc::new(handler));
+        self
+    }
+
+    /// Checks the manifest as Deckly will: a form over a limit or with a
+    /// default its field refuses is an error here rather than in Deckly.
+    pub fn check(&self) -> Result<()> {
+        self.manifest()
+            .validate()
+            .map_err(|e| Error::Protocol(format!("the manifest is not valid: {e}")))
     }
 
     /// The manifest (`deckly-plugin.json`) for this plugin, naming the
@@ -224,6 +315,7 @@ impl Plugin {
     /// standard input. With `--describe` it prints the manifest instead.
     pub fn run(self) -> Result<()> {
         if std::env::args().skip(1).any(|a| a == "--describe") {
+            self.check()?;
             let text = serde_json::to_string_pretty(&self.manifest())
                 .map_err(|e| Error::Protocol(e.to_string()))?;
             println!("{text}");
