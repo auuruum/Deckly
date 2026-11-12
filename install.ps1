@@ -1,9 +1,9 @@
 # Installs Deckly from its GitHub releases on Windows (PowerShell 5.1 or 7):
 #
-#   irm https://raw.githubusercontent.com/auuruum/Deckly/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/deckly-app/Deckly/main/install.ps1 | iex
 #
 # Uninstall:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/auuruum/Deckly/main/install.ps1))) -Uninstall
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/deckly-app/Deckly/main/install.ps1))) -Uninstall
 #
 # Settings (environment variables):
 #   DECKLY_VERSION   a release tag such as v0.0.1 (default: the latest release)
@@ -19,7 +19,7 @@ param([switch]$Uninstall)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$Repo = 'auuruum/Deckly'
+$Repo = 'deckly-app/Deckly'
 $Name = 'deckly-setup-windows-x64.exe'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\Deckly'
 

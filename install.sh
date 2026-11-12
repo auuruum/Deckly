@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs Deckly from its GitHub releases on Linux and macOS:
 #
-#   curl -fsSL https://raw.githubusercontent.com/auuruum/Deckly/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/deckly-app/Deckly/main/install.sh | sh
 #
 # Uninstall:   curl -fsSL .../install.sh | sh -s -- --uninstall
 #
@@ -17,7 +17,7 @@
 
 set -eu
 
-REPO="auuruum/Deckly"
+REPO="deckly-app/Deckly"
 
 say() { printf 'deckly: %s\n' "$*"; }
 fail() { printf 'deckly: error: %s\n' "$*" >&2; exit 1; }

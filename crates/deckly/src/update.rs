@@ -21,8 +21,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-const REPO: &str = "auuruum/Deckly";
-pub const RELEASES_PAGE: &str = "https://github.com/auuruum/Deckly/releases";
+const REPO: &str = "deckly-app/Deckly";
+pub const RELEASES_PAGE: &str = "https://github.com/deckly-app/Deckly/releases";
 /// How often the automatic check runs while Deckly is open.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// The first automatic check waits until startup is done.
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(release.tag, "v0.2.0");
         assert_eq!(
             release.page(),
-            "https://github.com/auuruum/Deckly/releases/tag/v0.2.0"
+            "https://github.com/deckly-app/Deckly/releases/tag/v0.2.0"
         );
         assert!(parse_release("{}").is_err());
         assert!(parse_release("not json").is_err());
