@@ -18,7 +18,11 @@ and may change.
   plugin.
 - The first plugins, which decide what version 1 must hold: Timer, System
   stats and OBS.
-- The marketplace is part of this work, not a later project.
+- The marketplace is part of this work, not a later project. Its index is
+  signed; the signing key is a secret of the organization's CI.
+- Plugin secrets (an OBS password) are stored in the system's own secret
+  store when there is one; without one Deckly falls back to something of its
+  own (the owner left the choice of fallback to the design).
 - All of it is built on the branch `feature/plugin-sdk`, cut from `dev`. Each
   piece gets its own task branch cut from `feature/plugin-sdk` and is merged
   back into it. `feature/plugin-sdk` goes into `dev` only when the SDK and the
@@ -272,8 +276,14 @@ hotkey, button, section and note. A choice lists fixed options or asks the
 plugin for them when the form opens (OBS scenes). Fields may depend on other
 fields (shown only when another has a value) and carry simple validation.
 
-Secrets are kept out of profile exports. Where they are stored (the system
-keyring or Deckly's settings) is open.
+Secrets are stored in the system's own store: Credential Manager on Windows,
+Keychain on macOS, the Secret Service on Linux (decided on 2026-11-11). They
+never go into a profile, a profile export or a backup. On a system without
+such a store, as some minimal Linux sessions are, Deckly keeps them in one
+file of its own in its data folder, readable by the user only, and the form
+says under the field that the secret is stored on this computer without the
+system's protection. When a store appears later, Deckly moves the secrets
+into it and removes the file. The plugin sees no difference.
 
 ### Host services
 
@@ -335,7 +345,9 @@ A static registry, with no server and no accounts, as TODO.md already plans.
 - A plugin is added or updated by pull request. CI checks the entry: the
   schema, that the links answer, that the SHA-256 matches, that the manifest
   inside the package agrees with the entry.
-- CI builds one index file from all entries and publishes it on GitHub Pages.
+- CI builds one index file from all entries, signs it with the key kept in
+  the organization's CI secrets and publishes both on GitHub Pages. Deckly
+  carries the public key and refuses an index whose signature does not match.
   Deckly downloads that one file, bounded in size, and never more often than
   the user opens the Plugins tab or the update check runs.
 - The Plugins tab gets browse, search, install and update. A download is
@@ -368,17 +380,20 @@ Later, not in this work: `deckly://install/<id>` links and a website.
 Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
 `decklyapp`, `getdeckly`, `deckly-dev` and `deckly-rs` were free.
 
-- The owner creates the organization `deckly-app` and transfers the
-  repository in GitHub's settings.
-- Then the repository path changes in `crates/deckly/src/update.rs`,
+- Done on 2026-11-11: the owner created the organization `deckly-app` and
+  transferred the repository to `deckly-app/Deckly`.
+- The repository path changes in `crates/deckly/src/update.rs`,
   `install.sh`, `install.ps1`, `README.md`, `CHANGELOG.md`, the Homebrew
   formula and its tap, the AUR package, the Windows installer and
   `docs/releasing.md`.
-- Installed copies ask `api.github.com/repos/auuruum/Deckly`. They follow
-  redirects (`curl -L`), so they should keep updating after the transfer.
-  Not tested; check it with an installed 0.0.4 right after the move.
-- Unknown: whether `raw.githubusercontent.com` links to the install scripts
-  redirect after a transfer. Check before changing the README.
+- Checked with `curl -L` on 2026-11-11, after the transfer: the old
+  `api.github.com/repos/auuruum/Deckly/releases/latest` answers 200 through
+  one redirect, a v0.0.4 release file under the old
+  `github.com/auuruum/Deckly/releases/download/` path downloads through two
+  redirects, and the old `raw.githubusercontent.com/auuruum/Deckly/main/install.sh`
+  still answers 200. These are the requests an installed 0.0.4 makes; an
+  installed 0.0.4 itself was not run through an update.
+- The Homebrew tap is still `auuruum/homebrew-tap`; it was not moved.
 - The macOS bundle id `io.github.auuruum.deckly` stays, so the system keeps
   treating new versions as the same application.
 
@@ -388,11 +403,8 @@ Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
   starts with `deckly` among its first results. The exact names
   `deckly-sdk`, `deckly-cli` and `deckly-plugin-protocol` were not looked up
   one by one.
-- Whether the registry index is signed, as TODO.md says, and with which key.
-  A key kept in the organization's CI protects little more than HTTPS and
-  the SHA-256 sums do; a key kept offline makes every registry update a
-  manual step.
-- Where secrets are stored.
+- The signature scheme for the registry index and how the public key in
+  Deckly is replaced if the CI key has to change.
 - How `deckly-cli dev` reaches the running app.
 - The rule for the oldest Rust version the SDK supports.
 
