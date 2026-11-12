@@ -49,6 +49,8 @@ pub struct State {
     pub plugin_keys: HashMap<String, plugins::PluginKey>,
     /// The profile a device showed before its current one, by serial.
     pub previous: HashMap<String, String>,
+    /// Plugins' answers to the editor's choice requests.
+    pub choices: crate::forms::Answers,
     /// Holds actions back while the computer is locked.
     pub gate: Gate,
     /// Shows profiles by the application in the foreground.
@@ -72,6 +74,7 @@ impl State {
             catalog: plugins::Catalog::default(),
             plugin_keys: HashMap::new(),
             previous: HashMap::new(),
+            choices: crate::forms::Answers::default(),
             folder_exit: folder_exit::Timers::default(),
         }
     }

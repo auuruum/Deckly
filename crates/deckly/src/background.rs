@@ -421,7 +421,14 @@ fn start_host() -> (
     };
     let (tx, rx) = channel();
     match Host::start(config, tx) {
-        Ok(host) => (Some(host), Some(rx)),
+        Ok(host) => {
+            // Deckly plugins get their secrets back in place of references.
+            host.set_settings_filter(std::sync::Arc::new(|plugin, settings| {
+                crate::secrets::reveal(crate::secrets::vault(), plugin, settings);
+            }));
+            crate::secrets::init();
+            (Some(host), Some(rx))
+        }
         Err(e) => {
             eprintln!("deckly: cannot start plugins: {e}");
             (None, None)

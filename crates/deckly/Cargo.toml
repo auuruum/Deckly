@@ -41,6 +41,9 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # Plugin secrets in Credential Manager.
+    "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_Storage_EnhancedStorage",
     "Win32_Storage_Packaging_Appx",
     "Win32_System_LibraryLoader",

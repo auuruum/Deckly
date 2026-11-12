@@ -236,6 +236,11 @@ pub struct App {
     /// settings pages.
     owner_set: bool,
     recording_hotkey: bool,
+    /// The settings form of the selected key's Deckly plugin action.
+    key_form: crate::forms::FormState,
+    /// The plugin-wide settings window: plugin id, its global settings and
+    /// the form's own state.
+    plugin_settings: Option<PluginSettings>,
     app_picker: Option<crate::app_picker::Picker>,
     image_editor: Option<crate::image_editor::Editor>,
     /// Finds FFmpeg for video import, and offers to set it up.
@@ -309,6 +314,8 @@ impl App {
             plugin_page_placed: None,
             owner_set: false,
             recording_hotkey: false,
+            key_form: Default::default(),
+            plugin_settings: None,
             app_picker: None,
             image_editor: None,
             video_setup: Default::default(),
@@ -886,7 +893,26 @@ impl App {
             _ => format!("{}\nby {}", p.id, p.author),
         });
         let log = host.logs_dir().join(format!("{}.log", p.id));
+        let mut settings = false;
+        if p.form.is_some() {
+            let button = Rect::from_center_size(
+                pos2(rect.right() - 26.0, rect.center().y),
+                Vec2::splat(26.0),
+            );
+            settings = ui
+                .put(button, egui::Button::new(icon::GEAR_SIX).frame(false))
+                .on_hover_text("Settings")
+                .clicked();
+        }
         resp.context_menu(|ui| {
+            if p.form.is_some()
+                && ui
+                    .button(format!("{}  Settings…", icon::GEAR_SIX))
+                    .clicked()
+            {
+                settings = true;
+                ui.close();
+            }
             if ui
                 .button(format!("{}  Restart", icon::ARROW_CLOCKWISE))
                 .clicked()
@@ -927,6 +953,18 @@ impl App {
                 });
                 ui.close();
             }
+        });
+        if settings {
+            self.open_plugin_settings(&p.id);
+        }
+    }
+
+    /// Opens a Deckly plugin's settings window with its stored settings.
+    fn open_plugin_settings(&mut self, plugin: &str) {
+        self.plugin_settings = Some(PluginSettings {
+            plugin: plugin.to_owned(),
+            settings: plugins::load_global(plugin),
+            form: crate::forms::FormState::default(),
         });
     }
 
@@ -1349,6 +1387,8 @@ impl App {
         // Grid focus is distinct from text fields, buttons and hotkey recording.
         let grid_focus = self.selected_key.map(|index| ui.id().with(("key", index)));
         let editor_shortcuts = !self.recording_hotkey
+            && !self.key_form.recording()
+            && self.plugin_settings.is_none()
             && self.rename.is_none()
             && self.pending_paste.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
@@ -2239,6 +2279,8 @@ impl App {
         let (overlay, plugin) = {
             let s = runtime::lock(&self.state);
             let plugin = s.catalog.action(&key.action).map(|(p, a)| PluginView {
+                id: p.id.clone(),
+                form: a.form.clone(),
                 name: p.name.clone(),
                 action: a.name.clone(),
                 tooltip: a.tooltip.clone(),
@@ -2399,6 +2441,12 @@ impl App {
                                 reset_folder_exit = parent_auto_exit_rows(ui, &mut key.auto_exit);
                             }
                             match &plugin {
+                                Some(p) if p.form.is_some() => {
+                                    self.deckly_form(ui, key, p, &context);
+                                    if in_sequence {
+                                        desired_state_row(ui, key, p.states);
+                                    }
+                                }
                                 Some(p) => {
                                     self.plugin_form(ui, p);
                                     if in_sequence {
@@ -2495,6 +2543,99 @@ impl App {
             }
         });
         ui.end_row();
+    }
+
+    /// The settings form of a Deckly plugin action, drawn by Deckly in the
+    /// rows of the key form. Edits go into the key's settings, and with them
+    /// into the undo history; the plugin hears of each change.
+    fn deckly_form(&mut self, ui: &mut Ui, key: &mut KeyConfig, p: &PluginView, context: &str) {
+        let Some(form) = p.form.clone() else {
+            return;
+        };
+        self.key_form
+            .follow(&format!("{}\n{}\n{context}", p.id, p.instance.action));
+        let before = key.settings.clone();
+        let place = crate::forms::Place {
+            plugin: &p.id,
+            host: self.host.as_ref(),
+            instance: Some(&p.instance),
+            state: &self.state,
+        };
+        let outcome = self.key_form.show(ui, &form, &mut key.settings, &place);
+        if (outcome.secret_changed || key.settings != before)
+            && let Some(host) = &self.host
+        {
+            let instance = deckly_plugin_host::Instance {
+                settings: key.settings.clone(),
+                ..p.instance.clone()
+            };
+            host.send(&p.id, instance.event("didReceiveSettings"));
+        }
+        if p.status != Status::Running {
+            let (status, color) = status_text(&p.status);
+            ui.label("");
+            ui.label(RichText::new(status).color(color));
+            ui.end_row();
+        }
+    }
+
+    /// The window with a Deckly plugin's own settings form.
+    fn plugin_settings_window(&mut self, ctx: &egui::Context) {
+        let Some(open) = &mut self.plugin_settings else {
+            return;
+        };
+        let form = runtime::lock(&self.state)
+            .catalog
+            .plugins
+            .iter()
+            .find(|p| p.id == open.plugin)
+            .and_then(|p| Some((p.name.clone(), p.form.clone()?)));
+        let Some((name, form)) = form else {
+            self.plugin_settings = None;
+            return;
+        };
+        let mut keep_open = true;
+        let mut changed = false;
+        egui::Window::new(format!("{name} Settings"))
+            .id(egui::Id::new(("plugin-settings", &open.plugin)))
+            .open(&mut keep_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                egui::Grid::new("plugin-settings-form")
+                    .num_columns(2)
+                    .spacing(vec2(14.0, 10.0))
+                    .show(ui, |ui| {
+                        let place = crate::forms::Place {
+                            plugin: &open.plugin,
+                            host: self.host.as_ref(),
+                            instance: None,
+                            state: &self.state,
+                        };
+                        let before = open.settings.clone();
+                        let outcome = open.form.show(ui, &form, &mut open.settings, &place);
+                        changed = outcome.secret_changed || open.settings != before;
+                    });
+            });
+        if changed {
+            match plugins::store_global(&open.plugin, &open.settings) {
+                Ok(()) => {
+                    if let Some(host) = &self.host {
+                        let msg = deckly_plugin_host::protocol::did_receive_global_settings(
+                            &open.settings,
+                        );
+                        host.send(&open.plugin, msg);
+                    }
+                }
+                Err(e) => {
+                    runtime::lock(&self.state).notify(format!("Cannot save the settings: {e}"));
+                }
+            }
+        }
+        if !keep_open {
+            self.plugin_settings = None;
+        }
     }
 
     /// Frames the area where a plugin's settings page is drawn and opens the
@@ -3648,6 +3789,7 @@ impl eframe::App for App {
             profile.device,
         );
         self.video_setup(&ctx);
+        self.plugin_settings_window(&ctx);
         self.rename_window(&ctx);
         self.update_banner(&ctx);
         self.notice(&ctx);
@@ -3808,6 +3950,9 @@ fn window_handle(frame: &eframe::Frame) -> Option<i64> {
 
 /// What the inspector shows for a plugin key.
 struct PluginView {
+    id: String,
+    /// A Deckly plugin action's settings form.
+    form: Option<Arc<deckly_plugin_host::proto::Form>>,
     states: usize,
     name: String,
     action: String,
@@ -3817,6 +3962,13 @@ struct PluginView {
     official_only: bool,
     has_inspector: bool,
     instance: deckly_plugin_host::Instance,
+}
+
+/// The open settings window of a Deckly plugin.
+struct PluginSettings {
+    plugin: String,
+    settings: serde_json::Value,
+    form: crate::forms::FormState,
 }
 
 const OFFICIAL_ONLY: &str = "Works only in the official app";
@@ -4288,7 +4440,7 @@ fn clipboard_events(ctx: &egui::Context, enabled: bool) -> Vec<egui::Event> {
 
 /// Returns `Some(Some(hotkey))` when a combination was pressed,
 /// `Some(None)` when recording was cancelled with Esc, `None` otherwise.
-fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
+pub(crate) fn capture_hotkey(ctx: &egui::Context) -> Option<Option<Hotkey>> {
     ctx.input(|i| {
         i.events.iter().find_map(|e| match e {
             egui::Event::Key {
@@ -4954,6 +5106,8 @@ mod clipboard_tests {
             plugin_page_placed: None,
             owner_set: false,
             recording_hotkey: false,
+            key_form: Default::default(),
+            plugin_settings: None,
             app_picker: None,
             image_editor: None,
             video_setup: Default::default(),

@@ -11,10 +11,12 @@ use crate::actions;
 use crate::os;
 use crate::render;
 use crate::runtime::{self, Msg, Repaint, Shared, State};
+use crate::secrets;
 use crate::store;
 use deckly_core::{DeviceKind, FeedbackMarks, KeyConfig, MarkStyle, Page};
 use deckly_device::ConnectedDevice;
 use deckly_plugin_host::manifest::{image_file, safe_join};
+use deckly_plugin_host::proto::Form;
 use deckly_plugin_host::{Command, Face, Host, HostEvent, ImageFormat, Instance, Status, protocol};
 use image::RgbaImage;
 use serde_json::{Value, json};
@@ -127,6 +129,8 @@ pub struct CatalogAction {
     pub visible: bool,
     pub in_multi_actions: bool,
     pub in_key_logic: bool,
+    /// The settings form of a Deckly plugin action, drawn by Deckly.
+    pub form: Option<Arc<Form>>,
 }
 
 #[derive(Clone)]
@@ -143,6 +147,8 @@ pub struct CatalogPlugin {
     pub dir: PathBuf,
     /// The plugin refuses to work outside the official app.
     pub official_only: bool,
+    /// A Deckly plugin's form for its global settings.
+    pub form: Option<Arc<Form>>,
     /// Identifies the manifest the images were decoded from.
     source: usize,
 }
@@ -530,6 +536,7 @@ impl Worker {
                     status: p.status.clone(),
                     dir: p.dir.clone(),
                     official_only: false,
+                    form: None,
                     source: 0,
                 }));
                 continue;
@@ -545,6 +552,13 @@ impl Worker {
                 continue;
             }
             let image = |rel: &str| load_file_image(&p.dir, rel).map(key_image);
+            let form_of = |uuid: &str| {
+                m.deckly
+                    .as_ref()
+                    .and_then(|d| d.action(uuid)?.form.clone())
+                    .filter(|f| !f.is_empty())
+                    .map(Arc::new)
+            };
             let actions = m
                 .actions
                 .iter()
@@ -572,6 +586,7 @@ impl Worker {
                     visible: a.visible,
                     in_multi_actions: a.in_multi_actions,
                     in_key_logic: a.in_key_logic,
+                    form: form_of(&a.uuid),
                 })
                 .collect();
             plugins.push(Arc::new(CatalogPlugin {
@@ -586,6 +601,12 @@ impl Worker {
                 status: p.status.clone(),
                 dir: p.dir.clone(),
                 official_only: deckly_plugin_host::manifest::needs_official_app(&p.dir),
+                form: m
+                    .deckly
+                    .as_ref()
+                    .and_then(|d| d.form.clone())
+                    .filter(|f| !f.is_empty())
+                    .map(Arc::new),
                 source,
             }));
         }
@@ -721,7 +742,10 @@ impl Worker {
                     self.host.send(plugin, msg);
                 }
             }
-            Command::SetGlobalSettings { settings } => {
+            Command::SetGlobalSettings { mut settings } => {
+                if let Err(e) = keep_global_secrets(&self.state, plugin, &mut settings) {
+                    self.log(plugin, &format!("a secret was not stored: {e}"));
+                }
                 self.save_global(plugin, &settings);
                 if self
                     .host
@@ -751,6 +775,18 @@ impl Worker {
             Command::LogMessage { .. }
             | Command::SendToPropertyInspector { .. }
             | Command::SendToPlugin { .. } => {}
+            Command::Choices {
+                request,
+                options,
+                error,
+            } => {
+                let answer = match error {
+                    Some(e) => Err(e),
+                    None => Ok(options),
+                };
+                runtime::lock(&self.state).choices.answer(request, answer);
+                (self.repaint)();
+            }
             Command::Other(event) => self.log(plugin, &format!("{event} is not supported yet")),
         }
     }
@@ -893,9 +929,26 @@ impl Worker {
 
     /// Saves new settings into the key's profile; returns the updated key
     /// as its plugin sees it.
-    fn store_settings(&self, plugin: &str, context: &str, settings: Value) -> Option<Instance> {
+    fn store_settings(&self, plugin: &str, context: &str, mut settings: Value) -> Option<Instance> {
         let mut s = runtime::lock(&self.state);
-        s.own_key(plugin, context)?;
+        let own = s.own_key(plugin, context)?;
+        // A Deckly plugin's secrets go to the secret store, not the profile.
+        if let Some(form) = s
+            .catalog
+            .action(&own.action)
+            .and_then(|(_, a)| a.form.clone())
+            .filter(|f| f.secrets().next().is_some())
+            && let Err(e) = secrets::keep(
+                secrets::vault(),
+                plugin,
+                &form,
+                &own.settings,
+                &mut settings,
+                &|_| secrets::new_id(),
+            )
+        {
+            self.log(plugin, &format!("a secret was not stored: {e}"));
+        }
         let (page_id, index, member) = parse_context(context)?;
         let (profile_id, page) = s.page_mut(page_id)?;
         let key = page.keys.get_mut(&index)?;
@@ -912,19 +965,11 @@ impl Worker {
     }
 
     fn save_global(&self, plugin: &str, settings: &Value) {
-        let Some(path) = global_settings_file(plugin) else {
-            return;
-        };
-        let text = settings.to_string();
-        if text.len() > MAX_GLOBAL_SETTINGS_BYTES {
-            self.log(plugin, "global settings are too large; not saved");
+        // Not a valid plugin id: nowhere to keep them.
+        if global_settings_file(plugin).is_none() {
             return;
         }
-        let result = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&path, text));
-        if let Err(e) = result {
+        if let Err(e) = store_global(plugin, settings) {
             self.log(plugin, &format!("cannot save global settings: {e}"));
         }
     }
@@ -966,13 +1011,48 @@ fn set_for_states<T: Clone>(slots: &mut [Option<T>], state: Option<usize>, value
     }
 }
 
+/// Takes the secrets out of global settings a Deckly plugin sent, keeping
+/// references in the file instead.
+fn keep_global_secrets(state: &Shared, plugin: &str, settings: &mut Value) -> Result<(), String> {
+    let form = runtime::lock(state)
+        .catalog
+        .plugins
+        .iter()
+        .find(|p| p.id == plugin)
+        .and_then(|p| p.form.clone());
+    match form.filter(|f| f.secrets().next().is_some()) {
+        Some(form) => secrets::keep(
+            secrets::vault(),
+            plugin,
+            &form,
+            &load_global(plugin),
+            settings,
+            &secrets::global_id,
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Saves a plugin's global settings, as its plugin-wide form edits them.
+pub fn store_global(plugin: &str, settings: &Value) -> Result<(), String> {
+    let path = global_settings_file(plugin).ok_or("no configuration folder")?;
+    let text = settings.to_string();
+    if text.len() > MAX_GLOBAL_SETTINGS_BYTES {
+        return Err("the settings are too large".into());
+    }
+    path.parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, text))
+        .map_err(|e| e.to_string())
+}
+
 fn global_settings_file(plugin: &str) -> Option<PathBuf> {
     deckly_plugin_host::manifest::valid_uuid(plugin)
         .then(|| store::config_dir().map(|d| d.join("plugin-data").join(format!("{plugin}.json"))))
         .flatten()
 }
 
-fn load_global(plugin: &str) -> Value {
+pub fn load_global(plugin: &str) -> Value {
     global_settings_file(plugin)
         .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() <= MAX_GLOBAL_SETTINGS_BYTES as u64))
         .and_then(|p| std::fs::read_to_string(p).ok())

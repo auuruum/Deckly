@@ -19,6 +19,8 @@ pub mod protocol;
 mod server;
 mod wine;
 
+/// The Deckly plugin protocol, for the app's settings forms.
+pub use deckly_plugin_protocol as proto;
 pub use deckly_plugin_protocol::{Color, Face, HostMessage, ImageFormat};
 pub use guard::{GUARD_ARG, run_guard};
 pub use manifest::{Entry, Manifest};
