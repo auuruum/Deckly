@@ -56,7 +56,12 @@ fn run() -> Result<(), String> {
             let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else {
                 continue;
             };
-            let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+            let field = |k: &str| {
+                v.get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
             let e = match (field("event").as_str(), field("action").as_str()) {
                 ("keyDown", PROBE) => Event::Probe(field("context")),
                 ("willAppear", TICK) => Event::Appear(field("context")),
@@ -92,7 +97,9 @@ fn run() -> Result<(), String> {
         match event {
             Some(Event::Probe(context)) => {
                 let text = title(&context, now_micros().to_string());
-                writer.send(Message::text(text)).map_err(|e| e.to_string())?;
+                writer
+                    .send(Message::text(text))
+                    .map_err(|e| e.to_string())?;
             }
             Some(Event::Appear(context)) => {
                 ticks.insert(context, (0, Instant::now() + Duration::from_secs(1)));
@@ -109,7 +116,9 @@ fn run() -> Result<(), String> {
                     *count += 1;
                     *next = (*next + Duration::from_secs(1)).max(now);
                     let text = title(context, count.to_string());
-                    writer.send(Message::text(text)).map_err(|e| e.to_string())?;
+                    writer
+                        .send(Message::text(text))
+                        .map_err(|e| e.to_string())?;
                 }
             }
         }

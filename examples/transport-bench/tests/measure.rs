@@ -91,7 +91,7 @@ fn install(root: &Path, kind: Kind) {
     }
 }
 
-fn start(kind: Kind) -> (Host, Receiver<HostEvent>, PathBuf) {
+fn start(kind: Kind) -> Result<(Host, Receiver<HostEvent>, PathBuf), String> {
     let root = std::env::temp_dir().join(format!(
         "deckly-bench-{}-{}",
         kind.program(),
@@ -123,10 +123,10 @@ fn start(kind: Kind) -> (Host, Receiver<HostEvent>, PathBuf) {
         match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
             Ok(HostEvent::Started(id)) if id == kind.id() => break,
             Ok(_) => {}
-            Err(_) => panic!("{} did not start", kind.name()),
+            Err(_) => return Err(format!("{} did not start", kind.name())),
         }
     }
-    (host, rx, root)
+    Ok((host, rx, root))
 }
 
 fn key(kind: Kind, action: &str, context: &str) -> Instance {
@@ -143,7 +143,7 @@ fn key(kind: Kind, action: &str, context: &str) -> Instance {
     }
 }
 
-fn title_of(rx: &Receiver<HostEvent>, context: &str) -> String {
+fn title_of(rx: &Receiver<HostEvent>, context: &str) -> Result<String, String> {
     let end = Instant::now() + Duration::from_secs(10);
     loop {
         match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
@@ -155,9 +155,9 @@ fn title_of(rx: &Receiver<HostEvent>, context: &str) -> String {
                         ..
                     },
                 ..
-            }) if c == context => return t,
+            }) if c == context => return Ok(t),
             Ok(_) => {}
-            Err(_) => panic!("no title for {context}"),
+            Err(_) => return Err(format!("no title for {context}")),
         }
     }
 }
@@ -178,8 +178,8 @@ fn summary(name: &str, mut v: Vec<f64>) {
     );
 }
 
-fn latency(kind: Kind) {
-    let (host, rx, root) = start(kind);
+fn latency(kind: Kind) -> Result<(), String> {
+    let (host, rx, root) = start(kind)?;
     let probe = key(kind, "probe", "probe.0");
     host.send(kind.id(), probe.event("willAppear"));
     let mut one_way = Vec::new();
@@ -188,7 +188,9 @@ fn latency(kind: Kind) {
         let sent_at = now_micros();
         let began = Instant::now();
         host.send(kind.id(), probe.event("keyDown"));
-        let handled: u128 = title_of(&rx, "probe.0").parse().unwrap();
+        let handled: u128 = title_of(&rx, "probe.0")?
+            .parse()
+            .map_err(|e| format!("{e}"))?;
         let rt = began.elapsed();
         host.send(kind.id(), probe.event("keyUp"));
         // The first presses warm up caches and threads.
@@ -203,6 +205,7 @@ fn latency(kind: Kind) {
     summary("round trip to title command", round_trip);
     host.shutdown();
     let _ = std::fs::remove_dir_all(root);
+    Ok(())
 }
 
 /// User plus system CPU time of a process, in clock ticks.
@@ -215,7 +218,7 @@ fn cpu_ticks(pid: u32) -> u64 {
 }
 
 /// The plugin process: a child of this process running the program.
-fn plugin_pid(program: &str) -> u32 {
+fn plugin_pid(program: &str) -> Result<u32, String> {
     let me = std::process::id().to_string();
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
@@ -224,19 +227,21 @@ fn plugin_pid(program: &str) -> u32 {
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
             continue;
         };
-        let Some(close) = stat.rfind(')') else { continue };
+        let Some(close) = stat.rfind(')') else {
+            continue;
+        };
         let comm = &stat[stat.find('(').unwrap() + 1..close];
         let ppid = stat[close + 2..].split_whitespace().nth(1).unwrap_or("");
         if ppid == me && comm.starts_with(&program[..program.len().min(15)]) {
-            return pid;
+            return Ok(pid);
         }
     }
-    panic!("no {program} process");
+    Err(format!("no {program} process"))
 }
 
-fn cpu(kind: Kind) {
-    let (host, rx, root) = start(kind);
-    let pid = plugin_pid(kind.program());
+fn cpu(kind: Kind) -> Result<(), String> {
+    let (host, rx, root) = start(kind)?;
+    let pid = plugin_pid(kind.program())?;
     // Drain events as the app's plugin thread would.
     let drain = std::thread::spawn(move || {
         let mut titles = 0u64;
@@ -281,28 +286,29 @@ fn cpu(kind: Kind) {
         ms(plugin1 - plugin0) / (wall * 10.0),
     );
     let _ = std::fs::remove_dir_all(root);
+    Ok(())
 }
 
 #[test]
 #[ignore = "a measurement, run by hand"]
 fn latency_pipe() {
-    latency(Kind::Pipe);
+    latency(Kind::Pipe).unwrap();
 }
 
 #[test]
 #[ignore = "a measurement, run by hand"]
 fn latency_ws() {
-    latency(Kind::Ws);
+    latency(Kind::Ws).unwrap();
 }
 
 #[test]
 #[ignore = "a measurement, run by hand"]
 fn cpu_pipe() {
-    cpu(Kind::Pipe);
+    cpu(Kind::Pipe).unwrap();
 }
 
 #[test]
 #[ignore = "a measurement, run by hand"]
 fn cpu_ws() {
-    cpu(Kind::Ws);
+    cpu(Kind::Ws).unwrap();
 }
