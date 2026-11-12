@@ -134,7 +134,10 @@ fn the_host_runs_the_counter_plugin_over_pipes() {
         } if context == "page.0" => Some(settings),
         _ => None,
     });
-    assert_eq!(settings, json!({"step": 3, "count": 3}));
+    assert_eq!(
+        (settings["step"].clone(), settings["count"].clone()),
+        (json!(3), json!(3))
+    );
     let face = wait_for(&rx, |e| face_of(e, "page.0"));
     let round_trip = pressed_at.elapsed();
     assert_eq!(face.value.as_deref(), Some("3"));
@@ -200,5 +203,74 @@ fn closing_the_input_stops_the_plugin() {
         "{:?}",
         began.elapsed()
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn forms_reach_the_plugin_through_the_real_host() {
+    let root = temp_root("counter-forms");
+    install(&root);
+    let (host, rx) = start(&root);
+    // The app puts secrets back here; this filter marks the label instead.
+    host.set_settings_filter(std::sync::Arc::new(|plugin, settings| {
+        assert_eq!(plugin, PLUGIN);
+        if let Some(o) = settings.as_object_mut() {
+            o.insert("label".into(), json!("Filtered"));
+        }
+    }));
+    wait_for(&rx, |e| matches!(e, HostEvent::Started(_)).then_some(()));
+    let manifest = host
+        .plugins()
+        .into_iter()
+        .find(|p| p.id == PLUGIN)
+        .and_then(|p| p.manifest)
+        .and_then(|m| m.deckly.clone())
+        .unwrap();
+    assert!(manifest.action(ACTION).unwrap().form.is_some());
+    assert!(manifest.form.is_some());
+
+    let k = key("page.1", json!({"count": 9, "start": "10"}));
+    assert!(host.send(PLUGIN, k.event("willAppear")));
+    let face = wait_for(&rx, |e| face_of(e, "page.1"));
+    assert_eq!(face.label.as_deref(), Some("Filtered"));
+
+    assert!(host.ask_choices(PLUGIN, 41, "start", Some(&k)));
+    let options = wait_for(&rx, |e| match e {
+        HostEvent::Command {
+            command:
+                Command::Choices {
+                    request: 41,
+                    options,
+                    error: None,
+                },
+            ..
+        } => Some(options),
+        _ => None,
+    });
+    assert_eq!(options.len(), 3);
+    assert!(host.ask_choices(PLUGIN, 42, "nothing", None));
+    let error = wait_for(&rx, |e| match e {
+        HostEvent::Command {
+            command: Command::Choices {
+                request: 42, error, ..
+            },
+            ..
+        } => Some(error),
+        _ => None,
+    });
+    assert!(error.is_some());
+
+    assert!(host.press_button(PLUGIN, "reset", Some(&k)));
+    let settings = wait_for(&rx, |e| match e {
+        HostEvent::Command {
+            command: Command::SetSettings { context, settings },
+            ..
+        } if context == "page.1" => Some(settings),
+        _ => None,
+    });
+    assert_eq!(settings["count"], 10);
+    // A plugin that is not running is not asked.
+    assert!(!host.ask_choices("com.example.none", 43, "start", None));
+    host.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
