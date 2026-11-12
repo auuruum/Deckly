@@ -884,6 +884,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "counter-plugin"
+version = "0.1.0"
+dependencies = [
+ "deckly-plugin-host",
+ "deckly-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1070,11 +1080,29 @@ dependencies = [
 name = "deckly-plugin-host"
 version = "0.0.4"
 dependencies = [
+ "deckly-plugin-protocol",
  "serde_json",
  "sha2",
  "tungstenite",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "deckly-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "deckly-sdk"
+version = "0.1.0"
+dependencies = [
+ "deckly-plugin-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4780,6 +4808,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "transport-bench"
+version = "0.1.0"
+dependencies = [
+ "deckly-plugin-host",
+ "deckly-sdk",
+ "serde_json",
+ "tungstenite",
 ]
 
 [[package]]

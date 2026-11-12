@@ -1,12 +1,13 @@
 [package]
 name = "deckly-plugin-host"
-description = "Host side of the Stream Deck SDK plugin protocol for Deckly"
+description = "Runs plugins for Deckly: Stream Deck SDK plugins and Deckly plugins"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+deckly-plugin-protocol.workspace = true
 serde_json.workspace = true
 # WebSocket server for plugins and property inspectors (pure Rust, no TLS).
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }

@@ -1,8 +1,10 @@
 # Deckly plugin SDK: design
 
-Status: draft, 2026-11-11. Nothing here is implemented yet. "Decided" lists the
-project owner's decisions; everything under "Proposed" waits for the owner's
-confirmation and may change.
+Status: draft, 2026-11-11. Stage 1 (step 2 of "Order of work") is built on
+the task branch `feature/sdk-protocol-transport`; what it settled or changed
+is under "Settled by stage 1". "Decided" lists the project owner's
+decisions; everything under "Proposed" waits for the owner's confirmation
+and may change.
 
 ## Decided (owner, 2026-11-11)
 
@@ -31,6 +33,90 @@ confirmation and may change.
 Running existing Stream Deck SDK plugins unchanged stays a goal (AGENTS.md).
 The host keeps that path as it is. Deckly plugins are a second kind of plugin
 beside it.
+
+## Settled by stage 1 (implementation, 2026-11-11)
+
+Built: `crates/deckly-plugin-protocol`, the pipe transport in
+`crates/deckly-plugin-host` (`src/pipe.rs`), `crates/deckly-sdk`, key faces in
+the app's renderer, `examples/counter-plugin` with an integration test that
+runs the real host, and `examples/transport-bench` for the measurements below.
+These are facts of the code now; the owner may still change them before
+`feature/plugin-sdk` goes into `dev`.
+
+Wire format:
+
+- The 4-byte little-endian length counts the body only, not the kind byte.
+  Limits: 1 MiB for a JSON message, 4 MiB for a blob; a larger length is
+  refused before anything is allocated. All limits are constants in
+  `deckly_plugin_protocol::limits`.
+- Kind 0 is a JSON message, kind 1 a blob for the message right after it.
+  Frames of other kinds are skipped, so a later protocol can add kinds. Two
+  blobs in a row are a protocol error; a blob followed by a message that does
+  not use it is dropped.
+- Messages are JSON objects tagged by `type` in snake case. Host to plugin:
+  `hello`, `device_connected`, `device_disconnected`, `key_appear`,
+  `key_disappear`, `key_down`, `key_up`, `settings`, `global_settings`,
+  `system_wake`. Plugin to host: `ready`, `set_title`, `set_state`,
+  `set_face`, `set_image`, `set_settings`, `set_global_settings`,
+  `get_global_settings`, `show_ok`, `show_alert`. Unknown types and fields are
+  ignored; a known type with a missing or wrong field, or one over a limit,
+  is a protocol error.
+- Protocol number 1. `hello` carries it; `ready` must answer with a number
+  between the host's oldest and newest, and must be the first message. A
+  manifest that needs a newer number is not started ("needs a newer Deckly").
+  `hello.services` is empty until host services exist.
+
+Host:
+
+- A Deckly plugin is a folder named by its id holding `deckly-plugin.json`,
+  next to the `.sdPlugin` folders. Plain folders install and uninstall through
+  the existing install path; `.decklyPlugin` archives do not yet.
+- The program is picked by target triple; when the exact triple is missing,
+  one for the same processor and system is used (a `musl` build on a `gnu`
+  system).
+- A writer thread with a queue of 1024 frames and a reader thread per plugin;
+  `Host::send` never blocks. A full queue, a malformed frame, a broken rule, or
+  no `ready` within 10 s is a protocol error: one plain line in the plugin's
+  log ("protocol error: ...") and the usual restart backoff. A restarted or
+  stopped plugin gets its input closed and 3 s to exit before it is killed,
+  in the background, so a plugin that ignores the closed pipe holds nothing
+  up.
+- Text printed to standard output is recognised (a length made of printable
+  bytes) and logged as such, with the start of the text. The SDK cannot move
+  standard output out of the way: that needs `dup2`, which is FFI, and the SDK
+  may depend only on `serde`, `serde_json` and the protocol crate. So a stray
+  `println!` restarts the plugin, as the draft said.
+- The app is unchanged in shape: the events it builds for Stream Deck plugins
+  are translated into protocol messages inside the host, and plugin messages
+  become the existing `Command`s, plus `SetFace` and `SetImageData`. A typed
+  event model in the app could replace the translation later.
+- Deckly actions never flip states on their own: the plugin sets the state.
+- Like Stream Deck plugins, a Deckly plugin hears of a key only while a
+  device shows it. In the editor without a device the key shows the action's
+  icon from the manifest, not its face.
+
+SDK (`deckly-sdk` 0.1.0), where it departs from the sketch below:
+
+- `Face::new().value("3").label("Count")` and `key.set_face(face)`; the
+  sketch's `Face::value(...)` and `key.face(...)` clash as builder and
+  constructor names.
+- The timer is `key.every(period)`, which calls `Action::tick` on the key's
+  own value; `key.stop_timer()` ends it. No closure, so the timer can use
+  `&mut self` without locks.
+- `Action` needs `Default` (one value per key, made by the SDK) and
+  `Settings: Clone`. Settings that do not fit the type read as `Default` with
+  a line on standard error.
+- Not yet: `form()` (settings forms, stage 3), plugin-wide state and global
+  settings in the API (the protocol carries global settings), dials.
+- `--describe` names the running program for the current target only;
+  `deckly-cli pack` is meant to merge the targets.
+- `deckly_sdk::testing::Harness` plays the host over in-process pipes.
+
+Faces, as drawn by the app: a label at the top, an icon from the plugin
+folder, the value, a detail line and a progress bar, in the key's title font
+and colour unless the face sets colours. A title on the key (the user's or
+the plugin's) takes the label's place; the user's own picture wins over the
+face's background. Text is cut to 32 characters and shrunk to fit the key.
 
 ## Goals
 
@@ -100,7 +186,7 @@ The host starts the plugin with pipes on standard input and output.
 
 To measure before it is called faster: time from key press to plugin handler,
 and host plus plugin CPU for 32 keys updated once a second, against the
-WebSocket path with the same plugin logic.
+WebSocket path with the same plugin logic. Measured; see "Measurements".
 
 ### Manifest
 
@@ -226,12 +312,16 @@ from one machine is promised.
 
 ### Tests
 
-- Protocol crate: framing round trips, limits, hostile frames.
+- Protocol crate: framing round trips, limits, hostile frames. Built
+  (`crates/deckly-plugin-protocol/src/tests.rs`).
 - Workspace: an example plugin built with the SDK is started by the real host
   in a test; a key press reaches it and its face update comes back. Runs on
-  Linux, Windows and macOS in CI.
+  Linux, Windows and macOS in CI. Built (`examples/counter-plugin/tests/host.rs`,
+  with a plugin that prints to standard output and one that must exit when its
+  input closes); it runs in `cargo test --workspace`, so in CI on all three
+  systems. Only Linux has run it so far.
 - SDK: a test harness that plays the host, so plugin authors test without
-  Deckly.
+  Deckly. Built (`deckly_sdk::testing::Harness`).
 
 ### Plugin repositories
 
@@ -275,7 +365,8 @@ Later, not in this work: `deckly://install/<id>` links and a website.
 
 1. Organization and repository move (below). It does not block the rest.
 2. Protocol crate, the pipe transport in the host, a minimal SDK (key events,
-   titles, faces, settings), the example plugin and its test.
+   titles, faces, settings), the example plugin and its test. Built (see
+   "Settled by stage 1").
 3. Settings forms in egui.
 4. Host services.
 5. `deckly-cli new`, `dev`, `validate`, `pack`.
@@ -316,3 +407,33 @@ Checked on 2026-11-11: the name `deckly` is taken on GitHub; `deckly-app`,
   Deckly is replaced if the CI key has to change.
 - How `deckly-cli dev` reaches the running app.
 - The rule for the oldest Rust version the SDK supports.
+
+## Measurements (2026-11-11)
+
+Method: `examples/transport-bench`, run with `cargo test -p transport-bench
+--release -- --ignored --nocapture --test-threads 1`. The real plugin host runs
+one of two plugins with the same logic and threading: `bench-pipe` (Deckly
+SDK, pipes) and `bench-ws` (a native Stream Deck style plugin using the same
+WebSocket library as the host). The app's own work (rendering, devices) is not
+included. Machine: AMD Ryzen 7 7700X, 16 threads, 30 GB, Linux
+7.3.3-1-cachyos, governor `performance`, release build; the desktop and an
+installed Deckly were running, so the machine was not idle.
+
+Key-down latency, 2000 presses after 100 warm-up presses, 2 ms apart:
+
+| Path | Send to handler, median / p95 / p99 / max | Round trip to the title command, median / p95 / p99 / max |
+| --- | --- | --- |
+| Pipe | 17 / 24 / 29 / 76 µs | 31.6 / 43.1 / 52.5 / 103.2 µs |
+| WebSocket | 24 / 35 / 41 / 76 µs | 44.8 / 59.4 / 68.7 / 112.8 µs |
+
+"Send to handler" compares wall-clock microseconds across two processes, so
+its resolution is 1 µs. One run each; differences of a few microseconds are
+within run-to-run noise not yet measured.
+
+CPU for 32 keys updated once a second (60 s): the test is
+`cpu_pipe`/`cpu_ws` in the same file. Pipe: host process 0 ms and plugin
+0 ms of CPU over 60 s with 2016 titles received, that is below the 10 ms
+resolution of `/proc/<pid>/stat`. WebSocket: host process 10 ms (one tick) and
+plugin 0 ms over 60 s, 2000 titles received. Both paths are at or below the
+resolution of this method, so no difference between them is claimed; a finer
+method (`getrusage` or `perf stat`) is needed to tell them apart.

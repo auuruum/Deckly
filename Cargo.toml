@@ -7,7 +7,11 @@ members = [
     "crates/deckly-core",
     "crates/deckly-device",
     "crates/deckly-plugin-host",
+    "crates/deckly-plugin-protocol",
+    "crates/deckly-sdk",
     "crates/deckly-web",
+    "examples/counter-plugin",
+    "examples/transport-bench",
 ]
 
 [workspace.package]
@@ -20,6 +24,8 @@ rust-version = "1.95"
 deckly-core = { path = "crates/deckly-core" }
 deckly-device = { path = "crates/deckly-device" }
 deckly-plugin-host = { path = "crates/deckly-plugin-host" }
+deckly-plugin-protocol = { path = "crates/deckly-plugin-protocol" }
+deckly-sdk = { path = "crates/deckly-sdk" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 

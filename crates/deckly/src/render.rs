@@ -7,7 +7,7 @@
 use crate::actions;
 use crate::animation::{self, Animation};
 use crate::fonts::{self, Face};
-use crate::plugins::{self, Mark, Overlay, PageTile};
+use crate::plugins::{self, Mark, Overlay, PageTile, ShownFace};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use deckly_core::{
     DeviceModel, FeedbackMarks, ImageFormat, KeyConfig, KeyPress, MarkStyle, Orientation,
@@ -199,8 +199,11 @@ impl Renderer {
             .map(|src| fit_layer(src, size))
             .or_else(|| overlay?.image.as_ref().map(|i| fit_layer(&i.img, size)))
             .or_else(|| Some(self.page_picture(overlay?.page.as_ref()?, size)));
+        let face = overlay.and_then(|o| o.face.as_deref());
         let mut img = match picture {
             Some(img) => img,
+            // A face is drawn on the key's background, without an icon.
+            None if face.is_some() => RgbaImage::new(size, size),
             None => {
                 let mut img = RgbaImage::new(size, size);
                 if key.action == actions::PAGE_INDICATOR {
@@ -214,6 +217,17 @@ impl Renderer {
             }
         };
         let title = shown_title(key, overlay);
+        let title_shown = style.show && !title.trim().is_empty();
+        if let Some(face) = face {
+            // The user's own picture wins over the face's background.
+            if let Some(bg) = face.face.background
+                && custom.is_none()
+            {
+                let [r, g, b] = bg.0;
+                img = RgbaImage::from_pixel(size, size, Rgba([r, g, b, 255]));
+            }
+            draw_face(&mut img, face, &style, size, title_shown);
+        }
         if style.show
             && !title.trim().is_empty()
             && let Some(face) = fonts::face(&style.font, style.bold, style.italic)
@@ -601,6 +615,98 @@ fn shown_title<'a>(key: &'a KeyConfig, overlay: Option<&'a Overlay>) -> &'a str 
     } else {
         &key.title
     }
+}
+
+/// Draws a Deckly plugin's face with the key's title font: a label at the
+/// top (left out when the key shows a title, which takes its place), an
+/// icon, the value, a detail line and a progress bar. Parts keep their
+/// places whether or not the others are there, so a face does not jump.
+fn draw_face(img: &mut RgbaImage, shown: &ShownFace, style: &TitleStyle, size: u32, title: bool) {
+    const PROGRESS_COLOR: [u8; 3] = [0x4c, 0xc2, 0xff];
+    let f = &shown.face;
+    let k = size as f32 / 72.0;
+    let color = f.color.map_or(style.color, |c| c.0);
+    let regular = fonts::face(&style.font, style.bold, style.italic);
+    let bold = fonts::face(&style.font, true, style.italic);
+    let icon = shown.icon.as_ref();
+    let line = |img: &mut RgbaImage, face: &Option<fonts::Face>, text: &str, px: f32, base: f32| {
+        if let Some(face) = face
+            && !text.trim().is_empty()
+        {
+            draw_outlined(img, &face.font, text, px * k, base * k, color);
+        }
+    };
+    if !title && let Some(label) = &f.label {
+        line(img, &regular, label, 11.0, 14.0);
+    }
+    if let Some(icon) = icon {
+        let side = (22.0 * k).round().max(1.0) as u32;
+        let fitted = fit_box(&icon.img, side);
+        let x = i64::from((size - fitted.width()) / 2);
+        let y = (17.0 * k).round() as i64 + i64::from((side - fitted.height()) / 2);
+        imageops::overlay(img, &fitted, x, y);
+    }
+    let (value_px, value_base, detail_px, detail_base) = if icon.is_some() {
+        (15.0, 54.0, 9.0, 64.0)
+    } else {
+        (24.0, 44.0, 10.0, 59.0)
+    };
+    if let Some(value) = &f.value {
+        line(img, &bold, value, value_px, value_base);
+    }
+    if let Some(detail) = &f.detail {
+        line(img, &regular, detail, detail_px, detail_base);
+    }
+    if let Some(progress) = f.progress {
+        let accent = f.accent.map_or(PROGRESS_COLOR, |c| c.0);
+        let (x0, x1) = (6.0 * k, size as f32 - 6.0 * k);
+        let (y0, y1) = (65.0 * k, 68.0 * k);
+        let fill = x0 + (x1 - x0) * progress.clamp(0.0, 1.0);
+        for y in y0.round() as i32..y1.round() as i32 {
+            for x in x0.round() as i32..x1.round() as i32 {
+                let c = if (x as f32) < fill {
+                    accent
+                } else {
+                    RING_TRACK
+                };
+                blend(img, x, y, c, 1.0);
+            }
+        }
+    }
+}
+
+/// A line of text centred across the key, shrunk to fit its width, with a
+/// dark outline so it reads on any picture.
+fn draw_outlined(
+    img: &mut RgbaImage,
+    font: &FontArc,
+    text: &str,
+    px: f32,
+    baseline: f32,
+    color: [u8; 3],
+) {
+    let room = img.width() as f32 * 0.92;
+    let mut scale = PxScale::from(px.max(1.0));
+    let width = line_width(font, scale, text);
+    if width > room {
+        scale = PxScale::from((px * room / width).max(1.0));
+    }
+    let o = (img.width() as f32 / 72.0).max(1.0);
+    for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o)] {
+        draw_line(img, font, scale, text, (dx, baseline + dy), [0, 0, 0]);
+    }
+    draw_line(img, font, scale, text, (0.0, baseline), color);
+}
+
+/// Scales a picture to fit a square box, keeping its shape.
+fn fit_box(src: &RgbaImage, side: u32) -> RgbaImage {
+    let (w, h) = (src.width().max(1), src.height().max(1));
+    let scale = side as f32 / w.max(h) as f32;
+    let (nw, nh) = (
+        ((w as f32 * scale).round() as u32).clamp(1, side),
+        ((h as f32 * scale).round() as u32).clamp(1, side),
+    );
+    imageops::resize(src, nw, nh, imageops::FilterType::Triangle)
 }
 
 /// Short feedback over the dimmed key: a failure or success icon.
@@ -1158,6 +1264,86 @@ mod tests {
 
     fn lit(img: &RgbaImage) -> usize {
         img.pixels().filter(|p| p.0[0] > 128).count()
+    }
+
+    fn faced(face: deckly_plugin_host::Face, icon: Option<plugins::Image>) -> Overlay {
+        Overlay {
+            face: Some(Arc::new(ShownFace { face, icon })),
+            ..Overlay::default()
+        }
+    }
+
+    #[test]
+    fn faces_are_drawn_and_change_the_hash() {
+        use deckly_plugin_host::{Color, Face};
+        let mut r = Renderer::new();
+        let key = KeyConfig::new("com.example.counter.count", json!({}));
+        let draw =
+            |r: &mut Renderer, o: &Overlay| r.render(Some(&key), 72, Live::default(), Some(o));
+        let hash = |r: &Renderer, o: &Overlay| r.key_hash(Some(&key), Live::default(), Some(o));
+        let empty = draw(&mut r, &faced(Face::new(), None));
+        // An empty face draws nothing, not even the action's fallback icon.
+        assert_eq!(lit(&empty), 0);
+        let one = faced(Face::new().value("1").label("Count"), None);
+        let two = faced(Face::new().value("2").label("Count"), None);
+        assert!(lit(&draw(&mut r, &one)) > 0);
+        assert_ne!(draw(&mut r, &one), draw(&mut r, &two));
+        assert_ne!(hash(&r, &one), hash(&r, &two));
+        assert_eq!(
+            hash(&r, &one),
+            hash(&r, &faced(Face::new().value("1").label("Count"), None))
+        );
+        // A long value shrinks to fit instead of running off the key.
+        let long = draw(
+            &mut r,
+            &faced(Face::new().value("12345678901234567890"), None),
+        );
+        let edge = |img: &RgbaImage| (0..72).filter(|&y| img.get_pixel(0, y).0[0] > 128).count();
+        assert_eq!(edge(&long), 0);
+        // The progress bar fills from the left in the accent colour.
+        let bar = faced(
+            Face::new().progress(0.5).accent(Color::rgb(0, 255, 0)),
+            None,
+        );
+        let img = draw(&mut r, &bar);
+        assert_eq!(img.get_pixel(10, 66).0[..3], [0, 255, 0]);
+        assert_ne!(img.get_pixel(60, 66).0[..3], [0, 255, 0]);
+        // A background fills the key.
+        let red = draw(
+            &mut r,
+            &faced(Face::new().background(Color::rgb(200, 0, 0)), None),
+        );
+        assert_eq!(red.get_pixel(36, 5).0[..3], [200, 0, 0]);
+        // An icon shows above the value.
+        let white = Arc::new(plugins::KeyImage {
+            id: 7,
+            img: RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255])),
+        });
+        let with_icon = draw(&mut r, &faced(Face::new(), Some(white)));
+        assert_eq!(with_icon.get_pixel(36, 28).0[..3], [255, 255, 255]);
+    }
+
+    #[test]
+    fn a_title_takes_the_place_of_the_face_label() {
+        use deckly_plugin_host::Face;
+        let mut r = Renderer::new();
+        let mut key = KeyConfig::new("com.example.counter.count", json!({}));
+        let labelled = faced(Face::new().label("LABEL"), None);
+        let label_only = r.render(Some(&key), 72, Live::default(), Some(&labelled));
+        key.title = "T".into();
+        key.title_style = Some(TitleStyle {
+            align: TitleAlign::Bottom,
+            ..TitleStyle::default()
+        });
+        let titled = r.render(Some(&key), 72, Live::default(), Some(&labelled));
+        let top = |img: &RgbaImage| {
+            (0..72)
+                .flat_map(|x| (0..20).map(move |y| (x, y)))
+                .filter(|&(x, y)| img.get_pixel(x, y).0[0] > 128)
+                .count()
+        };
+        assert!(top(&label_only) > 0);
+        assert_eq!(top(&titled), 0);
     }
 
     #[test]

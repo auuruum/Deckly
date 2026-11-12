@@ -1,6 +1,7 @@
-//! Host side of the Stream Deck SDK plugin protocol: finds installed
-//! plugins, runs each one as its own process, talks to it over a local
-//! WebSocket and restarts it when it dies.
+//! Runs plugins: finds installed plugins, runs each one as its own process
+//! and restarts it when it dies. Stream Deck SDK plugins talk to it over a
+//! local WebSocket; Deckly plugins over pipes on their standard input and
+//! output (see `pipe` and docs/plugin-sdk.md).
 //!
 //! Plugins are third-party programs. Nothing they send is trusted, and a
 //! plugin that crashes, hangs or floods the host only affects itself. See
@@ -13,10 +14,12 @@ mod guard;
 pub mod install;
 pub mod manifest;
 mod node;
+mod pipe;
 pub mod protocol;
 mod server;
 mod wine;
 
+pub use deckly_plugin_protocol::{Color, Face, ImageFormat};
 pub use guard::{GUARD_ARG, run_guard};
 pub use manifest::{Entry, Manifest};
 pub use protocol::{AppInfo, Command, DeviceInfo, Instance, TitleParameters};
@@ -34,6 +37,12 @@ use std::time::{Duration, Instant};
 
 /// A plugin that has not registered this long after starting is restarted.
 const REGISTER_DEADLINE: Duration = Duration::from_secs(30);
+/// A Deckly plugin that has not answered `hello` this long after starting
+/// is restarted.
+const READY_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a plugin gets to exit after its input closed before it is
+/// killed.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
 /// Crashes within this window count towards giving up.
 const CRASH_WINDOW: Duration = Duration::from_secs(600);
 const MAX_CRASHES: usize = 5;
@@ -117,6 +126,8 @@ struct Shared {
     plugins: Vec<Plugin>,
     /// Registration token of each running plugin.
     live: HashMap<String, String>,
+    /// The input of each running Deckly plugin, with its launch token.
+    pipes: HashMap<String, (String, pipe::Pipe)>,
     devices: Vec<DeviceInfo>,
     inspector: Option<OpenInspector>,
     /// The editor window property inspectors belong to (a Windows HWND).
@@ -134,6 +145,17 @@ enum Ctl {
     Shutdown(Sender<()>),
     PlaceInspector(Option<[i32; 4]>),
     NodeInstalled(String, Result<PathBuf, String>),
+    /// From the reader thread of a Deckly plugin.
+    Pipe {
+        id: String,
+        token: String,
+        event: pipe::Incoming,
+    },
+    /// A Deckly plugin does not read what it is sent.
+    PipeStuck {
+        id: String,
+        token: String,
+    },
 }
 
 #[derive(Clone)]
@@ -216,26 +238,71 @@ impl Host {
     }
 
     /// Sends an event to a running plugin; false when it is not running.
+    /// Never blocks: a plugin that does not keep up is restarted.
     pub fn send(&self, plugin: &str, text: String) -> bool {
-        let token = lock(&self.shared).live.get(plugin).cloned();
+        let (token, piped) = {
+            let s = lock(&self.shared);
+            (s.live.get(plugin).cloned(), s.pipes.get(plugin).cloned())
+        };
         if debug() {
             append_log(&self.logs_dir, plugin, &format!("-> {text}"));
+        }
+        if let Some((token, pipe)) = piped {
+            return self.send_pipe(plugin, &token, &pipe, &text);
         }
         token.is_some_and(|t| self.server.send(&t, text))
     }
 
+    /// Sends an app event to a Deckly plugin, translated into the protocol.
+    fn send_pipe(&self, plugin: &str, token: &str, pipe: &pipe::Pipe, text: &str) -> bool {
+        let Some(message) = pipe::translate(text) else {
+            // Not an event Deckly plugins get.
+            return true;
+        };
+        use deckly_plugin_protocol::Validate;
+        if let Err(e) = message.validate() {
+            append_log(&self.logs_dir, plugin, &format!("not sent: {e}"));
+            return true;
+        }
+        match pipe.send(&message) {
+            Ok(()) => true,
+            Err(pipe::SendError::Full) => {
+                let _ = self.ctl.send(Ctl::PipeStuck {
+                    id: plugin.to_owned(),
+                    token: token.to_owned(),
+                });
+                false
+            }
+            Err(pipe::SendError::Closed) => false,
+        }
+    }
+
     /// Sends an event to every running plugin.
     pub fn broadcast(&self, text: &str) {
-        let live: Vec<(String, String)> = lock(&self.shared)
-            .live
-            .iter()
-            .map(|(id, t)| (id.clone(), t.clone()))
-            .collect();
+        let (live, piped): (Vec<(String, String)>, Vec<_>) = {
+            let s = lock(&self.shared);
+            (
+                s.live
+                    .iter()
+                    .map(|(id, t)| (id.clone(), t.clone()))
+                    .collect(),
+                s.pipes
+                    .iter()
+                    .map(|(id, p)| (id.clone(), p.clone()))
+                    .collect(),
+            )
+        };
         for (id, t) in live {
             if debug() {
                 append_log(&self.logs_dir, &id, &format!("-> {text}"));
             }
             self.server.send(&t, text.to_owned());
+        }
+        for (id, (token, pipe)) in piped {
+            if debug() {
+                append_log(&self.logs_dir, &id, &format!("-> {text}"));
+            }
+            self.send_pipe(&id, &token, &pipe, text);
         }
     }
 
@@ -328,6 +395,8 @@ impl Host {
 #[derive(Default)]
 struct Slot {
     child: Option<Child>,
+    /// The input of a Deckly plugin.
+    pipe: Option<pipe::Pipe>,
     token: Option<String>,
     started: Option<Instant>,
     register_deadline: Duration,
@@ -401,6 +470,13 @@ impl Supervisor {
                     self.send_place();
                 }
                 Some(Ctl::NodeInstalled(major, result)) => self.node_installed(&major, result),
+                Some(Ctl::Pipe { id, token, event }) => self.pipe_event(&id, &token, event),
+                Some(Ctl::PipeStuck { id, token }) => {
+                    if self.is_current(&id, &token) {
+                        self.note(&id, "protocol error: it does not read what Deckly sends");
+                        self.crashed(&id);
+                    }
+                }
                 Some(Ctl::Shutdown(reply)) => {
                     self.close_inspector();
                     let ids: Vec<String> = self.slots.keys().cloned().collect();
@@ -449,7 +525,15 @@ impl Supervisor {
             .map(|(id, _)| id.clone())
             .collect();
         for id in silent {
-            self.note(&id, "did not connect in time");
+            let piped = self.slots.get(&id).is_some_and(|s| s.pipe.is_some());
+            self.note(
+                &id,
+                if piped {
+                    "did not answer Deckly's hello in time"
+                } else {
+                    "did not connect in time"
+                },
+            );
             self.crashed(&id);
         }
     }
@@ -484,19 +568,23 @@ impl Supervisor {
                 let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                let Some(folder_id) = name.strip_suffix(".sdPlugin") else {
-                    continue;
+                // Stream Deck plugins sit in `<id>.sdPlugin`, Deckly plugins
+                // in `<id>` with a `deckly-plugin.json`.
+                let (folder_id, loaded) = match name.strip_suffix(".sdPlugin") {
+                    Some(id) => (id, Manifest::load(&dir).map_err(|e| e.to_string())),
+                    None if pipe::is_plugin_dir(&dir) => (name, pipe::load(&dir)),
+                    None => continue,
                 };
                 if !dir.is_dir() || !manifest::valid_uuid(folder_id) {
                     continue;
                 }
-                let (manifest, status) = match Manifest::load(&dir) {
+                let (manifest, status) = match loaded {
                     Ok(m) if m.uuid == folder_id => (Some(Arc::new(m)), Status::Starting),
                     Ok(m) => (
                         None,
-                        Status::Failed(format!("the folder should be named {}.sdPlugin", m.uuid)),
+                        Status::Failed(format!("the folder should be named {}", m.folder_name())),
                     ),
-                    Err(e) => (None, Status::Failed(e.to_string())),
+                    Err(e) => (None, Status::Failed(e)),
                 };
                 found.push(Plugin {
                     id: folder_id.to_owned(),
@@ -550,6 +638,10 @@ impl Supervisor {
         let Some((dir, manifest)) = self.manifest(id) else {
             return;
         };
+        if let Some(deckly) = manifest.deckly.clone() {
+            self.launch_pipe(id, &dir, &deckly);
+            return;
+        }
         let token = uuid::Uuid::new_v4().simple().to_string();
         let entry = manifest.entry(&dir);
         let info = {
@@ -675,6 +767,148 @@ impl Supervisor {
         }
     }
 
+    /// Starts a Deckly plugin with pipes on its standard input and output
+    /// and says `hello`. It needs no guard: when Deckly goes away its input
+    /// closes and it exits.
+    fn launch_pipe(&mut self, id: &str, dir: &Path, m: &deckly_plugin_protocol::Manifest) {
+        let program = match pipe::program(dir, m) {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(id, Status::Failed(e));
+                return;
+            }
+        };
+        make_executable(&program);
+        let mut command = std::process::Command::new(&program);
+        command
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        // Standard error is the plugin's log, truncated at each start.
+        match File::create(self.config.logs_dir.join(format!("{id}.log"))) {
+            Ok(file) => command.stderr(file),
+            Err(_) => command.stderr(Stdio::null()),
+        };
+        hide_console(&mut command);
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let started = command.spawn().and_then(|mut child| {
+            let pipes = child.stdin.take().zip(child.stdout.take());
+            let Some((stdin, stdout)) = pipes else {
+                end_child(child, false);
+                return Err(std::io::Error::other("no pipes to the plugin"));
+            };
+            let ctl = self.ctl.clone();
+            let (pid, ptoken) = (id.to_owned(), token.clone());
+            let report = move |event| {
+                ctl.send(Ctl::Pipe {
+                    id: pid.clone(),
+                    token: ptoken.clone(),
+                    event,
+                })
+                .is_ok()
+            };
+            let connected =
+                pipe::Pipe::start(stdin).and_then(|p| pipe::read(stdout, report).map(|()| p));
+            match connected {
+                Ok(p) => Ok((child, p)),
+                Err(e) => {
+                    end_child(child, false);
+                    Err(e)
+                }
+            }
+        });
+        let (child, pipe) = match started {
+            Ok(c) => c,
+            Err(e) => {
+                self.note(id, &format!("cannot start: {e}"));
+                self.set_status(id, Status::Failed(format!("cannot start: {e}")));
+                return;
+            }
+        };
+        let hello = pipe::hello(&self.config.app.language, &lock(&self.shared).devices);
+        if debug() {
+            self.note(id, &format!("-> {hello:?}"));
+        }
+        let _ = pipe.send(&hello);
+        let slot = self.slots.entry(id.to_owned()).or_default();
+        slot.child = Some(child);
+        slot.pipe = Some(pipe);
+        slot.token = Some(token);
+        slot.started = Some(Instant::now());
+        slot.register_deadline = READY_DEADLINE;
+        slot.registered = false;
+        self.set_status(id, Status::Starting);
+    }
+
+    /// Whether `token` belongs to the running copy of plugin `id`.
+    fn is_current(&self, id: &str, token: &str) -> bool {
+        self.slots
+            .get(id)
+            .is_some_and(|s| s.token.as_deref() == Some(token))
+    }
+
+    /// Something from a Deckly plugin's reader thread. A broken frame or
+    /// rule is a protocol error: noted in plain words in the plugin's log,
+    /// and the plugin restarts with the usual backoff.
+    fn pipe_event(&mut self, id: &str, token: &str, event: pipe::Incoming) {
+        if !self.is_current(id, token) {
+            return;
+        }
+        let registered = self.slots.get(id).is_some_and(|s| s.registered);
+        match event {
+            pipe::Incoming::Message(received) => {
+                if debug() {
+                    self.note(id, &format!("<- {:?}", received.message));
+                }
+                if !registered {
+                    if let Err(e) = pipe::check_ready(&received.message) {
+                        self.note(id, &format!("protocol error: {e}"));
+                        self.crashed(id);
+                        return;
+                    }
+                    let Some(slot) = self.slots.get_mut(id) else {
+                        return;
+                    };
+                    slot.registered = true;
+                    if let Some(p) = slot.pipe.clone() {
+                        lock(&self.shared)
+                            .pipes
+                            .insert(id.to_owned(), (token.to_owned(), p));
+                    }
+                    self.set_status(id, Status::Running);
+                    self.emit(HostEvent::Started(id.to_owned()));
+                    return;
+                }
+                match pipe::command(received) {
+                    Ok(Some(command)) => self.emit(HostEvent::Command {
+                        plugin: id.to_owned(),
+                        command,
+                    }),
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.note(id, &format!("protocol error: {e}"));
+                        self.crashed(id);
+                    }
+                }
+            }
+            pipe::Incoming::Error(e) => {
+                self.note(id, &format!("protocol error: {e}"));
+                self.crashed(id);
+            }
+            pipe::Incoming::Closed => {
+                // The output closes as the process exits; give it a moment
+                // so the exit code can be reported.
+                if let Some(child) = self.slots.get_mut(id).and_then(|s| s.child.as_mut()) {
+                    let deadline = Instant::now() + Duration::from_millis(200);
+                    while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                self.crashed(id);
+            }
+        }
+    }
+
     /// A plugin command, run through the guard when there is one.
     fn guarded(&self, program: OsString, args: Vec<OsString>) -> std::process::Command {
         match &self.config.guard {
@@ -782,13 +1016,21 @@ impl Supervisor {
         if let Some(token) = slot.token.take() {
             self.server.forbid(&token);
         }
-        if let Some(child) = slot.child.take() {
-            end_child(child);
-        }
+        // Dropping the last handle to a Deckly plugin's input closes it once
+        // what is queued is written; the plugin then exits.
+        let piped = slot.pipe.take().is_some();
+        let child = slot.child.take();
         slot.registered = false;
         slot.started = None;
         slot.retry_at = None;
-        lock(&self.shared).live.remove(id);
+        {
+            let mut s = lock(&self.shared);
+            s.live.remove(id);
+            s.pipes.remove(id);
+        }
+        if let Some(child) = child {
+            end_child(child, piped);
+        }
     }
 
     /// A plugin stopped on its own: restart it after a pause that grows
@@ -799,6 +1041,22 @@ impl Supervisor {
             .get_mut(id)
             .and_then(|s| s.child.as_mut())
             .and_then(|c| c.try_wait().ok().flatten());
+        // A Deckly plugin is left to exit on its own in the background, so a
+        // plugin that ignores its closed input cannot hold up the host.
+        let piped = self.slots.get(id).is_some_and(|s| s.pipe.is_some());
+        if piped
+            && let Some(slot) = self.slots.get_mut(id)
+            && let Some(child) = slot.child.take()
+        {
+            slot.pipe = None;
+            lock(&self.shared).pipes.remove(id);
+            let spawned = std::thread::Builder::new()
+                .name("deckly-plugin-stop".into())
+                .spawn(move || end_child(child, true));
+            if let Err(e) = spawned {
+                self.note(id, &format!("cannot stop in the background: {e}"));
+            }
+        }
         self.stop(id);
         let Some(slot) = self.slots.get_mut(id) else {
             return;
@@ -1013,7 +1271,7 @@ impl Supervisor {
     fn close_inspector(&mut self) {
         let open = lock(&self.shared).inspector.take();
         if let Some(child) = self.inspector_child.take() {
-            end_child(child);
+            end_child(child, false);
         }
         if let Some(i) = open {
             self.server.forbid(&i.token);
@@ -1094,9 +1352,11 @@ fn debug() -> bool {
 
 /// Stops a plugin process. A guard or deckly-web gets its pipe closed so it
 /// can stop what it runs first; it is killed if it does not exit in time.
-fn end_child(mut child: Child) {
-    if child.stdin.take().is_some() {
-        let deadline = Instant::now() + Duration::from_secs(3);
+/// `input_closed` is for a Deckly plugin, whose input the host already
+/// closed.
+fn end_child(mut child: Child, input_closed: bool) {
+    if child.stdin.take().is_some() || input_closed {
+        let deadline = Instant::now() + EXIT_GRACE;
         while Instant::now() < deadline {
             if let Ok(Some(_)) = child.try_wait() {
                 return;

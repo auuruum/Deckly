@@ -103,10 +103,18 @@ For Deckly only, in pure Rust, with its own protocol beside the Stream Deck one
 (decided on 2026-11-11). Stream Deck SDK plugins keep running as they do. See
 the [design draft](docs/plugin-sdk.md).
 
-- [ ] `deckly-plugin-protocol`: messages and framing shared by host and SDK.
-- [ ] Deckly plugins in the host: pipes instead of a WebSocket.
-- [ ] `deckly-sdk`: a Rust crate for writing plugins.
-- [ ] Key faces: the plugin describes a key and Deckly draws it.
+- [x] `deckly-plugin-protocol`: messages and framing shared by host and SDK.
+- [x] Deckly plugins in the host: pipes instead of a WebSocket.
+- [x] `deckly-sdk`: a Rust crate for writing plugins. Done: actions, typed
+      settings, titles, states, faces, images, marks, a per-key timer,
+      `--describe` and a test harness. Not yet: plugin-wide shared state and
+      global settings in the SDK's API (the protocol carries them).
+- [x] Key faces: the plugin describes a key and Deckly draws it.
+- [ ] Deckly plugin packages (`.decklyPlugin` archives) through the install
+      path; plain Deckly plugin folders install already.
+- [ ] Faces in the editor without a device: like Stream Deck plugins, a
+      Deckly plugin hears of a key only while a device shows it, so the
+      editor alone shows the action's icon.
 - [ ] Declarative plugin settings: the plugin describes its fields and Deckly
       draws the form in egui, with no HTML or web view.
 - [ ] Host services: a plugin asks Deckly for hotkeys, text, the active window
