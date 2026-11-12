@@ -9,6 +9,7 @@ use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(10);
 
+#[allow(clippy::unwrap_used)] // A test helper.
 fn counter(settings: &Value) -> CounterSettings {
     serde_json::from_value(settings.clone()).unwrap()
 }
