@@ -963,6 +963,7 @@ impl App {
     fn open_plugin_settings(&mut self, plugin: &str) {
         self.plugin_settings = Some(PluginSettings {
             plugin: plugin.to_owned(),
+            version: runtime::lock(&self.state).globals_version,
             settings: plugins::load_global(plugin),
             form: crate::forms::FormState::default(),
         });
@@ -2594,12 +2595,21 @@ impl App {
         let Some(open) = &mut self.plugin_settings else {
             return;
         };
-        let form = runtime::lock(&self.state)
-            .catalog
-            .plugins
-            .iter()
-            .find(|p| p.id == open.plugin)
-            .and_then(|p| Some((p.name.clone(), p.form.clone()?)));
+        let (form, version) = {
+            let s = runtime::lock(&self.state);
+            let form = s
+                .catalog
+                .plugins
+                .iter()
+                .find(|p| p.id == open.plugin)
+                .and_then(|p| Some((p.name.clone(), p.form.clone()?)));
+            (form, s.globals_version)
+        };
+        // The plugin stored settings of its own: show those.
+        if open.version != version {
+            open.settings = plugins::load_global(&open.plugin);
+            open.version = version;
+        }
         let Some((name, form)) = form else {
             self.plugin_settings = None;
             return;
@@ -3977,6 +3987,8 @@ struct PluginView {
 /// The open settings window of a Deckly plugin.
 struct PluginSettings {
     plugin: String,
+    /// `globals_version` when the settings were read.
+    version: u64,
     settings: serde_json::Value,
     form: crate::forms::FormState,
 }

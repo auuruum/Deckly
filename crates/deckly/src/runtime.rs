@@ -51,6 +51,9 @@ pub struct State {
     pub previous: HashMap<String, String>,
     /// Plugins' answers to the editor's choice requests.
     pub choices: crate::forms::Answers,
+    /// Counts the times a plugin stored its global settings, so an open
+    /// settings window reads them again.
+    pub globals_version: u64,
     /// Holds actions back while the computer is locked.
     pub gate: Gate,
     /// Shows profiles by the application in the foreground.
@@ -75,6 +78,7 @@ impl State {
             plugin_keys: HashMap::new(),
             previous: HashMap::new(),
             choices: crate::forms::Answers::default(),
+            globals_version: 0,
             folder_exit: folder_exit::Timers::default(),
         }
     }

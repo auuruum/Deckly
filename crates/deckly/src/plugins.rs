@@ -747,6 +747,8 @@ impl Worker {
                     self.log(plugin, &format!("a secret was not stored: {e}"));
                 }
                 self.save_global(plugin, &settings);
+                runtime::lock(&self.state).globals_version += 1;
+                (self.repaint)();
                 if self
                     .host
                     .inspector()
